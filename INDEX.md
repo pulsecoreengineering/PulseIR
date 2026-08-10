@@ -275,18 +275,73 @@ pulse-ir/
 
 ---
 
-## ⏳ What's Next (v0.2-v1.1)
+## ⏳ What's Next
 
-- [ ] Orthogonal regions (parallel states) — `Region[]` is modelled but only
-      the first region of a composite state is generated
-- [ ] State history support
-- [ ] Entry/exit actions on states (PulseHSM supports them; the IR has no field)
-- [ ] Timeout transitions (PulseHSM's `timeoutMs`/`timeoutNext` are always 0/-1)
+Ordered by what the project is actually *for*: reducing the cognitive load of
+learning a multi-tool ecosystem. PulseIR pays for itself only if it removes the
+incidental complexity of each tool's flavour — not if it becomes one more thing
+to learn on top of them.
+
+**The test to hold this to:** can a student finish a beginner project, including
+debugging it when it breaks, without reading the underlying tool's source? While
+the answer is no, PulseIR is adding load rather than removing it.
+
+### 1. Prove the spine (blocking — do this first)
+
+- [ ] Write the same small project by hand against three PulseCore tools and
+      diff them. Whatever is genuinely common becomes the IR; whatever is not
+      becomes a backend detail. **Do not extend the schema before this.**
+- [ ] Decide from that diff whether the tools share a reactive/event-driven
+      core. If they do, one spine with per-tool backends is right. If they do
+      not, PulseIR stays a state-machine IR and unification moves up a level,
+      to shared project layout and naming conventions.
+
+### 2. Make the ecosystem hooks real
+
+The IR already models devices and wiring, but codegen barely uses it. This is
+the part that generalises beyond PulseHSM.
+
+- [ ] `Resource` codegen — currently produces **nothing at all**
+- [ ] `Component` → driver binding — currently only comments and a sensor struct
+- [ ] A second backend (ESP-IDF), to prove the spine is not PulseHSM-shaped
+- [ ] PulseCore IDE serialization — the long-term goal is that **nobody
+      hand-writes this YAML**; the IR is a serialization format, not an
+      authoring format
+
+### 3. Cheap completions (unblocked, low cost)
+
+PulseHSM already supports both of these; only the IR lacks the fields.
+
+- [ ] Entry/exit actions on states (`addState` takes them; we always pass
+      `nullptr`)
+- [ ] Timeout transitions (`timeoutMs` / `timeoutNext` are always `0` / `-1`)
 - [ ] Dependency graph validation
-- [ ] PulseCore IDE serialization
-- [ ] PulseSim integration
-- [ ] Multi-target codegen (ESP-IDF)
+
+### 4. Blocked — needs a decision or a runtime change
+
+- [ ] **Orthogonal regions.** Not a codegen feature. PulseHSM has a single
+      `int currentState` and one parent chain in `_dispatchEvent`; parallel
+      regions need several simultaneously-active leaves. This requires
+      redesigning the runtime. `Region[]` existing in the IR types makes it
+      look closer than it is.
+- [ ] **State history.** Same constraint — needs runtime support.
+- [ ] **Resolve the `expression:` half-measure.** `boiler.yaml` carries
+      `expression: "temperature >= setpoint"`, but FUNCTION_CONTRACT forbids
+      evaluating it, so codegen can only emit it as a comment. Either commit to
+      a small evaluable expression sublanguage, or drop the field and keep only
+      names. Leaving it as-is invites users to assume it works.
+- [ ] **PulseSim integration.** Blocked on the decision above: a simulator
+      cannot evaluate opaque guards, so today it could simulate structure but
+      never behaviour.
 - [ ] Visual diagram generation
+
+### How to measure progress
+
+Not in generated lines — the boiler example turns 168 lines of YAML into ~199
+lines of scaffolding, which is roughly break-even as pure code generation. The
+metric that matters is **time to first working project on tool N, given the
+student already knows tool 1.** That is testable with real students, and it
+beats any architectural argument.
 
 ---
 
