@@ -18,8 +18,8 @@ C++ Code (PulseHSM runtime)
 pulse-ir/
 ├── src/
 │   ├── model/           # IR types (what a system looks like)
-│   ├── parser/          # YAML → IR (coming next)
-│   ├── codegen/         # IR → C++ (coming next)
+│   ├── parser/          # YAML → IR
+│   ├── codegen/         # IR → C++ (PulseHSM runtime)
 │   └── cli.ts           # CLI entry point
 ├── test/
 └── examples/
@@ -44,20 +44,31 @@ These are **intentionally simple**: just data structures, no validation or logic
 4. **Metadata everywhere**: Future-proof, allows attach arbitrary data
 5. **No behavior logic**: Only structure. Validation happens in the parser.
 
-## Next: Layer 2 - Parser
+## Layer 2: Parser (✓ DONE)
 
-The parser will:
-1. Load YAML
-2. Map it to PulseModel types
-3. Validate (e.g., all event references exist)
-4. Return parsed model or errors with line numbers
+The parser:
+1. Loads YAML
+2. Maps it to PulseModel types
+3. Validates references — unknown events, unknown or ambiguous state paths,
+   duplicate states, malformed guards
+4. Returns a parsed model, or a `ParseError` describing what is wrong
 
-## Next: Layer 3 - Codegen
+## Layer 3: Codegen (✓ DONE)
 
-The codegen will:
-1. Take validated PulseModel
-2. Generate C++ code using PulseHSM library
-3. Output Arduino sketch
+The codegen takes a validated PulseModel and emits an Arduino sketch that
+drives the PulseHSM runtime:
+
+- Sizes `PULSEHSM_MAX_STATES` / `_EVENTS` / `_DEPTH` from the model, above the
+  include so they take effect
+- Registers every state with `addState()`, parents before children
+- Emits one `onEvent` handler per state — PulseHSM's event bubbling makes an
+  inner transition outrank an enclosing one automatically
+- Resolves composite targets down to a leaf before calling `transitionTo()`
+- Generates `SystemContext`, `SystemParameters` and `SystemSensors`
+- Emits guard and action stubs with the signatures in FUNCTION_CONTRACT.md
+
+Guard expressions in the model are **never evaluated** — they are reproduced as
+comments in the stub for you to implement. See SYSTEMCONTEXT.md.
 
 ## Example YAML (Preview)
 

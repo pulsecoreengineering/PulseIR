@@ -14,10 +14,11 @@
 
 ### For Understanding Design
 3. **ARCHITECTURE.md** (500 lines) — Why it's built this way
-4. **FUNCTION_CONTRACT.md** (300 lines) ⭐ **NEW** — Guard/action binding spec
+4. **FUNCTION_CONTRACT.md** (300 lines) ⭐ — Guard/action binding spec
 
 ### For Implementation Details
 5. **INTEGRATION.md** (600 lines) — How codegen uses PulseHSM
+6. **SYSTEMCONTEXT.md** ⭐ **NEW** — How guards/actions receive system state
 
 ### For Project Status
 6. **MILESTONE.md** (200 lines) — What was built, scope, roadmap
@@ -42,13 +43,14 @@
   - Tested ✅
 
 ### Layer 3: Code Generator (IR → C++)
-- **src/codegen/index.ts** (350 lines)
-  - Generate state/event enums
-  - Generate transition table
-  - Generate event dispatch logic
-  - Generate action stubs (user implements)
-  - Uses PulseHSM runtime API
-  - Tested ✅
+- **src/codegen/index.ts**
+  - Sizes `PULSEHSM_MAX_*` macros from the model (emitted before the include)
+  - Registers every state via `addState()`, parents before children
+  - Emits one `onEvent` handler per state; bubbling gives inner-wins precedence
+  - Resolves composite targets to a leaf before `transitionTo()`
+  - Generates `SystemContext` / `SystemParameters` / `SystemSensors`
+  - Generates guard and action stubs with the FUNCTION_CONTRACT signatures
+  - Tested ✅ (compiled, linked and executed — see test/compile.test.ts)
 
 ### CLI & Utils
 - **src/cli.ts** (60 lines) — Command-line interface
@@ -59,15 +61,30 @@
 ## 🧪 Tests & Examples
 
 ### Tests (All Passing ✅)
-- **test/parser.test.ts** (80 lines)
+- **test/parser.test.ts**
   - Validates YAML parsing
   - Tests boiler.yaml example
   - Output: 5 events, 3 states, 5 transitions parsed correctly
 
-- **test/codegen.test.ts** (80 lines)
-  - Validates code generation
-  - Generates 238-line Arduino sketch
-  - Verifies generated C++ is syntactically correct
+- **test/codegen.test.ts**
+  - Smoke test: generates a sketch from boiler.yaml and writes it to dist/
+
+- **test/validation.test.ts**
+  - Parser reference checking: unknown/ambiguous/duplicate states, bad events,
+    wildcard targets, malformed guards, and the `guard: <name>` string form
+
+- **test/compile.test.ts** ⭐
+  - Compiles the generated sketch with `g++ -Wall -Wextra -Werror`, links it
+    against `deps/PulseHSM.cpp`, **runs it**, and asserts the dispatch trace
+  - Catches what a string-comparison test cannot: syntax errors, undefined
+    symbols, and wrong runtime behaviour
+  - Skips itself when no host compiler is available
+
+### Fixtures & Harness
+- **test/fixtures/hierarchy.yaml** — nested entry, inner-vs-outer precedence,
+  multi-action transitions, named guards
+- **test/harness/Arduino.h** — minimal host shim so sketches build with g++
+- **test/harness/serial.cpp** — provides the `Serial` global
 
 ### Examples
 - **examples/boiler.yaml** (180 lines)
@@ -185,6 +202,7 @@ pulse-ir/
 │   ├── QUICKSTART.md                (Tutorial)
 │   ├── ARCHITECTURE.md              (Design)
 │   ├── FUNCTION_CONTRACT.md         (Binding spec) ⭐
+│   ├── SYSTEMCONTEXT.md             (Context struct) ⭐
 │   ├── INTEGRATION.md               (PulseHSM)
 │   ├── MILESTONE.md                 (Status)
 │   ├── BUILD_SUMMARY.txt            (Visual)
@@ -201,8 +219,15 @@ pulse-ir/
 │   └── cli.ts                       (CLI)
 │
 ├── test/
-│   ├── parser.test.ts               (Parser validation)
-│   └── codegen.test.ts              (Codegen validation)
+│   ├── parser.test.ts               (Parser smoke test)
+│   ├── codegen.test.ts              (Codegen smoke test)
+│   ├── validation.test.ts           (Reference validation)
+│   ├── compile.test.ts              (Compile + link + run) ⭐
+│   ├── fixtures/
+│   │   └── hierarchy.yaml           (Dispatch semantics fixture)
+│   └── harness/
+│       ├── Arduino.h                (Host shim)
+│       └── serial.cpp               (Serial global)
 │
 ├── examples/
 │   └── boiler.yaml                  (Full example)
@@ -236,11 +261,15 @@ pulse-ir/
 ## ✅ What's Complete
 
 - [x] Three-layer architecture (Model → Parser → Codegen)
-- [x] YAML parser with validation
-- [x] C++ code generator for Arduino
-- [x] Full documentation (5 guides)
-- [x] Function contract specification
-- [x] Working tests
+- [x] YAML parser with hierarchical reference validation
+- [x] C++ code generator targeting the PulseHSM runtime
+- [x] Hierarchical dispatch: entry into composite states, event bubbling
+- [x] SystemContext / SystemParameters / SystemSensors generation
+- [x] Guard and action stubs matching FUNCTION_CONTRACT.md
+- [x] Multiple actions per transition
+- [x] Wildcard (`source: "*"`) transitions via a synthetic root superstate
+- [x] Full documentation (6 guides)
+- [x] Compile-and-run test coverage
 - [x] Real-world example (boiler system)
 - [x] CLI interface
 
@@ -248,9 +277,11 @@ pulse-ir/
 
 ## ⏳ What's Next (v0.2-v1.1)
 
-- [ ] Orthogonal regions (parallel states)
+- [ ] Orthogonal regions (parallel states) — `Region[]` is modelled but only
+      the first region of a composite state is generated
 - [ ] State history support
-- [ ] Guard expression validation
+- [ ] Entry/exit actions on states (PulseHSM supports them; the IR has no field)
+- [ ] Timeout transitions (PulseHSM's `timeoutMs`/`timeoutNext` are always 0/-1)
 - [ ] Dependency graph validation
 - [ ] PulseCore IDE serialization
 - [ ] PulseSim integration
