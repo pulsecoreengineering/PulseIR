@@ -37,6 +37,11 @@ export class Parser {
   private stateNames: Set<string> = new Set();
   private actionNames: Set<string> = new Set();
 
+  /** Full state paths, e.g. "running/heating" */
+  private statePaths: Set<string> = new Set();
+  /** Leaf name → every full path carrying that name */
+  private statesByLeafName: Map<string, string[]> = new Map();
+
   /**
    * Parse YAML string into PulseModel
    * Throws ParseError if invalid
@@ -90,6 +95,8 @@ export class Parser {
     this.eventNames.clear();
     this.stateNames.clear();
     this.actionNames.clear();
+    this.statePaths.clear();
+    this.statesByLeafName.clear();
 
     // Parse events first (referenced by transitions)
     const events = this.parseEvents(raw.events as Record<string, unknown>[]);
@@ -191,15 +198,22 @@ export class Parser {
 
     // Validate source state exists
     if (source !== '*' && !this.hasState(source)) {
-      throw new ParseError(`Transition references unknown state "${source}"`);
+      throw new ParseError(`Transition source "${source}" ${this.describeBadRef(source)}`);
+    }
+
+    // A wildcard target has no meaning - there is no state to enter.
+    if (target === '*') {
+      throw new ParseError('Transition target cannot be the wildcard "*"');
     }
 
     // Validate target state exists
-    if (target !== '*' && !this.hasState(target)) {
-      throw new ParseError(`Transition references unknown state "${target}"`);
+    if (!this.hasState(target)) {
+      throw new ParseError(`Transition target "${target}" ${this.describeBadRef(target)}`);
     }
 
-    const guard = raw.guard ? this.parseGuard(raw.guard as Record<string, unknown>) : undefined;
+    const guard = raw.guard !== undefined && raw.guard !== null
+      ? this.parseGuard(raw.guard)
+      : undefined;
     const actions = raw.actions ? this.parseActions(raw.actions as Record<string, unknown>[]) : undefined;
 
     return {
@@ -212,11 +226,30 @@ export class Parser {
     };
   }
 
-  private parseGuard(raw: Record<string, unknown>): Guard {
+  private parseGuard(raw: unknown): Guard {
+    // FUNCTION_CONTRACT.md's preferred form is a bare name referencing a
+    // user-written evaluator: `guard: temp_ready`.
+    if (typeof raw === 'string') {
+      return {
+        type: 'custom' as any,
+        evaluator: raw,
+      };
+    }
+
+    const obj = raw as Record<string, unknown>;
+    const type = ((obj.type as string) || 'expression') as any;
+
+    if (type === 'custom' && !obj.evaluator) {
+      throw new ParseError('Guard of type "custom" requires an "evaluator" name');
+    }
+    if (type === 'expression' && !obj.expression) {
+      throw new ParseError('Guard of type "expression" requires an "expression" string');
+    }
+
     return {
-      type: ((raw.type as string) || 'expression') as any,
-      expression: raw.expression as string | undefined,
-      evaluator: raw.evaluator as string | undefined,
+      type,
+      expression: obj.expression as string | undefined,
+      evaluator: obj.evaluator as string | undefined,
     };
   }
 
@@ -276,33 +309,58 @@ export class Parser {
   // =========================================================================
 
   /**
-   * Index all state names (flattened from hierarchy)
+   * Index every state by both its bare name and its full hierarchical path,
+   * so references can be checked exactly rather than by top-level prefix.
    */
-  private indexStateNames(states: State[]): void {
+  private indexStateNames(states: State[], prefix: string = ''): void {
     states.forEach(state => {
+      if (!state.name) {
+        throw new ParseError(`Encountered a state without a name under "${prefix || '<root>'}"`);
+      }
+
+      const path = prefix ? `${prefix}/${state.name}` : state.name;
+      if (this.statePaths.has(path)) {
+        throw new ParseError(`Duplicate state path "${path}"`);
+      }
+
       this.stateNames.add(state.name);
+      this.statePaths.add(path);
+
+      const sameName = this.statesByLeafName.get(state.name) || [];
+      sameName.push(path);
+      this.statesByLeafName.set(state.name, sameName);
+
       if (state.regions) {
         state.regions.forEach(region => {
-          this.indexStateNames(region.states);
+          this.indexStateNames(region.states, path);
         });
       }
     });
   }
 
   /**
-   * Check if a state exists (supports "running/heating" notation)
+   * Check if a state exists. Accepts a full path ("running/heating") or a bare
+   * leaf name ("heating") when that name is unique across the hierarchy.
    */
   private hasState(ref: StateRef): boolean {
     if (ref === '*') return true;
-    
-    const parts = ref.split('/');
-    const topLevel = parts[0];
-    
-    if (!this.stateNames.has(topLevel)) return false;
-    
-    // TODO: For hierarchical refs, validate path exists
-    // This requires walking the state tree, deferred for now
-    return true;
+    if (this.statePaths.has(ref)) return true;
+
+    // A bare name is only a valid reference when it is unambiguous.
+    const candidates = this.statesByLeafName.get(ref);
+    return candidates !== undefined && candidates.length === 1;
+  }
+
+  /**
+   * Explain why a reference failed, so the error points at the real problem
+   * rather than just saying the state is unknown.
+   */
+  private describeBadRef(ref: StateRef): string {
+    const candidates = this.statesByLeafName.get(ref);
+    if (candidates && candidates.length > 1) {
+      return `is ambiguous; it matches ${candidates.join(', ')}. Use a full path.`;
+    }
+    return 'does not exist';
   }
 }
 
