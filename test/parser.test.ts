@@ -48,7 +48,7 @@ try {
 
   console.log('\n--- Transitions (sample) ---');
   project.system.transitions.slice(0, 3).forEach((t: Transition) => {
-    const guard = t.guard ? ` [guard: ${t.guard.expression}]` : '';
+    const guard = t.guard ? ` [guard: ${t.guard.name}]` : '';
     const actions = t.actions?.length ? ` → ${t.actions.length} action(s)` : '';
     console.log(`  ${t.source} + ${t.event} → ${t.target}${guard}${actions}`);
   });

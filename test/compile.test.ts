@@ -223,7 +223,7 @@ test('generated guards and actions match the FUNCTION_CONTRACT signatures', () =
   const sketch = generate(path.join(repoRoot, 'examples/boiler.yaml'));
 
   assert(
-    sketch.includes('bool guard_running_heating_temp_reached(const SystemContext* ctx)'),
+    sketch.includes('bool guard_temp_at_setpoint(const SystemContext* ctx)'),
     'guard stub does not use the contract signature'
   );
   assert(
@@ -239,7 +239,7 @@ test('generated guards and actions match the FUNCTION_CONTRACT signatures', () =
     'SystemParameters was not generated from the model parameters'
   );
   assert(
-    sketch.includes('guard_running_heating_temp_reached(&systemContext)'),
+    sketch.includes('guard_temp_at_setpoint(&systemContext)'),
     'guards are not called with the system context'
   );
   assert(
@@ -247,15 +247,22 @@ test('generated guards and actions match the FUNCTION_CONTRACT signatures', () =
     'actions are not called with the system context'
   );
 
-  // The contract forbids the generator from evaluating YAML expressions: the
-  // expression may only appear as a comment, never as executable code.
-  const expressionLines = sketch
+  // A guard's description is prose for the implementer. It must survive into
+  // the stub, and it must never become code.
+  const intentLines = sketch
     .split('\n')
-    .filter(line => line.includes('temperature >= setpoint'));
-  assert(expressionLines.length > 0, 'guard expression was dropped entirely');
+    .filter(line => line.includes('water temperature has reached the setpoint'));
+  assert(intentLines.length > 0, 'guard description was dropped entirely');
   assert(
-    expressionLines.every(line => line.trimStart().startsWith('//')),
-    'guard expression leaked into generated code instead of staying a comment'
+    intentLines.every(line => line.trimStart().startsWith('//')),
+    'guard description leaked into generated code instead of staying a comment'
+  );
+
+  // The guard name comes from the model verbatim, so hand-written guards port
+  // between targets unchanged.
+  assert(
+    !/guard_running_heating/.test(sketch),
+    'guard name was derived from source/event instead of taken from the model'
   );
 });
 

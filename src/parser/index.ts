@@ -227,29 +227,44 @@ export class Parser {
   }
 
   private parseGuard(raw: unknown): Guard {
-    // FUNCTION_CONTRACT.md's preferred form is a bare name referencing a
-    // user-written evaluator: `guard: temp_ready`.
+    // The canonical form is a bare name referencing a user-written function:
+    //   guard: temp_ready
     if (typeof raw === 'string') {
-      return {
-        type: 'custom' as any,
-        evaluator: raw,
-      };
+      if (!raw.trim()) {
+        throw new ParseError('Guard name cannot be empty');
+      }
+      return { name: raw };
+    }
+
+    if (typeof raw !== 'object') {
+      throw new ParseError(`Guard must be a name or a mapping, got ${typeof raw}`);
     }
 
     const obj = raw as Record<string, unknown>;
-    const type = ((obj.type as string) || 'expression') as any;
 
-    if (type === 'custom' && !obj.evaluator) {
-      throw new ParseError('Guard of type "custom" requires an "evaluator" name');
+    // The old schema carried a C-like condition string. Point at the
+    // replacement rather than silently ignoring it, since a dropped guard
+    // would change behaviour without any visible error.
+    if (obj.expression !== undefined || obj.type !== undefined || obj.evaluator !== undefined) {
+      throw new ParseError(
+        'Guards no longer take "type", "expression" or "evaluator". ' +
+        'A guard is the name of a function you implement in C. Use:\n' +
+        '  guard: my_guard_name\n' +
+        'or, to keep the intent as documentation:\n' +
+        '  guard:\n' +
+        '    name: my_guard_name\n' +
+        '    description: what this checks'
+      );
     }
-    if (type === 'expression' && !obj.expression) {
-      throw new ParseError('Guard of type "expression" requires an "expression" string');
+
+    const name = obj.name;
+    if (typeof name !== 'string' || !name.trim()) {
+      throw new ParseError('Guard requires a "name"');
     }
 
     return {
-      type,
-      expression: obj.expression as string | undefined,
-      evaluator: obj.evaluator as string | undefined,
+      name,
+      description: obj.description as string | undefined,
     };
   }
 

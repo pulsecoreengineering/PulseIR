@@ -139,15 +139,31 @@ test('rejects a duplicate state path', () => {
   expectReject(model(duplicate), 'Duplicate state path', 'duplicate state');
 });
 
-test('rejects an expression guard with no expression', () => {
+test('rejects a guard mapping with no name', () => {
   expectReject(
     model(`${STATES}  transitions:
     - source: idle
       event: GO
       target: heating
-      guard: {type: expression}`),
-    'requires an "expression"',
-    'empty expression guard'
+      guard: {description: something}`),
+    'requires a "name"',
+    'nameless guard'
+  );
+});
+
+test('rejects the retired expression guard form with migration guidance', () => {
+  // Silently ignoring an expression would drop the condition and change
+  // behaviour with no visible error, so this must fail loudly.
+  expectReject(
+    model(`${STATES}  transitions:
+    - source: idle
+      event: GO
+      target: heating
+      guard:
+        type: expression
+        expression: "temperature >= setpoint"`),
+    'guard: my_guard_name',
+    'retired expression guard'
   );
 });
 
@@ -167,7 +183,7 @@ test('accepts an unambiguous bare leaf name', () => {
   );
 });
 
-test('accepts the contract\'s `guard: <name>` string form', () => {
+test('accepts the `guard: <name>` shorthand', () => {
   const project = expectAccept(
     model(`${STATES}  transitions:
     - {source: idle, event: GO, target: heating, guard: temp_ready}`),
@@ -175,11 +191,29 @@ test('accepts the contract\'s `guard: <name>` string form', () => {
   );
 
   const guard = project.system.transitions[0].guard;
-  if (guard?.evaluator !== 'temp_ready') {
-    throw new Error(`expected evaluator "temp_ready", got ${JSON.stringify(guard)}`);
+  if (guard?.name !== 'temp_ready') {
+    throw new Error(`expected name "temp_ready", got ${JSON.stringify(guard)}`);
   }
-  if (String(guard.type) !== 'custom') {
-    throw new Error(`expected guard type "custom", got "${guard.type}"`);
+});
+
+test('accepts the guard mapping form with a description', () => {
+  const project = expectAccept(
+    model(`${STATES}  transitions:
+    - source: idle
+      event: GO
+      target: heating
+      guard:
+        name: temp_ready
+        description: temperature has reached the setpoint`),
+    'documented guard'
+  );
+
+  const guard = project.system.transitions[0].guard;
+  if (guard?.name !== 'temp_ready') {
+    throw new Error(`expected name "temp_ready", got ${JSON.stringify(guard)}`);
+  }
+  if (guard.description !== 'temperature has reached the setpoint') {
+    throw new Error(`description was not preserved: ${JSON.stringify(guard)}`);
   }
 });
 

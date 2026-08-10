@@ -24,11 +24,6 @@ export enum EventSource {
   CUSTOM = "custom",          // Plugin-defined
 }
 
-export enum GuardType {
-  EXPRESSION = "expression",  // C-like expression
-  CUSTOM = "custom",          // Plugin-defined evaluator
-}
-
 export enum ActionType {
   DRIVER = "driver",          // Call a driver/plugin
   BUILTIN = "builtin",        // Reserved for future built-in actions
@@ -95,10 +90,19 @@ export interface Parameter {
 // GUARDS - Conditions on transitions
 // ============================================================================
 
+/**
+ * A guard is a *reference* to a user-written function, never a condition the
+ * IR can evaluate.
+ *
+ * There is deliberately no expression field. Anything evaluable here would
+ * grow into a programming language - precedence, scoping, type rules, error
+ * messages - with no debugger and no IDE support, and it would be one more
+ * dialect for a learner to pick up on top of the C they already need. The
+ * condition lives in C, where it can be stepped through and type-checked.
+ */
 export interface Guard {
-  type: GuardType;
-  expression?: string;        // For type == EXPRESSION
-  evaluator?: string;         // For type == CUSTOM (plugin name)
+  name: string;               // user implements bool guard_<name>(const SystemContext*)
+  description?: string;       // human-readable intent, copied into the stub. Never parsed.
   metadata?: Metadata;
 }
 

@@ -17,9 +17,9 @@
  *   bool guard_<name>(const SystemContext* ctx)
  *   void action_<name>(SystemContext* ctx)
  *
- * The generator emits *shape* only. It never evaluates a guard expression or
- * an action parameter — those are reproduced verbatim as comments in the stub
- * bodies for the user to implement.
+ * The generator emits *shape* only. Guards and actions are names of functions
+ * the user writes in C; any description attached to them is reproduced as a
+ * comment in the stub body, never as code.
  */
 
 import type {
@@ -52,9 +52,8 @@ interface FlatState {
 }
 
 interface GuardBinding {
-  fnName: string;       // "guard_temp_ready"
-  expression?: string;  // documented in the stub, never evaluated
-  evaluator?: string;
+  fnName: string;        // "guard_temp_ready"
+  description?: string;  // human intent, copied into the stub as a comment
 }
 
 /** Name of the synthetic superstate that owns wildcard ("*") transitions. */
@@ -599,16 +598,14 @@ void loop() {
 
     const implementations = Array.from(this.guardStubs.entries())
       .map(([fnName, binding]) => {
-        // The expression is documentation only - the contract forbids the
-        // generator from evaluating it.
-        const intent = binding.expression
-          ? `  // Intent (from the model, NOT evaluated by codegen):\n  //   ${binding.expression}`
-          : `  // Custom evaluator: ${binding.evaluator}`;
+        // The description is prose from the model, carried through purely as
+        // documentation for whoever implements this.
+        const intent = binding.description
+          ? `  // Intent: ${binding.description}\n  //\n`
+          : '';
 
         return `bool ${fnName}(const SystemContext* ctx) {
-${intent}
-  //
-  // TODO: Implement this check using ctx->sensors, ctx->parameters,
+${intent}  // TODO: Implement this check using ctx->sensors, ctx->parameters,
   //       ctx->currentState and ctx->eventData.
   (void)ctx;
   return false;
@@ -781,40 +778,26 @@ ${implementations.join('\n\n')}`;
   }
 
   private indexGuards(): void {
-    const used = new Set<string>();
-
     this.project.system.transitions.forEach((t, idx) => {
       if (!t.guard) return;
 
-      // A named evaluator keeps its name so the same user-written function is
-      // reusable across targets. An anonymous expression guard gets a stable
-      // name derived from where it appears.
-      let base: string;
-      if (t.guard.evaluator) {
-        base = this.sanitize(t.guard.evaluator);
-      } else {
-        const src = t.source === '*' ? 'any' : this.sanitize(t.source);
-        base = `${src}_${this.sanitize(t.event)}`;
+      if (!t.guard.name) {
+        throw new CodegenError(`Transition ${idx} has a guard without a name`);
       }
 
-      let fnName = `guard_${base}`;
-      if (!t.guard.evaluator) {
-        // Two anonymous guards on the same source/event pair would collide.
-        let suffix = 2;
-        while (used.has(fnName)) {
-          fnName = `guard_${base}_${suffix++}`;
-        }
-      }
-      used.add(fnName);
-
-      const binding: GuardBinding = {
-        fnName,
-        expression: t.guard.expression,
-        evaluator: t.guard.evaluator,
-      };
+      // The guard's name is the user's, unchanged, so the same hand-written
+      // function ports across targets. Two transitions naming the same guard
+      // share one stub deliberately.
+      const fnName = `guard_${this.sanitize(t.guard.name)}`;
+      const binding: GuardBinding = { fnName, description: t.guard.description };
 
       this.guards.set(idx, binding);
-      if (!this.guardStubs.has(fnName)) {
+
+      const existing = this.guardStubs.get(fnName);
+      if (!existing) {
+        this.guardStubs.set(fnName, binding);
+      } else if (!existing.description && binding.description) {
+        // Keep whichever mention bothered to document itself.
         this.guardStubs.set(fnName, binding);
       }
     });

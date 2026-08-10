@@ -128,7 +128,7 @@ pulse-ir/
 ### ✅ In This Release
 - Hierarchical states (COMPOSITE type)
 - Wildcard transitions (emergency stops from any state)
-- Guards with conditional expressions
+- Guards (named functions the user implements)
 - Actions with parameters
 - Component model (sensors, actuators, services)
 - Resource model (GPIO, UART, I2C, SPI, CAN, MQTT, ONEWIRE, CUSTOM)
@@ -140,7 +140,7 @@ pulse-ir/
 - Orthogonal regions (parallel, concurrent states)
 - State history (returning to previous state)
 - Dependency graph validation
-- Guard expression validation (assumed correct)
+- Guard expression validation (out of scope - guards are names, not conditions)
 - Component driver plugin system
 - PulseSim integration (simulator import)
 - PulseCore IDE serialization (visual design → YAML)
@@ -208,7 +208,7 @@ system:
 In the generated .ino, fill in action logic:
 
 ```cpp
-void action_start_pump() {
+void action_start_pump(SystemContext* ctx) {
   digitalWrite(PUMP_PIN, HIGH);  // User adds this
 }
 ```
@@ -269,7 +269,7 @@ Output:
 ### v0.2 (September 2026)
 - [ ] Orthogonal regions (parallel states)
 - [ ] State history support
-- [ ] Guard expression validation
+- [x] Guard expressions removed from the schema
 
 ### v1.0 (October 2026)
 - [ ] Dependency graph validation

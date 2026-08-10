@@ -29,7 +29,7 @@ pulse-ir/
 
 The `model/types.ts` defines the complete schema:
 
-- **Enums**: StateType, EventSource, GuardType, ActionType, ComponentClass, InterfaceType
+- **Enums**: StateType, EventSource, ActionType, ComponentClass, InterfaceType
 - **Core HSM**: State, Event, Transition, Guard, Action, Region
 - **System**: Component, Resource, Parameter
 - **Top-level**: PulseProject, PulseSystem
@@ -67,8 +67,9 @@ drives the PulseHSM runtime:
 - Generates `SystemContext`, `SystemParameters` and `SystemSensors`
 - Emits guard and action stubs with the signatures in FUNCTION_CONTRACT.md
 
-Guard expressions in the model are **never evaluated** — they are reproduced as
-comments in the stub for you to implement. See SYSTEMCONTEXT.md.
+A guard is a **name**, not a condition — the model has no expression field at
+all. Any `description` you attach becomes a comment in the stub for whoever
+implements it. See FUNCTION_CONTRACT.md §6 and SYSTEMCONTEXT.md.
 
 ## Example YAML (Preview)
 
@@ -104,9 +105,7 @@ system:
     
     - source: running/heating
       event: TEMP_REACHED
-      guard:
-        type: expression
-        expression: "temperature >= setpoint"
+      guard: temp_at_setpoint
       target: running/maintaining
 ```
 

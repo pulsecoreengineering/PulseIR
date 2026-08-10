@@ -30,7 +30,7 @@
 
 ### Layer 1: Intermediate Representation
 - **src/model/types.ts** (400 lines)
-  - 8 enums (StateType, EventSource, GuardType, ActionType, ComponentClass, InterfaceType)
+  - 5 enums (StateType, EventSource, ActionType, ComponentClass, InterfaceType)
   - 12 interfaces (State, Event, Transition, Guard, Action, Component, Resource, Parameter, Region, PulseSystem, PulseProject)
   - Full type system for embedded systems automation
 
@@ -307,6 +307,13 @@ the part that generalises beyond PulseHSM.
 - [ ] PulseCore IDE serialization — the long-term goal is that **nobody
       hand-writes this YAML**; the IR is a serialization format, not an
       authoring format
+- [ ] PulseSim. Not blocked by guards being opaque — it never needs to evaluate
+      them. Two routes, both open: *interactive stepping*, where the simulator
+      asks whether a guard holds instead of computing it (better for teaching
+      bubbling and entry/exit order anyway), or *running the real guards on the
+      host*. The second is already half-built: `test/harness/` compiles a
+      generated sketch against an Arduino shim and executes it. Add scripted
+      event injection and a trace format and that harness is PulseSim.
 
 ### 3. Cheap completions (unblocked, low cost)
 
@@ -325,14 +332,6 @@ PulseHSM already supports both of these; only the IR lacks the fields.
       redesigning the runtime. `Region[]` existing in the IR types makes it
       look closer than it is.
 - [ ] **State history.** Same constraint — needs runtime support.
-- [ ] **Resolve the `expression:` half-measure.** `boiler.yaml` carries
-      `expression: "temperature >= setpoint"`, but FUNCTION_CONTRACT forbids
-      evaluating it, so codegen can only emit it as a comment. Either commit to
-      a small evaluable expression sublanguage, or drop the field and keep only
-      names. Leaving it as-is invites users to assume it works.
-- [ ] **PulseSim integration.** Blocked on the decision above: a simulator
-      cannot evaluate opaque guards, so today it could simulate structure but
-      never behaviour.
 - [ ] Visual diagram generation
 
 ### How to measure progress
@@ -348,7 +347,9 @@ beats any architectural argument.
 ## 🎯 Key Decisions
 
 1. **Binding spec first** — FUNCTION_CONTRACT.md defines guard/action contract across all targets
-2. **YAML is never a language** — No expressions, no logic, only names
+2. **YAML is never a language** — No expressions, no logic, only names. The
+   schema has no expression field and the parser rejects the retired one, so
+   this is enforced rather than merely intended (FUNCTION_CONTRACT.md §6)
 3. **Platform-agnostic IR** — Same model, different scaffolding per target
 4. **Validation early** — Parser catches typos, codegen assumes valid input
 5. **Generate shape, not behavior** — Codegen produces stubs, user implements logic
