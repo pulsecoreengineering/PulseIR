@@ -61,6 +61,17 @@
   - Device and dashboard derive their topics from one model, so a renamed
     sensor cannot silently blank a chart
 
+### Consumer 3: Web Editor (IR → live browser preview)
+- **web/main.ts** ⭐
+  - Runs the real Parser / Codegen / TopicEmitter as a browser bundle, so the
+    editor cannot drift from the CLI
+  - Live panes: generated sketch, MQTT manifest, and a structure view that
+    shows composite-state descent and inner-vs-outer transition precedence
+  - Errors are reported in place; panes keep the last valid output, labelled
+  - Entirely offline: no server, no upload, no CDN
+- **src/analysis/states.ts** — shared hierarchy walk (leaves, entry descent,
+  path resolution), used by both the topic emitter and the editor
+
 ### CLI & Utils
 - **src/cli.ts** — Command-line interface (`--output`, `--topics`, `--namespace`)
 - **src/model/index.ts** — Re-export all types
@@ -81,6 +92,14 @@
 - **test/validation.test.ts**
   - Parser reference checking: unknown/ambiguous/duplicate states, bad events,
     wildcard targets, malformed guards, and the `guard: <name>` string form
+
+- **test/analysis.test.ts**
+  - Hierarchy walk: pre-order flattening, initial-child qualification, entry
+    descent through nested composites, ambiguous-name refusal
+
+- **test/web.test.ts**
+  - Fails if the committed bundle or the baked examples go stale, and if the
+    page ever references an external resource
 
 - **test/topics.test.ts**
   - Topic shape, parameter metadata, wildcard-safe segments, and that only
@@ -183,6 +202,9 @@ node dist/src/cli.js examples/boiler.yaml --output boiler.ino
 # Generate the MQTT topic manifest for PulseDash
 node dist/src/cli.js examples/boiler.yaml --topics topics.json --namespace pulsecompiler
 
+# Web editor (or just open web/index.html)
+npm run web
+
 # View generated code
 cat boiler.ino
 ```
@@ -234,13 +256,27 @@ pulse-ir/
 │   │   └── index.ts                 (IR → C++)
 │   ├── emit/
 │   │   └── topics.ts                (IR → MQTT manifest) ⭐
+│   ├── analysis/
+│   │   └── states.ts                (Shared hierarchy walk)
 │   └── cli.ts                       (CLI)
+│
+├── web/                             (Browser editor) ⭐
+│   ├── index.html                   (UI)
+│   ├── main.ts                      (Glue - runs the real pipeline)
+│   ├── examples.ts                  (Generated from the models on disk)
+│   └── app.js                       (Generated bundle, committed)
+│
+├── scripts/
+│   ├── build-examples.mjs           (Bakes models into the editor)
+│   └── serve.mjs                    (Static server)
 │
 ├── test/
 │   ├── parser.test.ts               (Parser smoke test)
 │   ├── codegen.test.ts              (Codegen smoke test)
 │   ├── validation.test.ts           (Reference validation)
 │   ├── topics.test.ts               (MQTT manifest)
+│   ├── analysis.test.ts             (Hierarchy walk)
+│   ├── web.test.ts                  (Editor build freshness)
 │   ├── compile.test.ts              (Compile + link + run) ⭐
 │   ├── fixtures/
 │   │   └── hierarchy.yaml           (Dispatch semantics fixture)
@@ -326,8 +362,13 @@ the part that generalises beyond PulseHSM.
 - [ ] `Resource` codegen — currently produces **nothing at all**
 - [ ] `Component` → driver binding — currently only comments and a sensor struct
 - [ ] A second backend (ESP-IDF), to prove the spine is not PulseHSM-shaped
-- [ ] PulseCore IDE serialization — the long-term goal is that **nobody
-      hand-writes this YAML**; the IR is a serialization format, not an
+- [x] **Web editor** (`web/`) — live YAML → sketch / topics / structure, running
+      the real pipeline in the browser. First step toward the IR not being
+      hand-authored.
+- [ ] Structured editing in the browser (add a state or transition through the
+      UI rather than by typing YAML) — the next step toward **nobody
+      hand-writing this YAML**
+- [ ] PulseCore IDE serialization — the IR is a serialization format, not an
       authoring format
 - [ ] PulseSim. Not blocked by guards being opaque — it never needs to evaluate
       them. Two routes, both open: *interactive stepping*, where the simulator

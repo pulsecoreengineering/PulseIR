@@ -5,7 +5,10 @@
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "npm run examples && tsc",
+    "examples": "node scripts/build-examples.mjs",
+    "build:web": "npm run build && esbuild dist/web/main.js --bundle --format=iife --outfile=web/app.js --log-level=warning",
+    "web": "npm run build:web && node scripts/serve.mjs",
     "dev": "tsc --watch",
     "test": "node --test dist/test/**/*.test.js",
     "cli": "node dist/src/cli.js"
@@ -16,6 +19,8 @@
   "devDependencies": {
     "@types/js-yaml": "^4.0.5",
     "@types/node": "^20.0.0",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.62.1",
     "typescript": "^5.0.0"
   }
 }

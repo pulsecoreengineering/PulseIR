@@ -23,7 +23,8 @@
  * firmware substitutes a per-device id at boot.
  */
 
-import type { PulseProject, State } from '../model/index.js';
+import type { PulseProject } from '../model/index.js';
+import { leafPaths } from '../analysis/states.js';
 
 export class TopicError extends Error {
   constructor(message: string) {
@@ -123,7 +124,7 @@ export class TopicEmitter {
     // The machine only ever rests in a leaf state, so those are the only
     // values this topic can carry. A dashboard can drive an alert indicator
     // off it (e.g. value == "fault") without a separate topic.
-    const leaves = this.leafPaths(project.system.states);
+    const leaves = leafPaths(project.system.states);
     if (leaves.length > 0) {
       topics.push({
         topic: `${prefix}/state`,
@@ -177,24 +178,6 @@ export class TopicEmitter {
   }
 
   // =========================================================================
-
-  /** Paths of states with no children - the only states the machine rests in. */
-  private leafPaths(states: State[], prefix = ''): string[] {
-    const paths: string[] = [];
-
-    for (const state of states) {
-      const path = prefix ? `${prefix}/${state.name}` : state.name;
-      const children = (state.regions || []).flatMap(r => r.states);
-
-      if (children.length === 0) {
-        paths.push(path);
-      } else {
-        paths.push(...this.leafPaths(children, path));
-      }
-    }
-
-    return paths;
-  }
 
   private valueType(type: string): SubscribeTopic['valueType'] {
     switch (type) {

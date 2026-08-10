@@ -109,11 +109,32 @@ system:
       target: running/maintaining
 ```
 
+## Web Editor
+
+A browser editor with live output: edit the model on the left, watch the
+generated sketch, the MQTT topic manifest and the state structure update as you
+type.
+
+```bash
+npm run web          # build the bundle and serve on :8080
+```
+
+`web/app.js` is committed, so after cloning you can also just open
+`web/index.html` in a browser — no Node, no install, no network. Everything
+runs in the page; nothing is uploaded.
+
+The editor imports the **same** `Parser`, `Codegen` and `TopicEmitter` the CLI
+uses, compiled to a bundle. It cannot drift from what `pulse-ir` writes to disk.
+
+Re-run `npm run build:web` after changing anything under `src/` or `examples/`;
+`npm test` fails if the committed bundle or baked examples go stale.
+
 ## Development
 
 ```bash
 npm install
 npm run build
 npm run test
-npm run cli -- examples/boiler.yaml --output boiler.cpp
+npm run cli -- examples/boiler.yaml --output boiler.ino
+npm run cli -- examples/boiler.yaml --topics topics.json
 ```
