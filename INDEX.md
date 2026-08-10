@@ -52,8 +52,17 @@
   - Generates guard and action stubs with the FUNCTION_CONTRACT signatures
   - Tested ✅ (compiled, linked and executed — see test/compile.test.ts)
 
+### Consumer 2: MQTT Topic Manifest (IR → JSON)
+- **src/emit/topics.ts** ⭐
+  - The first consumer of the IR that is **not** a code generator
+  - Sensors → publish topics; parameters → setpoint topics carrying type,
+    unit, default and range; leaf states → a `state` topic
+  - Only events declared `source: mqtt` are exposed as remote commands
+  - Device and dashboard derive their topics from one model, so a renamed
+    sensor cannot silently blank a chart
+
 ### CLI & Utils
-- **src/cli.ts** (60 lines) — Command-line interface
+- **src/cli.ts** — Command-line interface (`--output`, `--topics`, `--namespace`)
 - **src/model/index.ts** — Re-export all types
 
 ---
@@ -72,6 +81,10 @@
 - **test/validation.test.ts**
   - Parser reference checking: unknown/ambiguous/duplicate states, bad events,
     wildcard targets, malformed guards, and the `guard: <name>` string form
+
+- **test/topics.test.ts**
+  - Topic shape, parameter metadata, wildcard-safe segments, and that only
+    `source: mqtt` events become remotely triggerable commands
 
 - **test/compile.test.ts** ⭐
   - Compiles the generated sketch with `g++ -Wall -Wextra -Werror`, links it
@@ -167,8 +180,11 @@ npm run test
 # Generate code
 node dist/src/cli.js examples/boiler.yaml --output boiler.ino
 
+# Generate the MQTT topic manifest for PulseDash
+node dist/src/cli.js examples/boiler.yaml --topics topics.json --namespace pulsecompiler
+
 # View generated code
-cat /tmp/boiler_generated.ino
+cat boiler.ino
 ```
 
 ---
@@ -216,12 +232,15 @@ pulse-ir/
 │   │   └── index.ts                 (YAML → IR)
 │   ├── codegen/
 │   │   └── index.ts                 (IR → C++)
+│   ├── emit/
+│   │   └── topics.ts                (IR → MQTT manifest) ⭐
 │   └── cli.ts                       (CLI)
 │
 ├── test/
 │   ├── parser.test.ts               (Parser smoke test)
 │   ├── codegen.test.ts              (Codegen smoke test)
 │   ├── validation.test.ts           (Reference validation)
+│   ├── topics.test.ts               (MQTT manifest)
 │   ├── compile.test.ts              (Compile + link + run) ⭐
 │   ├── fixtures/
 │   │   └── hierarchy.yaml           (Dispatch semantics fixture)
@@ -301,6 +320,9 @@ the answer is no, PulseIR is adding load rather than removing it.
 The IR already models devices and wiring, but codegen barely uses it. This is
 the part that generalises beyond PulseHSM.
 
+- [x] **MQTT topic manifest** (`src/emit/topics.ts`) — proves the IR has a
+      non-C++ consumer. Next: emit the matching publish/subscribe wiring into
+      the firmware, so both sides come from the same model.
 - [ ] `Resource` codegen — currently produces **nothing at all**
 - [ ] `Component` → driver binding — currently only comments and a sensor struct
 - [ ] A second backend (ESP-IDF), to prove the spine is not PulseHSM-shaped
