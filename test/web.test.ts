@@ -68,6 +68,24 @@ test('baked examples are the real files, byte for byte', () => {
   );
 });
 
+test('multi-file examples are baked with every file they include', () => {
+  const module = read('web/examples.ts');
+  const dir = path.join(repoRoot, 'examples/greenhouse');
+
+  // The editor resolves includes between open buffers, so every file the
+  // model references has to be present or the example cannot load.
+  for (const name of fs.readdirSync(dir).filter(f => f.endsWith('.yaml'))) {
+    const contents = fs.readFileSync(path.join(dir, name), 'utf8');
+    assert(module.includes(JSON.stringify(name)), `greenhouse example is missing ${name}`);
+    assert(module.includes(JSON.stringify(contents)), `${name} in the editor differs from disk`);
+  }
+
+  assert(
+    module.includes('entry: "greenhouse.yaml"'),
+    'greenhouse example does not name its entry file'
+  );
+});
+
 test('the committed bundle exists and carries the current pipeline', () => {
   const bundlePath = path.join(repoRoot, 'web/app.js');
   assert(fs.existsSync(bundlePath), 'web/app.js is missing - run `npm run build:web`');
@@ -76,7 +94,13 @@ test('the committed bundle exists and carries the current pipeline', () => {
   assert(bundle.length > 50_000, `bundle looks truncated (${bundle.length} bytes)`);
 
   // Markers from each stage the editor is supposed to run.
-  for (const marker of ['PULSEHSM_MAX_STATES', 'pulseir/topics@1', 'SystemContext']) {
+  for (const marker of [
+    'PULSEHSM_MAX_STATES',
+    'pulseir/topics@1',
+    'pulseir/libraries@1',
+    'SystemContext',
+    'Include cycle',        // the multi-file loader is bundled
+  ]) {
     assert(bundle.includes(marker), `bundle is stale: no sign of "${marker}"`);
   }
 

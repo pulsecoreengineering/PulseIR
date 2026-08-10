@@ -187,8 +187,14 @@ listing them breaks a build).
 ## Web Editor
 
 A browser editor with live output: edit the model on the left, watch the
-generated sketch, the MQTT topic manifest and the state structure update as you
-type.
+generated sketch, the MQTT topic manifest, the library manifest and the state
+structure update as you type.
+
+**Multi-file models work here too.** Each file is a tab, and the open buffers
+act as the filesystem, so `include` resolves between tabs exactly as it does on
+disk. The entry file — the only one declaring `project` — is marked ▶; use
+"+ File" to add one, "Set entry" to parse from a different file, double-click a
+tab to rename, and × to delete. Everything persists across a reload.
 
 ```bash
 npm run web          # build the bundle and serve on :8080

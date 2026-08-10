@@ -79,8 +79,11 @@
 - **web/main.ts** ⭐
   - Runs the real Parser / Codegen / TopicEmitter as a browser bundle, so the
     editor cannot drift from the CLI
-  - Live panes: generated sketch, MQTT manifest, and a structure view that
-    shows composite-state descent and inner-vs-outer transition precedence
+  - Live panes: generated sketch, MQTT manifest, library manifest, and a
+    structure view showing composite-state descent, inner-vs-outer transition
+    precedence, and declared interfaces
+  - Multi-file models: one tab per file, with the open buffers acting as the
+    filesystem via MemoryResolver, so `include` resolves between tabs
   - Errors are reported in place; panes keep the last valid output, labelled
   - Entirely offline: no server, no upload, no CDN
 - **src/analysis/states.ts** — shared hierarchy walk (leaves, entry descent,
@@ -385,8 +388,8 @@ the part that generalises beyond PulseHSM.
 - [ ] Emit the MQTT publish/subscribe wiring into the firmware, so the device
       side of the topic map stops being hand-written
 - [ ] `Component` → driver binding — still only comments and a sensor struct
-- [ ] Multi-file support in the web editor (the parser is ready; the editor
-      has no resolver, so `include` there fails with a clear message)
+- [x] Multi-file support in the web editor — file tabs backed by a
+      MemoryResolver over the open buffers
 - [ ] A second backend (ESP-IDF), to prove the spine is not PulseHSM-shaped
 - [x] **Web editor** (`web/`) — live YAML → sketch / topics / structure, running
       the real pipeline in the browser. First step toward the IR not being

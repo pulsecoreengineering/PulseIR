@@ -3532,6 +3532,43 @@
     }
   };
 
+  // dist/src/parser/resolver.js
+  var MemoryResolver = class {
+    constructor(files) {
+      this.files = files;
+    }
+    resolve(ref, from) {
+      if (ref.startsWith("/") || !from)
+        return normalize(ref);
+      const dir = from.includes("/") ? from.slice(0, from.lastIndexOf("/")) : "";
+      return normalize(dir ? `${dir}/${ref}` : ref);
+    }
+    read(id) {
+      const content = this.files[id];
+      if (content === void 0) {
+        throw new Error(`no such file "${id}"`);
+      }
+      return content;
+    }
+  };
+  function normalize(input) {
+    const absolute = input.startsWith("/");
+    const parts = [];
+    for (const segment of input.split("/")) {
+      if (!segment || segment === ".")
+        continue;
+      if (segment === "..") {
+        if (parts.length && parts[parts.length - 1] !== "..")
+          parts.pop();
+        else if (!absolute)
+          parts.push("..");
+        continue;
+      }
+      parts.push(segment);
+    }
+    return (absolute ? "/" : "") + parts.join("/");
+  }
+
   // dist/src/codegen/interfaces.js
   var SECRET_KEY = /(pass|password|secret|token|psk|credential|apikey|api_key)/i;
   var BUILTIN = (name, include, reason) => ({ name, include, source: "builtin", reason });
@@ -4713,11 +4750,92 @@ ${implementations.join("\n\n")}`;
     }
   };
 
+  // dist/src/emit/libraries.js
+  var LibraryEmitter = class {
+    constructor() {
+      this.backend = new InterfaceBackend();
+    }
+    emit(project) {
+      const entries = /* @__PURE__ */ new Map();
+      for (const resource of project.system.resources || []) {
+        const emission = this.backend.emit(resource, resource.name.toUpperCase());
+        for (const library of emission.libraries) {
+          if (entries.has(library.name))
+            continue;
+          entries.set(library.name, {
+            name: library.name,
+            include: library.include,
+            source: library.source,
+            reason: `required by ${resource.name} (${resource.interface})`,
+            implied: true
+          });
+        }
+      }
+      for (const library of project.system.libraries || []) {
+        entries.set(library.name, {
+          name: library.name,
+          include: library.include || `${library.name}.h`,
+          source: library.source || "registry",
+          ...library.version ? { version: library.version } : {},
+          ...library.url ? { url: library.url } : {},
+          reason: library.description || "declared in the model",
+          implied: false
+        });
+      }
+      const libraries = Array.from(entries.values()).sort((a, b) => a.name.localeCompare(b.name));
+      return {
+        schema: "pulseir/libraries@1",
+        project: project.name,
+        version: String(project.version),
+        libraries,
+        platformio: libraries.filter(needsInstalling).map(toLibDep)
+      };
+    }
+    toJSON(project) {
+      return JSON.stringify(this.emit(project), null, 2) + "\n";
+    }
+  };
+  function needsInstalling(entry) {
+    return entry.source !== "builtin";
+  }
+  function toLibDep(entry) {
+    if (entry.source === "git" && entry.url)
+      return entry.url;
+    if (entry.source === "local" && entry.url)
+      return `file://${entry.url}`;
+    return entry.version ? `${entry.name}@${entry.version}` : entry.name;
+  }
+
   // dist/web/examples.js
   var EXAMPLES = {
-    "starter \u2014 a two-state blinker": '# A minimal model. Edit anything and the panes update as you type.\nproject:\n  name: blinker\n  version: "1.0"\n\nsystem:\n  name: blinker\n\n  events:\n    - name: PRESS\n      source: external\n\n  states:\n    - name: off\n      type: simple\n    - name: on\n      type: simple\n\n  transitions:\n    - source: off\n      event: PRESS\n      target: on\n      actions:\n        - led_on\n\n    - source: on\n      event: PRESS\n      target: off\n      actions:\n        - led_off\n\n  components:\n    - name: led\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO2\n\n  parameters:\n    - name: blink_ms\n      type: int\n      default: 500\n      unit: ms\n      min: 50\n      max: 5000\n',
-    "boiler \u2014 hierarchical states, guards, wildcard stop": 'project:\n  name: boiler_control\n  version: 1.0\n  description: Simple boiler temperature control system\n\nsystem:\n  name: boiler_system\n  description: Controls heating, cooling, and monitoring\n\n  # Events the system responds to\n  events:\n    - name: START\n      source: external\n      description: User presses start button\n\n    - name: STOP\n      source: external\n      description: User presses stop button\n\n    - name: TEMP_REACHED\n      source: sensor\n      description: Temperature sensor indicates setpoint reached\n\n    - name: OVER_TEMP\n      source: sensor\n      description: Temperature exceeds safety limit\n\n    - name: EMERGENCY_STOP\n      source: external\n      description: Emergency stop button pressed\n\n  # States the system can be in\n  states:\n    - name: idle\n      type: simple\n      description: System is off\n\n    - name: running\n      type: composite\n      initial: heating\n      description: System is actively heating/cooling\n      regions:\n        - initial: heating\n          states:\n            - name: heating\n              type: simple\n            - name: maintaining\n              type: simple\n            - name: cooling\n              type: simple\n\n    - name: fault\n      type: simple\n      description: System in fault state\n\n  # Transitions between states\n  transitions:\n    # Idle -> Running\n    - source: idle\n      event: START\n      target: running\n      actions:\n        - start_pump\n      description: Start the system\n\n    # Running -> Idle\n    - source: running\n      event: STOP\n      target: idle\n      actions:\n        - stop_pump\n      description: Stop the system\n\n    # Heating -> Maintaining\n    - source: running/heating\n      event: TEMP_REACHED\n      guard:\n        name: temp_at_setpoint\n        description: water temperature has reached the setpoint\n      target: running/maintaining\n      actions:\n        - reduce_heat\n      description: Temperature reached, switch to maintaining\n\n    # Maintaining -> Cooling (if temp overshoots)\n    - source: running/maintaining\n      event: OVER_TEMP\n      guard:\n        name: over_safe_temp\n        description: temperature has exceeded the safety limit\n      target: running/cooling\n      actions:\n        - activate_cooling\n      description: Temperature too high, cool down\n\n    # Emergency stop from anywhere\n    - source: "*"\n      event: EMERGENCY_STOP\n      target: fault\n      actions:\n        - shutdown_all\n      description: Emergency stop overrides everything\n\n  # Actions that can be triggered\n  actions:\n    start_pump:\n      type: driver\n      driver: gpio_control\n      params:\n        pin: PUMP\n        value: HIGH\n\n    stop_pump:\n      type: driver\n      driver: gpio_control\n      params:\n        pin: PUMP\n        value: LOW\n\n    reduce_heat:\n      type: driver\n      driver: pwm_control\n      params:\n        pin: HEATER\n        value: 25\n\n    activate_cooling:\n      type: driver\n      driver: gpio_control\n      params:\n        pin: COOLING_FAN\n        value: HIGH\n\n    shutdown_all:\n      type: driver\n      driver: shutdown\n      params:\n        all: true\n\n  # Components in the system\n  components:\n    - name: temperature_sensor\n      class: sensor\n      driver: ds18b20\n      config:\n        interface: onewire\n        pin: GPIO4\n      description: Water temperature sensor\n\n    - name: pump\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO25\n      description: Main circulation pump\n\n    - name: heater\n      class: actuator\n      driver: pwm_control\n      config:\n        pin: GPIO27\n      description: Heating element (PWM controlled)\n\n    - name: cooling_fan\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO32\n      description: Emergency cooling fan\n\n  # Hardware resources\n  resources:\n    - name: onewire_bus\n      interface: onewire\n      binding:\n        pin: GPIO4\n      description: OneWire bus for temperature sensor\n\n    - name: gpio_pins\n      interface: gpio\n      description: GPIO pins used throughout\n\n    - name: pwm_channels\n      interface: gpio\n      binding:\n        mode: pwm\n      description: PWM channels for heater control\n\n  # System parameters (configuration)\n  parameters:\n    - name: setpoint\n      type: float\n      default: 60.0\n      unit: degC\n      min: 10.0\n      max: 90.0\n      description: Target temperature\n\n    - name: max_safe_temp\n      type: float\n      default: 75.0\n      unit: degC\n      description: Emergency shutdown temperature\n\n    - name: hysteresis\n      type: float\n      default: 2.0\n      unit: degC\n      description: Temperature tolerance band\n',
-    "hierarchy \u2014 nesting and inner-vs-outer precedence": "# Fixture exercising the parts of the IR the boiler example does not reach:\n#   - entering a composite state descends to its initial child (recursively)\n#   - a transition on an enclosing state applies to nested children\n#   - an inner transition outranks an enclosing one on the same event\n#   - a transition may carry several actions\n#   - the bare `guard: <name>` shorthand (boiler.yaml covers the mapping form\n#     that carries a description)\n\nproject:\n  name: hierarchy_test\n  version: 1.0\n  description: Hierarchy and dispatch semantics fixture\n\nsystem:\n  name: hierarchy_system\n\n  events:\n    - name: GO\n      source: external\n    - name: NEXT\n      source: internal\n    - name: ABORT\n      source: external\n    - name: BLOCKED\n      source: internal\n\n  states:\n    - name: off\n      type: simple\n\n    - name: active\n      type: composite\n      initial: phase_one\n      regions:\n        - initial: phase_one\n          states:\n            - name: phase_one\n              type: simple\n\n            # Nested two levels deep, so entry has to descend more than once.\n            - name: phase_two\n              type: composite\n              initial: deep\n              regions:\n                - initial: deep\n                  states:\n                    - name: deep\n                      type: simple\n\n    - name: halted\n      type: simple\n\n  transitions:\n    # Target is composite: entry must land on active/phase_one.\n    - source: off\n      event: GO\n      target: active\n      actions:\n        - log_start\n        - arm_system\n\n    # Target is composite and nested: entry must land on active/phase_two/deep.\n    - source: phase_one\n      event: NEXT\n      target: phase_two\n\n    # Enclosing source: applies while any descendant of active is current.\n    - source: active\n      event: ABORT\n      target: halted\n\n    # Inner source on the same event: must outrank the `active` transition\n    # whenever phase_one is the current state.\n    - source: phase_one\n      event: ABORT\n      target: off\n\n    # Named guard; the generated stub returns false, so this stays blocked.\n    - source: phase_one\n      event: BLOCKED\n      target: halted\n      guard: never_ready\n"
+    "starter \u2014 a two-state blinker": {
+      entry: "blinker.yaml",
+      files: {
+        "blinker.yaml": '# A minimal model. Edit anything and the panes update as you type.\nproject:\n  name: blinker\n  version: "1.0"\n\nsystem:\n  name: blinker\n\n  events:\n    - name: PRESS\n      source: external\n\n  states:\n    - name: off\n      type: simple\n    - name: on\n      type: simple\n\n  transitions:\n    - source: off\n      event: PRESS\n      target: on\n      actions:\n        - led_on\n\n    - source: on\n      event: PRESS\n      target: off\n      actions:\n        - led_off\n\n  components:\n    - name: led\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO2\n\n  parameters:\n    - name: blink_ms\n      type: int\n      default: 500\n      unit: ms\n      min: 50\n      max: 5000\n'
+      }
+    },
+    "boiler \u2014 hierarchical states, guards, wildcard stop": {
+      entry: "boiler.yaml",
+      files: {
+        "boiler.yaml": 'project:\n  name: boiler_control\n  version: 1.0\n  description: Simple boiler temperature control system\n\nsystem:\n  name: boiler_system\n  description: Controls heating, cooling, and monitoring\n\n  # Events the system responds to\n  events:\n    - name: START\n      source: external\n      description: User presses start button\n\n    - name: STOP\n      source: external\n      description: User presses stop button\n\n    - name: TEMP_REACHED\n      source: sensor\n      description: Temperature sensor indicates setpoint reached\n\n    - name: OVER_TEMP\n      source: sensor\n      description: Temperature exceeds safety limit\n\n    - name: EMERGENCY_STOP\n      source: external\n      description: Emergency stop button pressed\n\n  # States the system can be in\n  states:\n    - name: idle\n      type: simple\n      description: System is off\n\n    - name: running\n      type: composite\n      initial: heating\n      description: System is actively heating/cooling\n      regions:\n        - initial: heating\n          states:\n            - name: heating\n              type: simple\n            - name: maintaining\n              type: simple\n            - name: cooling\n              type: simple\n\n    - name: fault\n      type: simple\n      description: System in fault state\n\n  # Transitions between states\n  transitions:\n    # Idle -> Running\n    - source: idle\n      event: START\n      target: running\n      actions:\n        - start_pump\n      description: Start the system\n\n    # Running -> Idle\n    - source: running\n      event: STOP\n      target: idle\n      actions:\n        - stop_pump\n      description: Stop the system\n\n    # Heating -> Maintaining\n    - source: running/heating\n      event: TEMP_REACHED\n      guard:\n        name: temp_at_setpoint\n        description: water temperature has reached the setpoint\n      target: running/maintaining\n      actions:\n        - reduce_heat\n      description: Temperature reached, switch to maintaining\n\n    # Maintaining -> Cooling (if temp overshoots)\n    - source: running/maintaining\n      event: OVER_TEMP\n      guard:\n        name: over_safe_temp\n        description: temperature has exceeded the safety limit\n      target: running/cooling\n      actions:\n        - activate_cooling\n      description: Temperature too high, cool down\n\n    # Emergency stop from anywhere\n    - source: "*"\n      event: EMERGENCY_STOP\n      target: fault\n      actions:\n        - shutdown_all\n      description: Emergency stop overrides everything\n\n  # Actions that can be triggered\n  actions:\n    start_pump:\n      type: driver\n      driver: gpio_control\n      params:\n        pin: PUMP\n        value: HIGH\n\n    stop_pump:\n      type: driver\n      driver: gpio_control\n      params:\n        pin: PUMP\n        value: LOW\n\n    reduce_heat:\n      type: driver\n      driver: pwm_control\n      params:\n        pin: HEATER\n        value: 25\n\n    activate_cooling:\n      type: driver\n      driver: gpio_control\n      params:\n        pin: COOLING_FAN\n        value: HIGH\n\n    shutdown_all:\n      type: driver\n      driver: shutdown\n      params:\n        all: true\n\n  # Components in the system\n  components:\n    - name: temperature_sensor\n      class: sensor\n      driver: ds18b20\n      config:\n        interface: onewire\n        pin: GPIO4\n      description: Water temperature sensor\n\n    - name: pump\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO25\n      description: Main circulation pump\n\n    - name: heater\n      class: actuator\n      driver: pwm_control\n      config:\n        pin: GPIO27\n      description: Heating element (PWM controlled)\n\n    - name: cooling_fan\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO32\n      description: Emergency cooling fan\n\n  # Hardware resources\n  resources:\n    - name: onewire_bus\n      interface: onewire\n      binding:\n        pin: GPIO4\n      description: OneWire bus for temperature sensor\n\n    - name: gpio_pins\n      interface: gpio\n      description: GPIO pins used throughout\n\n    - name: pwm_channels\n      interface: gpio\n      binding:\n        mode: pwm\n      description: PWM channels for heater control\n\n  # System parameters (configuration)\n  parameters:\n    - name: setpoint\n      type: float\n      default: 60.0\n      unit: degC\n      min: 10.0\n      max: 90.0\n      description: Target temperature\n\n    - name: max_safe_temp\n      type: float\n      default: 75.0\n      unit: degC\n      description: Emergency shutdown temperature\n\n    - name: hysteresis\n      type: float\n      default: 2.0\n      unit: degC\n      description: Temperature tolerance band\n'
+      }
+    },
+    "hierarchy \u2014 nesting and inner-vs-outer precedence": {
+      entry: "hierarchy.yaml",
+      files: {
+        "hierarchy.yaml": "# Fixture exercising the parts of the IR the boiler example does not reach:\n#   - entering a composite state descends to its initial child (recursively)\n#   - a transition on an enclosing state applies to nested children\n#   - an inner transition outranks an enclosing one on the same event\n#   - a transition may carry several actions\n#   - the bare `guard: <name>` shorthand (boiler.yaml covers the mapping form\n#     that carries a description)\n\nproject:\n  name: hierarchy_test\n  version: 1.0\n  description: Hierarchy and dispatch semantics fixture\n\nsystem:\n  name: hierarchy_system\n\n  events:\n    - name: GO\n      source: external\n    - name: NEXT\n      source: internal\n    - name: ABORT\n      source: external\n    - name: BLOCKED\n      source: internal\n\n  states:\n    - name: off\n      type: simple\n\n    - name: active\n      type: composite\n      initial: phase_one\n      regions:\n        - initial: phase_one\n          states:\n            - name: phase_one\n              type: simple\n\n            # Nested two levels deep, so entry has to descend more than once.\n            - name: phase_two\n              type: composite\n              initial: deep\n              regions:\n                - initial: deep\n                  states:\n                    - name: deep\n                      type: simple\n\n    - name: halted\n      type: simple\n\n  transitions:\n    # Target is composite: entry must land on active/phase_one.\n    - source: off\n      event: GO\n      target: active\n      actions:\n        - log_start\n        - arm_system\n\n    # Target is composite and nested: entry must land on active/phase_two/deep.\n    - source: phase_one\n      event: NEXT\n      target: phase_two\n\n    # Enclosing source: applies while any descendant of active is current.\n    - source: active\n      event: ABORT\n      target: halted\n\n    # Inner source on the same event: must outrank the `active` transition\n    # whenever phase_one is the current state.\n    - source: phase_one\n      event: ABORT\n      target: off\n\n    # Named guard; the generated stub returns false, so this stays blocked.\n    - source: phase_one\n      event: BLOCKED\n      target: halted\n      guard: never_ready\n"
+      }
+    },
+    "greenhouse \u2014 multi-file, interfaces and libraries": {
+      entry: "greenhouse.yaml",
+      files: {
+        "behaviour.yaml": 'system:\n  states:\n    - name: idle\n      type: simple\n      description: Powered but not regulating\n\n    - name: running\n      type: composite\n      initial: sampling\n      description: Regulating the climate\n      regions:\n        - initial: sampling\n          states:\n            - name: sampling\n              type: simple\n            - name: venting\n              type: simple\n\n    - name: fault\n      type: simple\n\n  transitions:\n    - source: idle\n      event: START\n      target: running\n      actions:\n        - open_log\n        - start_sampling\n\n    - source: idle\n      event: REMOTE_START\n      target: running\n      actions:\n        - open_log\n        - start_sampling\n\n    # Declared on the composite, so it applies from either child.\n    - source: running\n      event: STOP\n      target: idle\n      actions:\n        - stop_all\n\n    - source: running/sampling\n      event: SAMPLE_DUE\n      target: running/sampling\n      actions:\n        - read_climate\n        - publish_climate\n\n    - source: running/sampling\n      event: TOO_HOT\n      guard:\n        name: above_temp_setpoint\n        description: air temperature is above the setpoint plus hysteresis\n      target: running/venting\n      actions:\n        - open_vent\n\n    - source: running/venting\n      event: RECOVERED\n      guard: back_within_band\n      target: running/sampling\n      actions:\n        - close_vent\n\n    - source: "*"\n      event: SENSOR_FAULT\n      target: fault\n      actions:\n        - stop_all\n        - raise_alarm\n',
+        "events.yaml": "system:\n  events:\n    - name: START\n      source: external\n      description: Local start button\n\n    - name: STOP\n      source: external\n\n    - name: SAMPLE_DUE\n      source: timer\n      description: Sampling interval elapsed\n\n    - name: TOO_HOT\n      source: sensor\n\n    - name: RECOVERED\n      source: sensor\n\n    - name: SENSOR_FAULT\n      source: internal\n\n    # Declaring the source as mqtt is what makes this remotely triggerable;\n    # the topic manifest exposes only these.\n    - name: REMOTE_START\n      source: mqtt\n      description: Start requested from the dashboard\n",
+        "greenhouse.yaml": '# Multi-file model.\n#\n# Only this file declares `project`. Everything else is split by concern so a\n# change to the wiring never touches the behaviour, and a merge conflict in one\n# area cannot corrupt another.\n#\n#   hardware.yaml   buses, libraries, sensors and actuators\n#   events.yaml     what the system reacts to\n#   behaviour.yaml  states and transitions\n#   tuning.yaml     parameters the dashboard can push down\n#\n# Paths are relative to this file. Lists (events, states, transitions,\n# components, resources, parameters, libraries) are concatenated across files;\n# anything else declared here wins.\n\nproject:\n  name: greenhouse\n  version: "1.0"\n  description: Climate control for a small greenhouse\n\ninclude:\n  - hardware.yaml\n  - events.yaml\n  - behaviour.yaml\n  - tuning.yaml\n\nsystem:\n  name: greenhouse_controller\n  description: Samples climate, ventilates, and reports to a dashboard\n',
+        "hardware.yaml": '# Buses, libraries and devices. Interfaces declare how the board is wired;\n# the backend turns them into begin() calls for its platform.\n\nsystem:\n  libraries:\n    # Only third-party libraries need declaring. Wire, SPI and WiFi are\n    # implied by the interfaces below and get added automatically.\n    - name: Adafruit_BME280\n      include: Adafruit_BME280.h\n      version: "^2.2"\n      source: registry\n      description: Temperature, humidity and pressure over I2C\n\n  resources:\n    - name: sensor_bus\n      interface: i2c\n      library: Adafruit_BME280\n      binding:\n        sda: GPIO21\n        scl: GPIO22\n        frequency: 400000\n      description: Shared I2C bus for climate sensors\n\n    - name: card_slot\n      interface: spi\n      binding:\n        sck: GPIO18\n        miso: GPIO19\n        mosi: GPIO23\n        cs: GPIO5\n      description: SD card for offline logging\n\n    - name: gps\n      interface: uart\n      binding:\n        port: 2\n        baud: 9600\n        rx: GPIO16\n        tx: GPIO17\n      description: NMEA receiver\n\n    - name: vent_drive\n      interface: pwm\n      binding:\n        pin: GPIO25\n        channel: 0\n        frequency: 5000\n        resolution: 8\n      description: Vent motor speed\n\n    - name: uplink\n      interface: wifi\n      binding:\n        ssid: greenhouse-ap\n        hostname: greenhouse-01\n      description: Site Wi-Fi\n\n    - name: broker\n      interface: mqtt\n      binding:\n        host: mqtt.example.local\n        port: 8883\n        tls: true\n      description: Dashboard uplink\n\n  components:\n    - name: air_temp\n      class: sensor\n      driver: bme280\n      config:\n        interface: i2c\n        address: 0x76\n        unit: degC\n\n    - name: humidity\n      class: sensor\n      driver: bme280\n      config:\n        interface: i2c\n        address: 0x76\n        unit: percent\n\n    - name: vent\n      class: actuator\n      driver: pwm_control\n      config:\n        pin: GPIO25\n\n    - name: pump\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO26\n',
+        "tuning.yaml": "# Parameters become writable MQTT setpoints, carrying their unit and range so\n# a dashboard can render a bounded control.\n\nsystem:\n  parameters:\n    - name: temp_setpoint\n      type: float\n      default: 26.0\n      unit: degC\n      min: 10.0\n      max: 40.0\n      description: Target air temperature\n\n    - name: hysteresis\n      type: float\n      default: 1.5\n      unit: degC\n      min: 0.1\n      max: 5.0\n      description: Band around the setpoint before venting\n\n    - name: sample_interval\n      type: int\n      default: 5000\n      unit: ms\n      min: 500\n      max: 60000\n      description: How often to sample the climate\n"
+      }
+    }
   };
 
   // dist/web/main.js
@@ -4729,17 +4847,60 @@ ${implementations.join("\n\n")}`;
   };
   var source = $("source");
   var status = $("status");
+  var fileBar = $("file-bar");
   var panes = {
     sketch: $("pane-sketch"),
     topics: $("pane-topics"),
+    libraries: $("pane-libraries"),
     structure: $("pane-structure")
   };
   var exampleSelect = $("example");
   var namespaceInput = $("namespace");
   var staleNote = $("stale-note");
-  var downloadSketch = $("download-sketch");
-  var downloadTopics = $("download-topics");
+  var STORAGE_KEY = "pulseir.workspace";
+  var workspace = { files: {}, entry: "", active: "" };
   var current = null;
+  function fileNames() {
+    const rest = Object.keys(workspace.files).filter((n) => n !== workspace.entry).sort();
+    return workspace.entry ? [workspace.entry, ...rest] : rest;
+  }
+  function loadExample(label) {
+    const example = EXAMPLES[label];
+    if (!example)
+      return;
+    workspace = {
+      files: { ...example.files },
+      entry: example.entry,
+      active: example.entry
+    };
+  }
+  function restore() {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed.files && Object.keys(parsed.files).length && parsed.files[parsed.entry]) {
+          workspace = {
+            files: parsed.files,
+            entry: parsed.entry,
+            active: parsed.files[parsed.active] !== void 0 ? parsed.active : parsed.entry
+          };
+          return;
+        }
+      } catch {
+      }
+    }
+    const legacy = localStorage.getItem("pulseir.source");
+    if (legacy && legacy.trim()) {
+      workspace = { files: { "model.yaml": legacy }, entry: "model.yaml", active: "model.yaml" };
+      localStorage.removeItem("pulseir.source");
+      return;
+    }
+    loadExample(Object.keys(EXAMPLES)[0]);
+  }
+  function persist() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
+  }
   function escapeHtml(text) {
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
@@ -4751,6 +4912,30 @@ ${implementations.join("\n\n")}`;
   function setStatus(kind, title, detail = "") {
     status.className = `status ${kind}`;
     status.innerHTML = `<strong>${escapeHtml(title)}</strong>${detail ? `<span>${escapeHtml(detail)}</span>` : ""}`;
+  }
+  function renderFileBar() {
+    const names = fileNames();
+    fileBar.innerHTML = names.map((name) => {
+      const isEntry = name === workspace.entry;
+      const isActive = name === workspace.active;
+      const badge = isEntry ? '<span class="entry-badge" title="entry file">\u25B6</span>' : "";
+      const close = !isEntry ? `<span class="close" data-close="${escapeHtml(name)}" title="Delete ${escapeHtml(name)}">\xD7</span>` : "";
+      return `<button class="filetab${isActive ? " active" : ""}" data-file="${escapeHtml(name)}"
+      title="${escapeHtml(name)} (double-click to rename)">${badge}${escapeHtml(name)}${close}</button>`;
+    }).join("");
+    for (const tab of fileBar.querySelectorAll(".filetab")) {
+      const name = tab.dataset.file;
+      tab.addEventListener("click", (event) => {
+        const target = event.target;
+        if (target.dataset.close) {
+          event.stopPropagation();
+          deleteFile(target.dataset.close);
+          return;
+        }
+        selectFile(name);
+      });
+      tab.addEventListener("dblclick", () => renameFile(name));
+    }
   }
   function renderStructure(project) {
     const states = project.system.states;
@@ -4772,6 +4957,11 @@ ${implementations.join("\n\n")}`;
       <td>${actions}</td>
     </tr>`;
     }).join("");
+    const resources = (project.system.resources || []).map((r) => `<tr>
+      <td><code>${escapeHtml(r.name)}</code></td>
+      <td><span class="tag">${escapeHtml(String(r.interface))}</span></td>
+      <td>${Object.entries(r.binding || {}).map(([k, v]) => `<code>${escapeHtml(k)}=${escapeHtml(String(v))}</code>`).join(" ") || '<span class="dim">\u2014</span>'}</td>
+    </tr>`).join("");
     return `
     <h3>State hierarchy</h3>
     <p class="hint">A machine only ever rests in a <em>leaf</em>. Entering a
@@ -4784,6 +4974,12 @@ ${implementations.join("\n\n")}`;
     <table>
       <thead><tr><th>From</th><th>On</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="dim">No transitions defined.</td></tr>'}</tbody>
+    </table>
+
+    <h3>Interfaces</h3>
+    <table>
+      <thead><tr><th>Resource</th><th>Interface</th><th>Binding</th></tr></thead>
+      <tbody>${resources || '<tr><td colspan="3" class="dim">No resources declared.</td></tr>'}</tbody>
     </table>`;
   }
   function renderStateNode(path, flat) {
@@ -4802,11 +4998,11 @@ ${implementations.join("\n\n")}`;
   </div>`;
   }
   function render() {
-    const text = source.value;
-    localStorage.setItem("pulseir.source", text);
+    persist();
     let project;
     try {
-      project = new Parser().parse(text);
+      const resolver = new MemoryResolver(workspace.files);
+      project = new Parser().parseFrom(workspace.entry, resolver);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const where = error instanceof ParseError && error.line !== void 0 ? ` (line ${error.line + 1})` : "";
@@ -4816,9 +5012,11 @@ ${implementations.join("\n\n")}`;
     }
     let sketch;
     let topics;
+    let libraries;
     try {
       sketch = new Codegen().generate(project);
       topics = new TopicEmitter().toJSON(project, namespaceInput.value.trim() || void 0);
+      libraries = new LibraryEmitter().toJSON(project);
     } catch (error) {
       setStatus("error", "Generation error", error instanceof Error ? error.message : String(error));
       setStale(true);
@@ -4827,15 +5025,88 @@ ${implementations.join("\n\n")}`;
     setStale(false);
     panes.sketch.innerHTML = `<pre><code>${escapeHtml(sketch)}</code></pre>`;
     panes.topics.innerHTML = `<pre><code>${escapeHtml(topics)}</code></pre>`;
+    panes.libraries.innerHTML = `<pre><code>${escapeHtml(libraries)}</code></pre>`;
     panes.structure.innerHTML = renderStructure(project);
+    const fileCount = Object.keys(workspace.files).length;
     const counts = [
-      `${project.system.states.length} top-level states`,
+      fileCount > 1 ? `${fileCount} files` : null,
       `${project.system.events.length} events`,
       `${project.system.transitions.length} transitions`,
+      `${(project.system.resources || []).length} resources`,
       `${sketch.split("\n").length} lines generated`
-    ].join(" \xB7 ");
+    ].filter(Boolean).join(" \xB7 ");
     setStatus("ok", project.name, counts);
-    current = { project, sketch, topics };
+    current = { project, sketch, topics, libraries };
+  }
+  function selectFile(name) {
+    if (workspace.files[name] === void 0)
+      return;
+    workspace.active = name;
+    source.value = workspace.files[name];
+    renderFileBar();
+    persist();
+  }
+  function addFile() {
+    const name = prompt("New file name", "part.yaml");
+    if (!name)
+      return;
+    const clean = name.trim();
+    if (!clean.endsWith(".yaml") && !clean.endsWith(".yml")) {
+      alert("Model files must end in .yaml or .yml");
+      return;
+    }
+    if (workspace.files[clean] !== void 0) {
+      alert(`"${clean}" already exists`);
+      return;
+    }
+    workspace.files[clean] = `# ${clean}
+#
+# Add this to the entry file's include list:
+#   include:
+#     - ${clean}
+
+system:
+`;
+    selectFile(clean);
+    render();
+  }
+  function renameFile(name) {
+    const next = prompt(`Rename "${name}" to`, name);
+    if (!next || next === name)
+      return;
+    const clean = next.trim();
+    if (workspace.files[clean] !== void 0) {
+      alert(`"${clean}" already exists`);
+      return;
+    }
+    workspace.files[clean] = workspace.files[name];
+    delete workspace.files[name];
+    if (workspace.entry === name)
+      workspace.entry = clean;
+    if (workspace.active === name)
+      workspace.active = clean;
+    selectFile(workspace.active);
+    render();
+  }
+  function deleteFile(name) {
+    if (name === workspace.entry) {
+      alert("The entry file cannot be deleted. Make another file the entry first.");
+      return;
+    }
+    if (!confirm(`Delete "${name}"?`))
+      return;
+    delete workspace.files[name];
+    if (workspace.active === name)
+      workspace.active = workspace.entry;
+    selectFile(workspace.active);
+    render();
+  }
+  function setEntry() {
+    if (workspace.active === workspace.entry)
+      return;
+    workspace.entry = workspace.active;
+    renderFileBar();
+    render();
   }
   function debounce(fn, ms) {
     let handle;
@@ -4869,35 +5140,48 @@ ${implementations.join("\n\n")}`;
       option.textContent = key;
       exampleSelect.append(option);
     }
-    const saved = localStorage.getItem("pulseir.source");
-    source.value = saved ?? EXAMPLES[Object.keys(EXAMPLES)[0]];
+    restore();
+    source.value = workspace.files[workspace.active] ?? "";
+    renderFileBar();
     const rerender = debounce(render, 150);
-    source.addEventListener("input", rerender);
+    source.addEventListener("input", () => {
+      workspace.files[workspace.active] = source.value;
+      rerender();
+    });
     namespaceInput.addEventListener("input", rerender);
     exampleSelect.addEventListener("change", () => {
       const example = EXAMPLES[exampleSelect.value];
       if (!example)
         return;
-      const untouched = !source.value.trim() || Object.values(EXAMPLES).some((text) => text === source.value);
+      const untouched = Object.values(EXAMPLES).some((candidate) => JSON.stringify(candidate.files) === JSON.stringify(workspace.files));
       if (!untouched && !confirm("Replace the current model with this example?")) {
         exampleSelect.value = "";
         return;
       }
-      source.value = example;
+      loadExample(exampleSelect.value);
+      source.value = workspace.files[workspace.active];
+      renderFileBar();
       render();
     });
     for (const button of document.querySelectorAll(".tab")) {
       button.addEventListener("click", () => selectTab(button.dataset.tab));
     }
-    downloadSketch.addEventListener("click", () => {
+    $("add-file").addEventListener("click", addFile);
+    $("set-entry").addEventListener("click", setEntry);
+    $("download-sketch").addEventListener("click", () => {
       if (!current)
         return;
       download(`${current.project.name}.ino`, current.sketch, "text/plain");
     });
-    downloadTopics.addEventListener("click", () => {
+    $("download-topics").addEventListener("click", () => {
       if (!current)
         return;
       download("topics.json", current.topics, "application/json");
+    });
+    $("download-libraries").addEventListener("click", () => {
+      if (!current)
+        return;
+      download("libraries.json", current.libraries, "application/json");
     });
     source.addEventListener("keydown", (event) => {
       if (event.key !== "Tab")
@@ -4906,6 +5190,7 @@ ${implementations.join("\n\n")}`;
       const { selectionStart, selectionEnd, value } = source;
       source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
       source.selectionStart = source.selectionEnd = selectionStart + 2;
+      workspace.files[workspace.active] = source.value;
       rerender();
     });
     selectTab(localStorage.getItem("pulseir.tab") || "sketch");

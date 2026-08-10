@@ -83,6 +83,22 @@
   }
   .tab.active { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
 
+  .filebar { gap: 6px; }
+  /* Tabs take the slack and scroll; the buttons must never wrap or shrink. */
+  .filetabs { display: flex; gap: 3px; overflow-x: auto; min-width: 0; flex: 1 1 auto; scrollbar-width: thin; }
+  .filebar > button { flex: 0 0 auto; white-space: nowrap; }
+  .filetab {
+    display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+    border: 1px solid transparent; background: transparent; color: var(--dim);
+    padding: 3px 8px; border-radius: 6px; font-size: 12.5px;
+    font-family: var(--mono); cursor: pointer;
+  }
+  .filetab:hover { color: var(--text); }
+  .filetab.active { background: var(--bg); color: var(--text); border-color: var(--border); }
+  .entry-badge { color: var(--accent); font-size: 10px; }
+  .filetab .close { color: var(--dim); font-size: 14px; line-height: 1; padding: 0 1px; }
+  .filetab .close:hover { color: var(--err-fg); }
+
   textarea {
     flex: 1; width: 100%; resize: none; border: 0; outline: none;
     padding: 12px 14px; background: var(--bg); color: var(--text);
@@ -155,12 +171,17 @@
   <div class="spacer"></div>
 
   <button id="download-sketch">Download .ino</button>
-  <button id="download-topics">Download topics.json</button>
+  <button id="download-topics">topics.json</button>
+  <button id="download-libraries">libraries.json</button>
 </header>
 
 <main>
   <section class="side">
-    <div class="bar"><span class="title">Model (YAML)</span></div>
+    <div class="bar filebar">
+      <div class="filetabs" id="file-bar"></div>
+      <button id="add-file" title="Add a file to this model">+ File</button>
+      <button id="set-entry" title="Parse starting from the open file">Set entry</button>
+    </div>
     <textarea id="source" spellcheck="false" autocomplete="off"
               aria-label="PulseIR model source"></textarea>
   </section>
@@ -169,6 +190,7 @@
     <div class="bar">
       <button class="tab active" data-tab="sketch">Arduino sketch</button>
       <button class="tab" data-tab="topics">MQTT topics</button>
+      <button class="tab" data-tab="libraries">Libraries</button>
       <button class="tab" data-tab="structure">Structure</button>
     </div>
     <div class="panes">
@@ -177,6 +199,7 @@
       </div>
       <div class="pane" id="pane-sketch"></div>
       <div class="pane" id="pane-topics" hidden></div>
+      <div class="pane" id="pane-libraries" hidden></div>
       <div class="pane" id="pane-structure" hidden></div>
     </div>
   </section>
