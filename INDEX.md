@@ -52,6 +52,15 @@
   - Generates guard and action stubs with the FUNCTION_CONTRACT signatures
   - Tested ✅ (compiled, linked and executed — see test/compile.test.ts)
 
+### Interface Backend (IR → platform calls)
+- **src/codegen/interfaces.ts** ⭐
+  - Turns `Resource` declarations into includes, `#define`s and `begin()` calls
+  - Knows the Arduino platform so the IR does not have to; an ESP-IDF backend
+    would translate the same model differently
+  - Board-specific calls sit behind preprocessor guards rather than assumptions
+  - Credential-shaped binding keys are emitted as blank placeholders, never
+    with a value from the model
+
 ### Consumer 2: MQTT Topic Manifest (IR → JSON)
 - **src/emit/topics.ts** ⭐
   - The first consumer of the IR that is **not** a code generator
@@ -61,7 +70,12 @@
   - Device and dashboard derive their topics from one model, so a renamed
     sensor cannot silently blank a chart
 
-### Consumer 3: Web Editor (IR → live browser preview)
+### Consumer 3: Library Manifest (IR → JSON)
+- **src/emit/libraries.ts**
+  - Merges libraries implied by interfaces with those the model declares
+  - Emits PlatformIO `lib_deps`, excluding core-bundled libraries
+
+### Consumer 4: Web Editor (IR → live browser preview)
 - **web/main.ts** ⭐
   - Runs the real Parser / Codegen / TopicEmitter as a browser bundle, so the
     editor cannot drift from the CLI
@@ -93,6 +107,10 @@
   - Parser reference checking: unknown/ambiguous/duplicate states, bad events,
     wildcard targets, malformed guards, and the `guard: <name>` string form
 
+- **test/multifile.test.ts**
+  - Include merging and order, relative resolution, cycles, missing files,
+    duplicate names across files, and the no-resolver error path
+
 - **test/analysis.test.ts**
   - Hierarchy walk: pre-order flattening, initial-child qualification, entry
     descent through nested composites, ambiguous-name refusal
@@ -119,6 +137,8 @@
 - **test/harness/serial.cpp** — provides the `Serial` global
 
 ### Examples
+- **examples/greenhouse/** ⭐ — multi-file model exercising `include`, every
+  interface kind, implied and declared libraries, and an MQTT-triggerable event
 - **examples/boiler.yaml** (180 lines)
   - Complete industrial system: boiler temperature control
   - Hierarchical states (running/heating/cooling/maintaining)
@@ -357,10 +377,16 @@ The IR already models devices and wiring, but codegen barely uses it. This is
 the part that generalises beyond PulseHSM.
 
 - [x] **MQTT topic manifest** (`src/emit/topics.ts`) — proves the IR has a
-      non-C++ consumer. Next: emit the matching publish/subscribe wiring into
-      the firmware, so both sides come from the same model.
-- [ ] `Resource` codegen — currently produces **nothing at all**
-- [ ] `Component` → driver binding — currently only comments and a sensor struct
+      non-C++ consumer
+- [x] **`Resource` codegen** — interfaces now generate includes, defines and
+      `begin()` calls instead of nothing
+- [x] **Library management** — implied plus declared, with a PlatformIO manifest
+- [x] **Multi-file models** — `include`, so a model is not one giant file
+- [ ] Emit the MQTT publish/subscribe wiring into the firmware, so the device
+      side of the topic map stops being hand-written
+- [ ] `Component` → driver binding — still only comments and a sensor struct
+- [ ] Multi-file support in the web editor (the parser is ready; the editor
+      has no resolver, so `include` there fails with a clear message)
 - [ ] A second backend (ESP-IDF), to prove the spine is not PulseHSM-shaped
 - [x] **Web editor** (`web/`) — live YAML → sketch / topics / structure, running
       the real pipeline in the browser. First step toward the IR not being

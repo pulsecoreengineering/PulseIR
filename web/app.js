@@ -3059,6 +3059,16 @@
   } = yaml;
 
   // dist/src/parser/index.js
+  var MERGED_LISTS = [
+    "events",
+    "states",
+    "transitions",
+    "components",
+    "resources",
+    "parameters",
+    "libraries"
+  ];
+  var MAX_INCLUDE_DEPTH = 32;
   var ParseError = class extends Error {
     constructor(message, line, column) {
       super(message);
@@ -3067,6 +3077,9 @@
       this.name = "ParseError";
     }
   };
+  function describe(origin) {
+    return origin ? `"${origin}"` : "The model";
+  }
   var Parser = class {
     constructor() {
       this.eventNames = /* @__PURE__ */ new Set();
@@ -3078,10 +3091,12 @@
     /**
      * Parse YAML string into PulseModel
      * Throws ParseError if invalid
+     *
+     * Pass a resolver in `options` to allow the document to `include` others.
      */
-    parse(yamlContent) {
+    parse(yamlContent, options = {}) {
       try {
-        const raw = load(yamlContent);
+        const raw = this.loadDocument(yamlContent, options.origin ?? null, options, new Set(options.origin ? [options.origin] : []), 0);
         return this.parseProject(raw);
       } catch (error) {
         if (error instanceof YAMLException) {
@@ -3092,6 +3107,104 @@
         }
         throw new ParseError(`Unknown error: ${error}`);
       }
+    }
+    /**
+     * Read a model from a resolver, following includes.
+     * `entry` is resolved the same way an include would be.
+     */
+    parseFrom(entry, resolver) {
+      const origin = resolver.resolve(entry, null);
+      let content;
+      try {
+        content = resolver.read(origin);
+      } catch (error) {
+        throw new ParseError(`Cannot read model "${entry}": ${error instanceof Error ? error.message : error}`);
+      }
+      return this.parse(content, { origin, resolver });
+    }
+    // =========================================================================
+    // MULTI-FILE LOADING
+    // =========================================================================
+    /**
+     * Load one document and splice in anything it includes.
+     *
+     * Includes are merged first, in the order listed, and the including file is
+     * layered on top - so a file always overrides what it pulls in, and list
+     * sections read in a predictable order.
+     */
+    loadDocument(content, origin, options, seen, depth) {
+      if (depth > MAX_INCLUDE_DEPTH) {
+        throw new ParseError(`Include nesting deeper than ${MAX_INCLUDE_DEPTH} levels`);
+      }
+      const doc = load(content) ?? {};
+      if (typeof doc !== "object" || Array.isArray(doc)) {
+        throw new ParseError(`${describe(origin)} must contain a YAML mapping`);
+      }
+      if (doc.includes !== void 0 && doc.include === void 0) {
+        throw new ParseError(`${describe(origin)} uses "includes"; the key is "include"`);
+      }
+      const refs = this.includeRefs(doc.include, origin);
+      if (refs.length === 0)
+        return doc;
+      const resolver = options.resolver;
+      if (!resolver) {
+        throw new ParseError(`${describe(origin)} uses "include", but this parser was given no way to read other files. Load the model from a path (the CLI does this) or supply a resolver.`);
+      }
+      let merged = {};
+      for (const ref of refs) {
+        const id = resolver.resolve(ref, origin);
+        if (seen.has(id)) {
+          throw new ParseError(`Include cycle: "${ref}" is already being loaded (${id})`);
+        }
+        let included;
+        try {
+          included = resolver.read(id);
+        } catch (error) {
+          throw new ParseError(`${describe(origin)} includes "${ref}", which cannot be read: ${error instanceof Error ? error.message : error}`);
+        }
+        seen.add(id);
+        const loaded = this.loadDocument(included, id, options, seen, depth + 1);
+        seen.delete(id);
+        if (loaded.project !== void 0) {
+          throw new ParseError(`Included file "${ref}" declares "project". Only the top-level model may declare it, so the project has one identity.`);
+        }
+        merged = this.mergeDocuments(merged, loaded);
+      }
+      return this.mergeDocuments(merged, doc);
+    }
+    includeRefs(value, origin) {
+      if (value === void 0 || value === null)
+        return [];
+      const list = Array.isArray(value) ? value : [value];
+      return list.map((entry) => {
+        if (typeof entry !== "string" || !entry.trim()) {
+          throw new ParseError(`${describe(origin)} has an include entry that is not a file path`);
+        }
+        return entry;
+      });
+    }
+    /**
+     * Combine two raw documents. List sections concatenate so several files can
+     * each contribute states or events; everything else is overridden by the
+     * later document.
+     */
+    mergeDocuments(base, overlay) {
+      const result = { ...base, ...overlay };
+      delete result.include;
+      const baseSystem = base.system;
+      const overlaySystem = overlay.system;
+      if (!baseSystem || !overlaySystem)
+        return result;
+      const system = { ...baseSystem, ...overlaySystem };
+      for (const key of MERGED_LISTS) {
+        const left = baseSystem[key];
+        const right = overlaySystem[key];
+        if (Array.isArray(left) && Array.isArray(right)) {
+          system[key] = [...left, ...right];
+        }
+      }
+      result.system = system;
+      return result;
     }
     // =========================================================================
     // PARSING
@@ -3131,6 +3244,18 @@
       const components = this.parseComponents(raw.components);
       const resources = this.parseResources(raw.resources);
       const parameters = this.parseParameters(raw.parameters);
+      const libraries = this.parseLibraries(raw.libraries);
+      this.assertUniqueNames(events, "event");
+      this.assertUniqueNames(components, "component");
+      this.assertUniqueNames(resources, "resource");
+      this.assertUniqueNames(parameters, "parameter");
+      this.assertUniqueNames(libraries, "library");
+      const libraryNames = new Set((libraries || []).map((l) => l.name));
+      for (const resource of resources || []) {
+        if (resource.library && !libraryNames.has(resource.library)) {
+          throw new ParseError(`Resource "${resource.name}" needs library "${resource.library}", which is not declared`);
+        }
+      }
       return {
         name: raw.name || "unnamed",
         version: raw.version,
@@ -3140,8 +3265,48 @@
         transitions,
         components,
         resources,
-        parameters
+        parameters,
+        libraries
       };
+    }
+    assertUniqueNames(items, kind) {
+      if (!items)
+        return;
+      const seen = /* @__PURE__ */ new Set();
+      for (const item of items) {
+        if (seen.has(item.name)) {
+          throw new ParseError(`Duplicate ${kind} "${item.name}" (check whether two included files both declare it)`);
+        }
+        seen.add(item.name);
+      }
+    }
+    parseLibraries(raw) {
+      if (!raw || !Array.isArray(raw))
+        return void 0;
+      return raw.map((entry) => {
+        if (typeof entry === "string") {
+          return { name: entry };
+        }
+        const name = entry.name;
+        if (typeof name !== "string" || !name.trim()) {
+          throw new ParseError('Library requires a "name"');
+        }
+        const source2 = entry.source;
+        if (source2 && !["builtin", "registry", "git", "local"].includes(source2)) {
+          throw new ParseError(`Library "${name}" has unknown source "${source2}" (expected builtin, registry, git or local)`);
+        }
+        if ((source2 === "git" || source2 === "local") && !entry.url) {
+          throw new ParseError(`Library "${name}" has source "${source2}" but no "url"`);
+        }
+        return {
+          name,
+          include: entry.include,
+          version: entry.version,
+          source: source2,
+          url: entry.url,
+          description: entry.description
+        };
+      });
     }
     parseEvents(raw) {
       if (!raw || !Array.isArray(raw))
@@ -3269,12 +3434,37 @@
     parseResources(raw) {
       if (!raw || !Array.isArray(raw))
         return void 0;
-      return raw.map((r) => ({
-        name: r.name,
-        interface: r.interface,
-        binding: r.binding,
-        description: r.description
-      }));
+      const known = [
+        "gpio",
+        "pwm",
+        "adc",
+        "uart",
+        "i2c",
+        "spi",
+        "can",
+        "onewire",
+        "wifi",
+        "ethernet",
+        "ble",
+        "mqtt",
+        "custom"
+      ];
+      return raw.map((r) => {
+        const iface = r.interface;
+        if (!iface) {
+          throw new ParseError(`Resource "${r.name}" has no "interface"`);
+        }
+        if (!known.includes(iface)) {
+          throw new ParseError(`Resource "${r.name}" has unknown interface "${iface}". Expected one of: ${known.join(", ")}.`);
+        }
+        return {
+          name: r.name,
+          interface: iface,
+          binding: r.binding,
+          library: r.library,
+          description: r.description
+        };
+      });
     }
     parseParameters(raw) {
       if (!raw || !Array.isArray(raw))
@@ -3342,6 +3532,196 @@
     }
   };
 
+  // dist/src/codegen/interfaces.js
+  var SECRET_KEY = /(pass|password|secret|token|psk|credential|apikey|api_key)/i;
+  var BUILTIN = (name, include, reason) => ({ name, include, source: "builtin", reason });
+  var REGISTRY = (name, include, reason) => ({ name, include, source: "registry", reason });
+  var CONSUMED_KEYS = {
+    gpio: ["mode"],
+    uart: ["port"],
+    mqtt: ["tls"]
+  };
+  var KNOWN_KEYS = {
+    gpio: ["pin", "pins", "mode"],
+    pwm: ["pin", "channel", "frequency", "resolution"],
+    adc: ["pin", "attenuation", "resolution"],
+    uart: ["port", "baud", "rx", "tx"],
+    i2c: ["sda", "scl", "frequency", "address"],
+    spi: ["sck", "miso", "mosi", "cs", "frequency"],
+    can: ["tx", "rx", "bitrate"],
+    onewire: ["pin"],
+    wifi: ["ssid", "password", "hostname"],
+    ethernet: ["cs", "mac"],
+    ble: ["name", "service"],
+    mqtt: ["host", "port", "prefix", "tls", "username", "password", "client_id"],
+    custom: []
+  };
+  var InterfaceBackend = class {
+    /** Emit everything a single resource contributes to the sketch. */
+    emit(resource, symbol) {
+      const binding = resource.binding || {};
+      const kind = String(resource.interface);
+      const out = {
+        defines: this.defines(kind, binding, symbol),
+        globals: [],
+        init: [],
+        libraries: [],
+        todos: []
+      };
+      const has = (key) => binding[key] !== void 0 && !SECRET_KEY.test(key);
+      const ref = (key) => `${symbol}_${key.toUpperCase()}`;
+      switch (kind) {
+        case "i2c":
+          out.libraries.push(BUILTIN("Wire", "Wire.h", "I2C"));
+          out.init.push(...guarded(has("sda") && has("scl") ? `Wire.begin(${ref("sda")}, ${ref("scl")});` : "Wire.begin();", "Wire.begin();"));
+          if (has("frequency"))
+            out.init.push(`Wire.setClock(${ref("frequency")});`);
+          break;
+        case "spi":
+          out.libraries.push(BUILTIN("SPI", "SPI.h", "SPI"));
+          out.init.push(...guarded(has("sck") && has("miso") && has("mosi") ? `SPI.begin(${ref("sck")}, ${ref("miso")}, ${ref("mosi")}${has("cs") ? `, ${ref("cs")}` : ""});` : "SPI.begin();", "SPI.begin();"));
+          if (has("cs"))
+            out.init.push(`pinMode(${ref("cs")}, OUTPUT);`);
+          break;
+        case "uart": {
+          const port = binding.port === void 0 ? 1 : Number(binding.port);
+          const serial = port === 0 ? "Serial" : `Serial${port}`;
+          const baud = has("baud") ? ref("baud") : "115200";
+          out.init.push(...guarded(has("rx") && has("tx") ? `${serial}.begin(${baud}, SERIAL_8N1, ${ref("rx")}, ${ref("tx")});` : `${serial}.begin(${baud});`, `${serial}.begin(${baud});`));
+          break;
+        }
+        case "pwm":
+          if (has("pin") && has("channel")) {
+            out.init.push("#ifdef ARDUINO_ARCH_ESP32", `  ledcSetup(${ref("channel")}, ${has("frequency") ? ref("frequency") : "5000"}, ${has("resolution") ? ref("resolution") : "8"});`, `  ledcAttachPin(${ref("pin")}, ${ref("channel")});`, "#endif");
+          } else if (has("pin")) {
+            out.init.push(`pinMode(${ref("pin")}, OUTPUT);`);
+          }
+          break;
+        case "adc":
+          if (has("pin"))
+            out.init.push(`pinMode(${ref("pin")}, INPUT);`);
+          break;
+        case "gpio":
+          if (has("pin")) {
+            const mode = String(binding.mode || "OUTPUT").toUpperCase();
+            out.init.push(`pinMode(${ref("pin")}, ${mode === "PWM" ? "OUTPUT" : mode});`);
+          }
+          break;
+        case "onewire":
+          out.libraries.push(REGISTRY("OneWire", "OneWire.h", "OneWire"));
+          if (has("pin")) {
+            out.globals.push(`OneWire ${lower(symbol)}(${ref("pin")});`);
+          } else {
+            out.todos.push(`${resource.name}: OneWire needs a "pin" binding`);
+          }
+          break;
+        case "wifi":
+          out.libraries.push(BUILTIN("WiFi", "WiFi.h", "Wi-Fi"));
+          out.defines.push(...this.secretPlaceholder(binding, symbol, "password"));
+          out.init.push(has("hostname") ? `WiFi.setHostname(${ref("hostname")});` : "", `WiFi.begin(${has("ssid") ? ref("ssid") : '""'}, ${symbol}_PASSWORD);`, "// Blocking here would stall fsm.update(); poll WiFi.status() instead.");
+          break;
+        case "ethernet":
+          out.libraries.push(REGISTRY("Ethernet", "Ethernet.h", "Ethernet"));
+          out.todos.push(`${resource.name}: call Ethernet.begin() with your MAC/DHCP settings`);
+          break;
+        case "ble":
+          out.libraries.push(BUILTIN("BLEDevice", "BLEDevice.h", "BLE"));
+          out.todos.push(`${resource.name}: set up BLE services and characteristics`);
+          break;
+        case "mqtt": {
+          const secure = binding.tls === true;
+          out.libraries.push(secure ? BUILTIN("WiFiClientSecure", "WiFiClientSecure.h", "TLS MQTT transport") : BUILTIN("WiFi", "WiFi.h", "MQTT transport"));
+          out.libraries.push(REGISTRY("PubSubClient", "PubSubClient.h", "MQTT"));
+          const client = `${lower(symbol)}Transport`;
+          out.globals.push(`${secure ? "WiFiClientSecure" : "WiFiClient"} ${client};`, `PubSubClient ${lower(symbol)}(${client});`);
+          if (secure) {
+            out.globals.push(`// TODO: ${client}.setCACert(...) before connecting. Skipping`, "// verification would defeat the point of TLS.");
+          }
+          out.init.push(`${lower(symbol)}.setServer(${has("host") ? ref("host") : '""'}, ${has("port") ? ref("port") : secure ? 8883 : 1883});`);
+          out.todos.push(`${resource.name}: connect and re-connect without blocking, and call ${lower(symbol)}.loop() every iteration`);
+          break;
+        }
+        case "can":
+          out.todos.push(`${resource.name}: CAN has no single Arduino API - declare the library your board needs and initialise it here`);
+          break;
+        default:
+          out.todos.push(`${resource.name}: custom interface, initialise it here`);
+          break;
+      }
+      out.init = out.init.filter(Boolean);
+      for (const key of Object.keys(binding)) {
+        if (SECRET_KEY.test(key)) {
+          out.todos.push(`${resource.name}: set ${symbol}_${key.toUpperCase()} before building`);
+        }
+      }
+      return out;
+    }
+    /**
+     * A blank credential macro, emitted when generated code has to reference one
+     * that the model did not supply. Defining it here keeps the sketch building
+     * while still forcing the user to fill it in.
+     */
+    secretPlaceholder(binding, symbol, key) {
+      if (binding[key] !== void 0)
+        return [];
+      return [`#define ${symbol}_${key.toUpperCase()} ""  // TODO: set this; do not commit secrets to the model`];
+    }
+    /** Libraries the model declares explicitly, normalised for emission. */
+    declared(libraries) {
+      return (libraries || []).map((library) => ({
+        name: library.name,
+        include: library.include || `${library.name}.h`,
+        source: library.source === "builtin" ? "builtin" : "registry",
+        reason: library.description || "declared in the model"
+      }));
+    }
+    defines(kind, binding, symbol) {
+      const known = KNOWN_KEYS[kind] ?? [];
+      const consumed = CONSUMED_KEYS[kind] ?? [];
+      const lines = [];
+      for (const [key, value] of Object.entries(binding)) {
+        const name = `${symbol}_${key.toUpperCase()}`;
+        if (consumed.includes(key))
+          continue;
+        if (SECRET_KEY.test(key)) {
+          lines.push(`#define ${name} ""  // TODO: set this; do not commit secrets to the model`);
+          continue;
+        }
+        if (!known.includes(key)) {
+          lines.push(`// ${key}: ${JSON.stringify(value)}  (not used by the ${kind} backend)`);
+          continue;
+        }
+        lines.push(`#define ${name} ${literal(value)}`);
+      }
+      return lines;
+    }
+  };
+  function guarded(preferred, fallback) {
+    if (preferred === fallback)
+      return [preferred];
+    return [
+      "#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266) || defined(ARDUINO_ARCH_RP2040)",
+      `  ${preferred}`,
+      "#else",
+      `  ${fallback}`,
+      "#endif"
+    ];
+  }
+  function literal(value) {
+    if (typeof value === "number")
+      return String(value);
+    if (typeof value === "boolean")
+      return value ? "true" : "false";
+    const text = String(value);
+    const gpio = /^(?:GPIO|IO)[_-]?(\d+)$/i.exec(text);
+    if (gpio)
+      return `${gpio[1]}  // ${text}`;
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(text) ? text : JSON.stringify(text);
+  }
+  function lower(symbol) {
+    return symbol.toLowerCase().replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+  }
+
   // dist/src/codegen/index.js
   var CodegenError = class extends Error {
     constructor(message) {
@@ -3360,6 +3740,9 @@
       this.guardStubs = /* @__PURE__ */ new Map();
       this.actionNames = /* @__PURE__ */ new Set();
       this.transitionsBySource = /* @__PURE__ */ new Map();
+      this.interfaces = new InterfaceBackend();
+      this.emissions = /* @__PURE__ */ new Map();
+      this.libraries = /* @__PURE__ */ new Map();
     }
     /**
      * Generate C++ code from a validated PulseModel
@@ -3371,8 +3754,11 @@
       this.indexGuards();
       this.indexActions();
       this.indexTransitions();
+      this.indexInterfaces();
       return [
         this.generateHeader(),
+        this.generateIncludes(),
+        this.generateInterfaces(),
         this.generateEventEnum(),
         this.generateParameterStruct(),
         this.generateSensorStruct(),
@@ -3396,6 +3782,26 @@
       this.guardStubs = /* @__PURE__ */ new Map();
       this.actionNames = /* @__PURE__ */ new Set();
       this.transitionsBySource = /* @__PURE__ */ new Map();
+      this.emissions = /* @__PURE__ */ new Map();
+      this.libraries = /* @__PURE__ */ new Map();
+    }
+    /**
+     * Work out what each declared resource contributes, and collect every
+     * library needed - both the ones an interface implies and the ones the
+     * model declares.
+     */
+    indexInterfaces() {
+      for (const resource of this.project.system.resources || []) {
+        const emission = this.interfaces.emit(resource, this.sanitizeUpper(resource.name));
+        this.emissions.set(resource.name, emission);
+        for (const library of emission.libraries) {
+          if (!this.libraries.has(library.name))
+            this.libraries.set(library.name, library);
+        }
+      }
+      for (const library of this.interfaces.declared(this.project.system.libraries)) {
+        this.libraries.set(library.name, library);
+      }
     }
     // =========================================================================
     // HEADER
@@ -3428,6 +3834,87 @@
 
 #include <Arduino.h>
 #include "PulseHSM.h"`;
+    }
+    // =========================================================================
+    // LIBRARY INCLUDES
+    // =========================================================================
+    generateIncludes() {
+      if (this.libraries.size === 0) {
+        return `// ============================================================================
+// LIBRARIES
+// ============================================================================
+
+// No external libraries required.`;
+      }
+      const libraries = Array.from(this.libraries.values()).sort((a, b) => a.name.localeCompare(b.name));
+      const includes = libraries.map((l) => `#include <${l.include}>`).join("\n");
+      const install = libraries.map((l) => {
+        const via = l.source === "builtin" ? "bundled with the board core" : "install via Library Manager / lib_deps";
+        return `//   ${l.name.padEnd(16)} ${via}  (${l.reason})`;
+      }).join("\n");
+      return `// ============================================================================
+// LIBRARIES
+// ============================================================================
+//
+// Required before this sketch will build:
+${install}
+
+${includes}`;
+    }
+    // =========================================================================
+    // INTERFACES
+    // =========================================================================
+    generateInterfaces() {
+      const resources = this.project.system.resources || [];
+      if (resources.length === 0) {
+        return `// ============================================================================
+// INTERFACES
+// ============================================================================
+
+// No resources declared.
+
+void setupInterfaces() {}`;
+      }
+      const blocks = [];
+      const globals = [];
+      const body = [];
+      const todos = [];
+      for (const resource of resources) {
+        const emission = this.emissions.get(resource.name);
+        if (!emission)
+          continue;
+        const heading = `// ${resource.name} (${resource.interface})` + (resource.description ? ` - ${resource.description}` : "");
+        if (emission.defines.length > 0) {
+          blocks.push([heading, ...emission.defines].join("\n"));
+        } else {
+          blocks.push(heading);
+        }
+        globals.push(...emission.globals);
+        if (emission.init.length > 0) {
+          body.push(`  // ${resource.name}`);
+          body.push(...emission.init.map((line) => line.startsWith("#") ? line : `  ${line}`));
+          body.push("");
+        }
+        todos.push(...emission.todos);
+      }
+      const todoBlock = todos.length > 0 ? `//
+// Still yours to finish:
+${todos.map((t) => `//   - ${t}`).join("\n")}
+` : "";
+      return `// ============================================================================
+// INTERFACES
+// ============================================================================
+//
+// Pin arguments to begin() require an ESP32/ESP8266/RP2040 core; the fallbacks
+// below cover cores without them. Adjust setupInterfaces() for other boards.
+${todoBlock}
+${blocks.join("\n\n")}
+${globals.length > 0 ? `
+${globals.join("\n")}
+` : ""}
+void setupInterfaces() {
+${body.length > 0 ? body.join("\n").replace(/\n+$/, "") : "  // Nothing to initialise"}
+}`;
     }
     // =========================================================================
     // EVENT ENUM
@@ -3719,6 +4206,9 @@ ${componentComments}
 void setup() {
   Serial.begin(115200);
   Serial.println("\\n\\n=== ${this.project.name} v${this.project.version} ===");
+
+  // Buses and peripherals declared as resources
+  setupInterfaces();
 
   // Initialize components
 ${initCode || "  // Initialize pins and peripherals here"}

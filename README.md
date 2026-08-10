@@ -109,6 +109,81 @@ system:
       target: running/maintaining
 ```
 
+## Splitting a Model Across Files
+
+One giant YAML is hard to maintain and hard to review. A model can `include`
+others, so each concern lives in its own file:
+
+```yaml
+# greenhouse.yaml - the only file that declares `project`
+project:
+  name: greenhouse
+  version: "1.0"
+
+include:
+  - hardware.yaml     # buses, libraries, sensors, actuators
+  - events.yaml
+  - behaviour.yaml    # states and transitions
+  - tuning.yaml       # parameters
+```
+
+- Paths resolve relative to the file that lists them.
+- Lists (`events`, `states`, `transitions`, `components`, `resources`,
+  `parameters`, `libraries`) are concatenated; everything else is overridden by
+  the including file.
+- Only the root file may declare `project`.
+- Include cycles, missing files, and names declared twice by different files
+  are all reported rather than silently merged.
+
+See `examples/greenhouse/`.
+
+## Interfaces
+
+`Resource` declares how the board is wired. The backend turns that into
+platform calls — the model itself never contains peripheral code:
+
+```yaml
+resources:
+  - name: sensor_bus
+    interface: i2c
+    binding: {sda: GPIO21, scl: GPIO22, frequency: 400000}
+```
+
+becomes
+
+```c
+#define SENSOR_BUS_SDA 21  // GPIO21
+Wire.begin(SENSOR_BUS_SDA, SENSOR_BUS_SCL);
+Wire.setClock(SENSOR_BUS_FREQUENCY);
+```
+
+Supported: `gpio`, `pwm`, `adc`, `uart`, `i2c`, `spi`, `can`, `onewire`,
+`wifi`, `ethernet`, `ble`, `mqtt`, `custom`. Anything the backend cannot fully
+wire up becomes a documented TODO rather than a silent omission.
+
+**Credentials are never baked in.** A binding key that looks like a secret
+(`password`, `token`, `key`…) is emitted as an empty placeholder with a TODO,
+whatever the model says — a model belongs in version control, a Wi-Fi password
+does not.
+
+## Libraries
+
+Libraries implied by an interface are added for you; only third-party ones need
+declaring:
+
+```yaml
+libraries:
+  - name: Adafruit_BME280
+    include: Adafruit_BME280.h
+    version: "^2.2"
+    source: registry
+```
+
+The generated sketch gets the `#include` lines plus a header comment listing
+what to install. `--libraries out.json` emits a machine-readable manifest with
+ready-made PlatformIO `lib_deps` (core-bundled libraries excluded, since
+listing them breaks a build).
+
 ## Web Editor
 
 A browser editor with live output: edit the model on the left, watch the

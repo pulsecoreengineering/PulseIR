@@ -12,6 +12,8 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { Parser } from '../src/parser/index.js';
 import { TopicEmitter } from '../src/emit/topics.js';
+import { LibraryEmitter } from '../src/emit/libraries.js';
+import { FileResolver } from '../src/parser/fs-resolver.js';
 import type { TopicManifest } from '../src/emit/topics.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -185,6 +187,34 @@ test('manifest round-trips as JSON', () => {
   assert(parsed.schema === 'pulseir/topics@1', 'schema tag missing');
   assert(parsed.perspective === 'device', 'perspective must be stated - it is ambiguous otherwise');
   assert(parsed.payloadFormat === 'plain-text-scalar', 'payload format missing');
+});
+
+test('library manifest lists implied and declared libraries', () => {
+  const project = new Parser().parseFrom(
+    path.join(repoRoot, 'examples/greenhouse/greenhouse.yaml'),
+    new FileResolver()
+  );
+  const manifest = new LibraryEmitter().emit(project);
+  const byName = new Map(manifest.libraries.map(l => [l.name, l]));
+
+  // Declaring `interface: i2c` should not also mean remembering "Wire.h".
+  assert(byName.get('Wire')?.implied === true, 'Wire was not implied by the I2C bus');
+  assert(byName.get('Wire')?.source === 'builtin', 'Wire should be core-bundled');
+  assert(byName.get('PubSubClient')?.implied === true, 'PubSubClient was not implied by MQTT');
+
+  const bme = byName.get('Adafruit_BME280');
+  assert(bme?.implied === false, 'a declared library was marked implied');
+  assert(bme?.version === '^2.2', 'declared version was dropped');
+
+  // lib_deps must not list libraries the core already ships.
+  assert(
+    manifest.platformio.includes('Adafruit_BME280@^2.2'),
+    `expected a pinned lib_dep, got ${JSON.stringify(manifest.platformio)}`
+  );
+  assert(
+    !manifest.platformio.some(dep => dep.startsWith('Wire')),
+    'a core-bundled library leaked into lib_deps'
+  );
 });
 
 // ============================================================================

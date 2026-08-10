@@ -226,12 +226,29 @@ These are hard boundaries:
 
 - ❌ Parse or evaluate expressions written in YAML
 - ❌ Support boolean composition (AND/OR/NOT) in YAML
-- ❌ Model hardware peripherals or interrupts in YAML
+- ❌ Contain peripheral *logic* - register writes, protocol sequences, ISR bodies
 - ❌ Diverge guard/action signatures between targets
 - ❌ Evaluate YAML parameters as guards (e.g., `"param >= 60"`)
 - ❌ Provide built-in conditional actions (no if/then/else in YAML)
 
 **If a feature request would require any of the above, it's out of scope.**
+
+### Declaring hardware is allowed; driving it is not
+
+An earlier version of this list said PulseIR would never "model hardware
+peripherals", which was already untrue - `Resource` and `InterfaceType` have
+described buses since the first version. The real boundary is narrower:
+
+- **Allowed (declarative facts).** "There is an I2C bus on pins 21 and 22 at
+  400 kHz." That is data about how the board is wired, and each backend
+  translates it for its platform: `Wire.begin(21, 22)` on Arduino,
+  `i2c_param_config()` on ESP-IDF. The model itself stays platform-agnostic.
+- **Not allowed (logic).** `Wire.beginTransmission(0x48)`, a register map, a
+  retry policy, an ISR body. Those are behaviour, and they live in driver code
+  for exactly the reasons guards do - they need a debugger and a type checker.
+
+The test is the same one that applies to guards: the model says *what exists*,
+never *what happens*.
 
 ### Why there is no expression field
 

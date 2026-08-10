@@ -11,17 +11,23 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Parser } from './parser/index.js';
+import { FileResolver } from './parser/fs-resolver.js';
 import { Codegen } from './codegen/index.js';
 import { TopicEmitter } from './emit/topics.js';
+import { LibraryEmitter } from './emit/libraries.js';
 
 const USAGE = `Usage: pulse-ir <input.yaml> [options]
 
 Options:
   --output <file>      Write the generated Arduino sketch
   --topics <file>      Write the MQTT topic manifest (JSON)
+  --libraries <file>   Write the library manifest (JSON)
   --namespace <name>   Topic namespace (defaults to the project name)
 
-With neither --output nor --topics, the sketch is printed to stdout.`;
+A model may "include" other files; paths are resolved relative to the file
+that lists them.
+
+With no output flag at all, the sketch is printed to stdout.`;
 
 async function main() {
   const args = process.argv.slice(2);
@@ -41,6 +47,7 @@ async function main() {
 
   const outputFile = flag('--output');
   const topicsFile = flag('--topics');
+  const librariesFile = flag('--libraries');
   const namespace = flag('--namespace');
 
   if (!inputFile || inputFile.startsWith('--')) {
@@ -49,14 +56,9 @@ async function main() {
   }
 
   try {
-    // Read input
+    // Parse. parseFrom() reads the entry file and follows any includes.
     console.log(`📖 Reading ${inputFile}...`);
-    const yamlContent = fs.readFileSync(inputFile, 'utf8');
-
-    // Parse
-    console.log('🔍 Parsing...');
-    const parser = new Parser();
-    const project = parser.parse(yamlContent);
+    const project = new Parser().parseFrom(inputFile, new FileResolver());
     console.log(`✓ Parsed project: ${project.name}`);
 
     // Validate
@@ -71,8 +73,16 @@ async function main() {
       console.log(`✓ Written to ${topicsPath}`);
     }
 
-    // Generate the sketch unless the run was only about topics
-    if (outputFile || !topicsFile) {
+    if (librariesFile) {
+      console.log('📚 Generating library manifest...');
+      const manifest = new LibraryEmitter().toJSON(project);
+      const librariesPath = path.resolve(librariesFile);
+      fs.writeFileSync(librariesPath, manifest);
+      console.log(`✓ Written to ${librariesPath}`);
+    }
+
+    // Generate the sketch unless the run only asked for manifests
+    if (outputFile || !(topicsFile || librariesFile)) {
       console.log('🔨 Generating C++ code...');
       const codegen = new Codegen();
       const cppCode = codegen.generate(project);
