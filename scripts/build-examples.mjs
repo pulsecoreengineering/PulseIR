@@ -12,6 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { writeIfChanged } from './write-if-changed.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -143,8 +144,11 @@ const target = process.argv[2]
   ? path.resolve(process.argv[2])
   : path.join(repoRoot, 'web/examples.ts');
 
-fs.writeFileSync(target, output);
+const changed = writeIfChanged(target, output);
 
 const count = Object.keys(examples).length;
 const fileCount = Object.values(examples).reduce((n, m) => n + Object.keys(m.files).length, 0);
-console.log(`✓ Baked ${count} examples (${fileCount} files) into ${path.relative(repoRoot, target)}`);
+const where = path.relative(repoRoot, target);
+console.log(changed
+  ? `✓ Baked ${count} examples (${fileCount} files) into ${where}`
+  : `· ${where} already current (${count} examples, ${fileCount} files)`);
