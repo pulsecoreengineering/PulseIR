@@ -6,17 +6,17 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { Parser } from '../src/parser/index.js';
+import { FileResolver } from '../src/parser/fs-resolver.js';
 import type { Event, State, Transition, Region } from '../src/model/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const yamlPath = path.join(__dirname, '../../examples/boiler.yaml');
-const yamlContent = fs.readFileSync(yamlPath, 'utf8');
+const yamlPath = path.join(__dirname, '../../examples/boiler/pulse.yaml');
 
 console.log('📖 Testing parser with boiler.yaml...\n');
 
 try {
   const parser = new Parser();
-  const project = parser.parse(yamlContent);
+  const project = parser.parseFrom(yamlPath, new FileResolver());
 
   console.log('✓ Parsed successfully!\n');
   console.log(`Project: ${project.name} (v${project.version})`);

@@ -29,17 +29,19 @@ pulse-ir/
 
 The `model/types.ts` defines the complete schema:
 
-- **Enums**: StateType, EventSource, ActionType, ComponentClass, InterfaceType
+- **Enums**: StateType, EventSource, ActionType, ComponentClass, InterfaceType,
+  LibrarySource
 - **Core HSM**: State, Event, Transition, Guard, Action, Region
-- **System**: Component, Resource, Parameter
-- **Top-level**: PulseProject, PulseSystem
+- **System**: Component, Resource, Parameter, Library
+- **Top-level**: PulseProject, PulseSystem, Target
 
 These are **intentionally simple**: just data structures, no validation or logic.
 
 ### Key Design Decisions
 
 1. **StateRef is a string**: Supports both "idle" and "running/heating" notation
-2. **Guard/Action use type + plugin pattern**: Extensible without schema changes
+2. **Guards and actions are names**: the model never contains a condition or a
+   body, so it cannot become a programming language (FUNCTION_CONTRACT.md §6)
 3. **EventSource is an enum**: Extensible (EXTERNAL, TIMER, SENSOR, MQTT, INTERNAL, CUSTOM)
 4. **Metadata everywhere**: Future-proof, allows attach arbitrary data
 5. **No behavior logic**: Only structure. Validation happens in the parser.
@@ -71,71 +73,117 @@ A guard is a **name**, not a condition — the model has no expression field at
 all. Any `description` you attach becomes a comment in the stub for whoever
 implements it. See FUNCTION_CONTRACT.md §6 and SYSTEMCONTEXT.md.
 
-## Example YAML (Preview)
+## The Schema
+
+The model is split by domain, so each concern lives on its own and new ones can
+be added without disturbing what is there:
+
+```yaml
+project:   { name, version, description }
+target:    { board }
+hardware:  { buses, devices }
+parameters:
+events:
+machine:   { states, transitions }
+actions:
+libraries:
+```
+
+Sections that carry identity are **keyed by name**, so a duplicate is
+impossible to write. Transitions stay a **list**, because order decides which
+one shadows another.
 
 ```yaml
 project:
   name: boiler_control
-  version: 1.0
+  version: "1.0"
 
-system:
-  events:
-    - name: START
-      source: external
-    - name: TEMP_REACHED
-      source: internal
+target:
+  board: esp32
 
+hardware:
+  devices:
+    pump:   { type: digital_output, pin: GPIO25 }
+    heater: { type: pwm_output, pin: GPIO27, channel: 0 }
+
+parameters:
+  setpoint:
+    type: float
+    default: 60.0
+    range: [10.0, 90.0]
+    unit: degC
+
+events:
+  START:        { source: external }
+  TEMP_REACHED: { source: sensor }
+
+actions:
+  start_pump:
+    driver: gpio_control
+    params: { device: pump, value: HIGH }
+
+machine:
   states:
     idle:
-      type: simple
-    
     running:
-      type: composite
       initial: heating
       states:
         heating:
-        cooling:
+        maintaining:
 
   transitions:
-    - source: idle
-      event: START
-      target: running
-      actions:
-        - start_pump
-    
-    - source: running/heating
-      event: TEMP_REACHED
-      guard: temp_at_setpoint
-      target: running/maintaining
+    - from: idle
+      on: START
+      to: running                # enters running/heating
+      do: start_pump
+
+    - from: running/heating
+      on: TEMP_REACHED
+      guard: temp_at_setpoint    # you implement this in C
+      to: running/maintaining
 ```
+
+A device declares what it *is*, so the machine refers to `pump` rather than to
+GPIO25. `type` implies a class and a driver for the common cases; anything
+unfamiliar must state its `class` rather than be guessed at.
 
 ## Splitting a Model Across Files
 
-One giant YAML is hard to maintain and hard to review. A model can `include`
-others, so each concern lives in its own file:
+One giant YAML is hard to maintain and hard to review, so a model is normally a
+directory:
+
+```
+boiler/
+├── pulse.yaml         the only file that declares `project`
+├── hardware.yaml      buses and devices
+├── parameters.yaml
+├── machine.yaml       events, states, transitions
+└── src/               your C++ - guards and actions
+```
 
 ```yaml
-# greenhouse.yaml - the only file that declares `project`
+# pulse.yaml
 project:
-  name: greenhouse
+  name: boiler_control
   version: "1.0"
 
-include:
-  - hardware.yaml     # buses, libraries, sensors, actuators
-  - events.yaml
-  - behaviour.yaml    # states and transitions
-  - tuning.yaml       # parameters
+target:
+  board: esp32
+
+imports:
+  - hardware.yaml
+  - parameters.yaml
+  - machine.yaml
 ```
 
 - Paths resolve relative to the file that lists them.
-- Lists (`events`, `states`, `transitions`, `components`, `resources`,
-  `parameters`, `libraries`) are concatenated; everything else is overridden by
-  the including file.
-- Only the root file may declare `project`.
-- Include cycles, missing files, and names declared twice by different files
-  are all reported rather than silently merged.
+- Name-keyed sections merge; **a name declared in two files is an error**, not a
+  silent override - neither file looks wrong on its own.
+- Transitions concatenate, in import order, with the importing file last.
+- Only the entry file may declare `project`.
+- Import cycles and missing files are reported, naming the file that asked.
 
-See `examples/greenhouse/`.
+See `examples/boiler/` and `examples/greenhouse/`.
 
 ## Interfaces
 
@@ -143,10 +191,13 @@ See `examples/greenhouse/`.
 platform calls — the model itself never contains peripheral code:
 
 ```yaml
-resources:
-  - name: sensor_bus
-    interface: i2c
-    binding: {sda: GPIO21, scl: GPIO22, frequency: 400000}
+hardware:
+  buses:
+    sensor_bus:
+      interface: i2c
+      sda: GPIO21
+      scl: GPIO22
+      frequency: 400000
 ```
 
 becomes
@@ -220,6 +271,7 @@ Re-run `npm run build:web` after changing anything under `src/` or `examples/`;
 npm install
 npm run build
 npm run test
-npm run cli -- examples/boiler.yaml --output boiler.ino
-npm run cli -- examples/boiler.yaml --topics topics.json
+npm run cli -- examples/boiler/pulse.yaml --output boiler.ino
+npm run cli -- examples/boiler/pulse.yaml --topics topics.json
+npm run cli -- examples/boiler/pulse.yaml --libraries libraries.json
 ```

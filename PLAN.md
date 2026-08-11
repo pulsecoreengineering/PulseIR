@@ -1,6 +1,6 @@
 # Adoption Plan: PulseIR as a system description language
 
-**Status**: Proposed — decisions marked ⚠ are not yet made
+**Status**: Phase 0 complete. Phase 1 next.
 **Supersedes**: the roadmap that used to live in INDEX.md
 
 This plan adopts the direction that PulseIR should describe *what an embedded
@@ -41,75 +41,44 @@ Listed so we do not plan to build it twice.
 | Proposed | Status |
 |---|---|
 | C/C++ escape hatch for behaviour | **Done.** Guards/actions are named C functions; the expression field was removed deliberately |
-| Multi-file models (`imports:`) | **Done**, spelled `include:`. `examples/greenhouse/` is exactly the proposed layout |
+| Multi-file models (`imports:`) | **Done.** `examples/boiler/` and `examples/greenhouse/` are the proposed layout |
 | Parameters → C struct | **Done** (`SystemParameters`, defaults from the model) |
 | Parameters → UI metadata for a dashboard | **Done.** `topics.json` carries type, unit, min, max per parameter |
 | MQTT publish/subscribe topic map | **Partly.** The manifest is generated; the firmware-side plumbing is not |
-| Hardware pins / buses | **Partly.** `Resource` + `Component` generate includes, defines and `begin()` calls. No board concept, no logical device types |
+| Hardware pins / buses | **Done** for declaration: `hardware.buses` / `hardware.devices` with logical types, generating includes, defines and `begin()` calls |
 | Validation of unknown state targets | **Done**, plus ambiguous names, duplicate names across files, include cycles, unknown interfaces |
 | Pin conflict detection | **Not done** — highest-value gap |
-| Board capability checks | **Not done** |
+| Board capability checks | **Not done.** `target.board` is carried; profiles are Phase 1 |
 | Telemetry / storage / diagnostics / safety | **Not done** |
 
 ---
 
-## 2. Phase 0 — Reshape the schema (breaking, do first)
+## 2. Phase 0 — Reshape the schema ✅ DONE
 
-These are breaking changes. They are cheap now and expensive later, which is
-exactly the reason to do them before anything else.
+Decisions taken: old transition keywords dropped rather than kept as permanent
+aliases, `imports:` over `include:`, one release of deprecation for the retired
+shapes.
 
-### 2.1 Split the top level by domain
+Delivered:
 
-Everything currently sits under `system:`. Replace with domains that can grow
-independently:
+- top level split into `target` / `hardware` / `parameters` / `events` /
+  `machine` / `actions` / `libraries`
+- sections carrying identity are keyed by name; transitions stay an ordered list
+- `from` / `on` / `to` / `do`, with `do:` taking one name or several
+- `imports:` replaces `include:`
+- `target: { board: }` carried into the IR, ready for Phase 1
+- devices declare a `type` that implies class and driver; an unfamiliar type
+  must state its class rather than be guessed at
+- the `actions:` catalogue is now real. It previously parsed for names only,
+  so declared `params` never reached the generated stub — they do now
+- an action's identity is its name, not its driver. Two actions sharing
+  `gpio_control` used to collide into one stub
+- examples migrated to the directory layout; retired shapes still parse for one
+  release and report a warning through `Parser.warnings`, shown by the CLI and
+  the editor
 
-```yaml
-project:   { name, version, description }
-target:    { board }
-hardware:  { buses, devices }
-parameters:
-events:
-machine:   { states, transitions }
-actions:
-libraries:
-```
-
-Later phases add `telemetry:`, `communication:`, `storage:`, `diagnostics:`,
-`safety:` as siblings without disturbing anything above.
-
-**Cost**: parser restructure, every example and doc updated. The IR types
-survive mostly intact — this is a change of surface, not of model.
-
-**Compatibility**: the parser accepts the old `system:` block for one release,
-emitting a deprecation note that names the file, then drops it. No silent
-translation.
-
-### 2.2 Readable transition keywords
-
-```yaml
-# from                on              to                    do
-- from: running/heating
-  on: TEMP_REACHED
-  to: running/maintaining
-  do: reduce_heat            # scalar or list
-```
-
-`from/on/to/do` become canonical; `source/event/target/actions` stay accepted
-as aliases. `do:` takes a scalar or a list, so single-action transitions — the
-common case — stop needing a one-item list.
-
-⚠ **Decision needed**: accept aliases indefinitely, or drop them at the same
-time as `system:`? Accepting both forever means two ways to write everything,
-which is cognitive load — the thing this project exists to remove. I lean
-toward dropping them with `system:`.
-
-### 2.3 `imports:` vs `include:`
-
-⚠ **Decision needed**: rename `include:` → `imports:` to match the proposal, or
-keep `include:`. Purely cosmetic; I have no strong view. Cheap either way, and
-cheapest now.
-
----
+The IR itself was left alone, so codegen, the emitters and the editor needed no
+changes — this was a change of surface, as intended.
 
 ## 3. Phase 1 — Target, hardware model, and validation
 
@@ -131,10 +100,9 @@ ERROR: GPIO25 is assigned to both "pump" and "fan"
 This is the single most compelling demonstration that the compiler beats
 hand-written code, and it is nearly free.
 
-### 3.2 `target: { board: esp32 }`
+### 3.2 `target: { board: esp32 }` ✅ parsed in Phase 0
 
-Adds the field and threads it to the backend. Cheap on its own; its value is
-what 3.3 and 3.4 build on it.
+The field is read into the IR. What remains is a backend that consumes it.
 
 ### 3.3 Board profiles
 
@@ -165,9 +133,9 @@ something false. Each profile ships with a citation and a test.
 
 **Cost**: moderate per board. Start with **one** board (esp32), verified.
 
-### 3.4 Logical device types
+### 3.4 Logical device types ✅ DONE in Phase 0
 
-So the application refers to `pump`, not `GPIO25`:
+Landed early because the schema reshape had to decide the shape anyway:
 
 ```yaml
 hardware:

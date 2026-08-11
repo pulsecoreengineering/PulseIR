@@ -1,0 +1,78 @@
+# Behaviour: what the system reacts to, and how it moves.
+#
+# Guards and actions are names only. You implement them in src/ - see
+# FUNCTION_CONTRACT.md.
+
+events:
+  START:
+    source: external
+    description: User presses start
+  STOP:
+    source: external
+  TEMP_REACHED:
+    source: sensor
+  OVER_TEMP:
+    source: sensor
+  EMERGENCY_STOP:
+    source: external
+
+actions:
+  start_pump:
+    driver: gpio_control
+    params: {device: pump, value: HIGH}
+  stop_pump:
+    driver: gpio_control
+    params: {device: pump, value: LOW}
+  reduce_heat:
+    driver: pwm_control
+    params: {device: heater, duty: 30}
+  activate_cooling:
+    driver: gpio_control
+    params: {device: cooling_fan, value: HIGH}
+  shutdown_all:
+    driver: gpio_control
+    params: {devices: [pump, heater, cooling_fan], value: LOW}
+
+machine:
+  states:
+    idle:
+      description: System is off
+    running:
+      initial: heating
+      states:
+        heating:
+        maintaining:
+        cooling:
+    fault:
+
+  transitions:
+    - from: idle
+      on: START
+      to: running          # enters running/heating
+      do: start_pump
+
+    - from: running        # applies from any child
+      on: STOP
+      to: idle
+      do: stop_pump
+
+    - from: running/heating
+      on: TEMP_REACHED
+      guard:
+        name: temp_at_setpoint
+        description: water temperature has reached the setpoint
+      to: running/maintaining
+      do: reduce_heat
+
+    - from: running/maintaining
+      on: OVER_TEMP
+      guard:
+        name: over_safe_temp
+        description: temperature has exceeded the safety limit
+      to: running/cooling
+      do: activate_cooling
+
+    - from: "*"
+      on: EMERGENCY_STOP
+      to: fault
+      do: shutdown_all

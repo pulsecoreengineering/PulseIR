@@ -58,8 +58,13 @@ async function main() {
   try {
     // Parse. parseFrom() reads the entry file and follows any includes.
     console.log(`📖 Reading ${inputFile}...`);
-    const project = new Parser().parseFrom(inputFile, new FileResolver());
+    const parser = new Parser();
+    const project = parser.parseFrom(inputFile, new FileResolver());
     console.log(`✓ Parsed project: ${project.name}`);
+
+    for (const warning of parser.warnings) {
+      console.warn(`⚠️  ${warning}`);
+    }
 
     // Validate
     console.log('✓ Validated');

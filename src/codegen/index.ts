@@ -560,7 +560,7 @@ ${handlers.join('\n\n')}`;
         const guard = this.guards.get(idx);
         const target = this.states[this.resolveEntry(this.resolveRef(t.target, 'target'))];
         const calls = (t.actions || [])
-          .map(a => `        action_${this.sanitize(a.driver)}(&systemContext);`)
+          .map(a => `        action_${this.sanitize(a.name)}(&systemContext);`)
           .join('\n');
 
         const fire = [
@@ -778,7 +778,7 @@ ${implementations}`;
     const implementations = Array.from(this.actionNames).map(name => {
       const action = this.project.system.transitions
         .flatMap(t => t.actions || [])
-        .find(a => a.driver === name);
+        .find(a => a.name === name);
 
       const paramDoc = action?.params
         ? Object.entries(action.params)
@@ -948,10 +948,10 @@ ${implementations.join('\n\n')}`;
   private indexActions(): void {
     this.project.system.transitions.forEach((t, idx) => {
       for (const a of t.actions || []) {
-        if (!a.driver) {
+        if (!a.name) {
           throw new CodegenError(`Transition ${idx} has an action without a name`);
         }
-        this.actionNames.add(a.driver);
+        this.actionNames.add(a.name);
       }
     });
   }

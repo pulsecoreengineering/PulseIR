@@ -129,7 +129,7 @@ static void step(SystemEvent e) {
 `;
 
 test('boiler example compiles, links and runs on the PulseHSM runtime', () => {
-  const sketch = generate(path.join(repoRoot, 'examples/boiler.yaml'));
+  const sketch = generate(path.join(repoRoot, 'examples/boiler/pulse.yaml'));
 
   const driver = `${DRIVER_PRELUDE}
 int main() {
@@ -281,7 +281,7 @@ test('interfaces generate real init code, and never leak a credential', () => {
 });
 
 test('generated guards and actions match the FUNCTION_CONTRACT signatures', () => {
-  const sketch = generate(path.join(repoRoot, 'examples/boiler.yaml'));
+  const sketch = generate(path.join(repoRoot, 'examples/boiler/pulse.yaml'));
 
   assert(
     sketch.includes('bool guard_temp_at_setpoint(const SystemContext* ctx)'),
@@ -328,7 +328,7 @@ test('generated guards and actions match the FUNCTION_CONTRACT signatures', () =
 });
 
 test('generated sketch drives the PulseHSM runtime correctly', () => {
-  const sketch = generate(path.join(repoRoot, 'examples/boiler.yaml'));
+  const sketch = generate(path.join(repoRoot, 'examples/boiler/pulse.yaml'));
 
   // The sizing macros are inert unless they precede the include.
   const includeAt = sketch.indexOf('#include "PulseHSM.h"');

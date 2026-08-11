@@ -127,8 +127,13 @@ export interface Guard {
 // ============================================================================
 
 export interface Action {
+  /**
+   * The action's identity, and the stub generated for it: `action_<name>`.
+   * Several actions may share a driver, so this is what must be unique.
+   */
+  name: string;
   type: ActionType;
-  driver: string;             // Driver or action name (e.g., "gpio_control", "publish_temp")
+  driver: string;             // Implementing plugin (e.g., "gpio_control")
   params?: Record<string, unknown>;  // Driver-specific parameters
   metadata?: Metadata;
 }
@@ -192,6 +197,14 @@ export interface Component {
   name: string;
   class: ComponentClass;
   driver: string;             // Driver plugin name (e.g., "ds18b20", "gpio_control")
+  /**
+   * Logical device type from the model's `hardware.devices`, e.g.
+   * "digital_output" or "ds18b20". Built-in types imply a class and a driver,
+   * so the application can refer to `pump` without knowing a pin exists.
+   */
+  type?: string;
+  /** Name of the bus this device sits on, for shared buses like I2C. */
+  bus?: string;
   config?: Record<string, unknown>;
   description?: string;
   metadata?: Metadata;
@@ -274,13 +287,29 @@ export interface PulseSystem {
 // PROJECT - Top level
 // ============================================================================
 
+/**
+ * What the model is built for.
+ *
+ * The board name selects a backend's board profile - which pins exist, what
+ * they can do - so the compiler can reject a design before it reaches a bench.
+ * It does not make the *output* portable on its own: a backend still targets
+ * one toolchain family.
+ */
+export interface Target {
+  board?: string;             // "esp32", "esp32s3", ...
+  description?: string;
+  metadata?: Metadata;
+}
+
 export interface PulseProject {
   name: string;
   version: string;
   description?: string;
-  
+
+  target?: Target;
+
   // The system
   system: PulseSystem;
-  
+
   metadata?: Metadata;
 }

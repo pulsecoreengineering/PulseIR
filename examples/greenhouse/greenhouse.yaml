@@ -1,29 +1,21 @@
-# Multi-file model.
+# Multi-file model. Only this file declares `project`.
 #
-# Only this file declares `project`. Everything else is split by concern so a
-# change to the wiring never touches the behaviour, and a merge conflict in one
-# area cannot corrupt another.
+#   hardware.yaml    buses and devices
+#   parameters.yaml  tunable configuration
+#   machine.yaml     events, states and transitions
 #
-#   hardware.yaml   buses, libraries, sensors and actuators
-#   events.yaml     what the system reacts to
-#   behaviour.yaml  states and transitions
-#   tuning.yaml     parameters the dashboard can push down
-#
-# Paths are relative to this file. Lists (events, states, transitions,
-# components, resources, parameters, libraries) are concatenated across files;
-# anything else declared here wins.
+# Paths are relative to this file. Each name may only be defined once across
+# the whole model, so two files cannot silently collide.
 
 project:
   name: greenhouse
   version: "1.0"
   description: Climate control for a small greenhouse
 
-include:
-  - hardware.yaml
-  - events.yaml
-  - behaviour.yaml
-  - tuning.yaml
+target:
+  board: esp32
 
-system:
-  name: greenhouse_controller
-  description: Samples climate, ventilates, and reports to a dashboard
+imports:
+  - hardware.yaml
+  - parameters.yaml
+  - machine.yaml

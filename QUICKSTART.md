@@ -14,7 +14,7 @@ npm install
 npm run build
 
 # Test (optional)
-npm run cli -- examples/boiler.yaml --output /tmp/test.ino
+npm run cli -- examples/boiler/pulse.yaml --output /tmp/test.ino
 cat /tmp/test.ino
 ```
 
@@ -27,75 +27,62 @@ Create `my_system.yaml`:
 ```yaml
 project:
   name: my_system
-  version: 1.0
+  version: "1.0"
 
-system:
-  # Events the system responds to
-  events:
-    - name: START
-      source: external
-    - name: STOP
-      source: external
+target:
+  board: esp32
 
-  # States the system can be in
+# What is physically wired up. The machine refers to `led`, never to GPIO12.
+hardware:
+  devices:
+    led:
+      type: digital_output
+      pin: GPIO12
+
+# Configuration contract: becomes a C struct, and a dashboard control.
+parameters:
+  blink_delay:
+    type: int
+    default: 500
+    range: [50, 5000]
+    unit: ms
+
+# What the system reacts to.
+events:
+  START: { source: external }
+  STOP:  { source: external }
+
+# Named side effects. You implement each one in C.
+actions:
+  begin_work:
+    driver: gpio_control
+    params: { device: led, value: HIGH }
+  end_work:
+    driver: gpio_control
+    params: { device: led, value: LOW }
+
+# Behaviour.
+machine:
   states:
-    - name: idle
-      type: simple
-    - name: running
-      type: simple
-    - name: stopped
-      type: simple
+    idle:
+    running:
+    stopped:
 
-  # Transitions between states
   transitions:
-    - source: idle
-      event: START
-      target: running
-      actions:
-        - begin_work
+    - from: idle
+      on: START
+      to: running
+      do: begin_work
 
-    - source: running
-      event: STOP
-      target: stopped
-      actions:
-        - end_work
-
-  # Actions (things that happen)
-  actions:
-    begin_work:
-      type: driver
-      driver: gpio_control
-      params:
-        pin: LED
-        value: HIGH
-
-    end_work:
-      type: driver
-      driver: gpio_control
-      params:
-        pin: LED
-        value: LOW
-
-  # Components (sensors, actuators, services)
-  components:
-    - name: led
-      class: actuator
-      driver: gpio_control
-      config:
-        pin: GPIO12
-
-  # Hardware resources
-  resources:
-    - name: gpio
-      interface: gpio
-
-  # Configuration parameters
-  parameters:
-    - name: blink_delay
-      type: int
-      default: 500
-      unit: ms
+    - from: running
+      on: STOP
+      to: stopped
+      do: end_work
 ```
+
+Sections that name things are **keyed by name**, so you cannot accidentally
+declare two `START` events. Transitions stay a **list**, because their order
+decides which one wins when both could fire.
 
 ---
 
@@ -193,59 +180,52 @@ void loop() {
 
 ### States
 
-**Simple state**:
+**Simple state** — nothing under it:
 ```yaml
-- name: idle
-  type: simple
+states:
+  idle:
 ```
 
-**Hierarchical state**:
+**Hierarchical state** — a state with `states:` under it is composite; you do
+not declare the type:
 ```yaml
-- name: running
-  type: composite
-  initial: warming
-  states:
-    - name: warming
-      type: simple
-    - name: cooling
-      type: simple
+states:
+  running:
+    initial: warming      # defaults to the first child
+    states:
+      warming:
+      cooling:
 ```
 
 ### Events
 
 ```yaml
 events:
-  - name: START
-    source: external           # User input
-  
-  - name: TIMER_EXPIRED
-    source: timer             # Timer
-  
-  - name: TEMP_REACHED
-    source: sensor            # Sensor value
-  
-  - name: MQTT_COMMAND
-    source: mqtt              # MQTT message
-  
-  - name: CHECK_ERROR
-    source: internal          # Internal condition
+  START:         { source: external }   # User input
+  TIMER_EXPIRED: { source: timer }      # Timer
+  TEMP_REACHED:  { source: sensor }     # Sensor value
+  MQTT_COMMAND:  { source: mqtt }       # Remotely triggerable
+  CHECK_ERROR:   { source: internal }   # Internal condition
 ```
+
+Only events declared `source: mqtt` are exposed as remote commands in the topic
+manifest — a dashboard cannot fire a transition you never meant it to.
 
 ### Transitions
 
 **Simple**:
 ```yaml
-- source: idle
-  event: START
-  target: running
+- from: idle
+  on: START
+  to: running
 ```
 
 **With guard**:
 ```yaml
-- source: running
-  event: TEMP_REACHED
+- from: running
+  on: TEMP_REACHED
   guard: temp_at_setpoint
-  target: maintaining
+  to: maintaining
 ```
 
 A guard is the **name of a function you write in C** — the YAML never contains
@@ -253,28 +233,32 @@ the condition itself. To record what it checks, use the mapping form; the
 description becomes a comment in the generated stub:
 
 ```yaml
-- source: running
-  event: TEMP_REACHED
+- from: running
+  on: TEMP_REACHED
   guard:
     name: temp_at_setpoint
     description: water temperature has reached the setpoint
-  target: maintaining
+  to: maintaining
 ```
 
-**With action**:
+**With actions** — `do:` takes one name or several:
 ```yaml
-- source: idle
-  event: START
-  target: running
-  actions:
-    - start_pump
+- from: idle
+  on: START
+  to: running
+  do: start_pump
+
+- from: idle
+  on: START
+  to: running
+  do: [start_pump, open_log]
 ```
 
 **Wildcard (from any state)**:
 ```yaml
-- source: "*"
-  event: EMERGENCY_STOP
-  target: fault
+- from: "*"
+  on: EMERGENCY_STOP
+  to: fault
 ```
 
 ### Actions
@@ -282,54 +266,58 @@ description becomes a comment in the generated stub:
 ```yaml
 actions:
   start_pump:
-    type: driver
     driver: gpio_control
-    params:
-      pin: PUMP_PIN
-      value: HIGH
+    params: { device: pump, value: HIGH }
 ```
+
+Once an `actions:` catalogue exists it is authoritative: a transition that does
+an action you never declared is a typo, and is reported as one.
 
 ### Components
 
 ```yaml
-components:
-  - name: temperature_sensor
-    class: sensor
-    driver: ds18b20
-    config:
-      interface: onewire
-      pin: GPIO4
+hardware:
+  devices:
+    temperature_sensor:
+      type: ds18b20        # implies class: sensor
+      bus: sensor_bus
+      unit: degC
 
-  - name: pump
-    class: actuator
-    driver: gpio_control
-    config:
+    pump:
+      type: digital_output # implies class: actuator
       pin: GPIO25
 ```
+
+Built-in types: `digital_output`, `digital_input`, `pwm_output`,
+`analog_input`, plus common parts like `ds18b20`, `dht22`, `bme280`. Any other
+type must state its `class` — guessing could publish an actuator as if it were
+a sensor reading.
 
 ### Resources
 
 ```yaml
-resources:
-  - name: gpio
-    interface: gpio
-  
-  - name: onewire
-    interface: onewire
-    binding:
+hardware:
+  buses:
+    sensor_bus:
+      interface: onewire
       pin: GPIO4
+
+    i2c_bus:
+      interface: i2c
+      sda: GPIO21
+      scl: GPIO22
+      frequency: 400000
 ```
 
 ### Parameters
 
 ```yaml
 parameters:
-  - name: setpoint
+  setpoint:
     type: float
     default: 60.0
+    range: [0, 100]
     unit: degC
-    min: 0
-    max: 100
 ```
 
 ---
@@ -340,23 +328,19 @@ parameters:
 
 ```yaml
 events:
-  - name: BUTTON_PRESSED
-    source: external
+  BUTTON_PRESSED: { source: external }
 
 actions:
   toggle_led:
-    type: driver
     driver: gpio_control
-    params:
-      pin: LED
-      value: TOGGLE
+    params: { device: led, value: TOGGLE }
 
-transitions:
-  - source: idle
-    event: BUTTON_PRESSED
-    target: idle
-    actions:
-      - toggle_led
+machine:
+  transitions:
+    - from: idle
+      on: BUTTON_PRESSED
+      to: idle
+      do: toggle_led
 ```
 
 In Arduino:
@@ -370,16 +354,15 @@ if (digitalRead(BUTTON_PIN) == LOW) {
 
 ```yaml
 events:
-  - name: TEMP_CHECK
-    source: sensor
+  TEMP_CHECK: { source: sensor }
 
-transitions:
-  - source: heating
-    event: TEMP_CHECK
-    guard: temp_at_target
-    target: maintaining
-    actions:
-      - reduce_heat
+machine:
+  transitions:
+    - from: heating
+      on: TEMP_CHECK
+      guard: temp_at_target
+      to: maintaining
+      do: reduce_heat
 ```
 
 In Arduino:
@@ -397,15 +380,14 @@ reading the same values through `ctx`.
 
 ```yaml
 events:
-  - name: TIMEOUT
-    source: timer
+  TIMEOUT: { source: timer }
 
-transitions:
-  - source: running
-    event: TIMEOUT
-    target: stopped
-    actions:
-      - cleanup
+machine:
+  transitions:
+    - from: running
+      on: TIMEOUT
+      to: stopped
+      do: cleanup
 ```
 
 In Arduino:
@@ -421,17 +403,17 @@ if (now - lastActivity > TIMEOUT_MS) {
 
 For a timeout that always leaves the same state, PulseHSM can do this for you
 via `addState()`'s `timeoutMs` / `timeoutNext`. The IR has no field for it yet
-(see INDEX.md), so raise the event yourself for now.
+(see PLAN.md), so raise the event yourself for now.
 
 ### Pattern 4: Emergency Stop (From Any State)
 
 ```yaml
-transitions:
-  - source: "*"
-    event: EMERGENCY_STOP
-    target: fault
-    actions:
-      - shutdown
+machine:
+  transitions:
+    - from: "*"
+      on: EMERGENCY_STOP
+      to: fault
+      do: shutdown
 ```
 
 Works from any state automatically.

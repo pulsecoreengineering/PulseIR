@@ -136,7 +136,7 @@ function setStale(stale: boolean): void {
   for (const pane of Object.values(panes)) pane.classList.toggle('stale', stale);
 }
 
-function setStatus(kind: 'ok' | 'error', title: string, detail = ''): void {
+function setStatus(kind: 'ok' | 'warn' | 'error', title: string, detail = ''): void {
   status.className = `status ${kind}`;
   status.innerHTML = `<strong>${escapeHtml(title)}</strong>${
     detail ? `<span>${escapeHtml(detail)}</span>` : ''
@@ -202,7 +202,7 @@ function renderStructure(project: PulseProject): string {
 
     const guard = t.guard ? `<code>${escapeHtml(t.guard.name)}</code>` : '<span class="dim">—</span>';
     const actions = t.actions?.length
-      ? t.actions.map(a => `<code>${escapeHtml(a.driver)}</code>`).join(' ')
+      ? t.actions.map(a => `<code>${escapeHtml(a.name)}</code>`).join(' ')
       : '<span class="dim">—</span>';
     const src = t.source === '*'
       ? '<span class="tag wild">any state</span>'
@@ -269,11 +269,12 @@ function render(): void {
   persist();
 
   let project: PulseProject;
+  const parser = new Parser();
   try {
-    // The open buffers are the filesystem, so an include between tabs resolves
+    // The open buffers are the filesystem, so an import between tabs resolves
     // the same way it does on disk.
     const resolver = new MemoryResolver(workspace.files);
-    project = new Parser().parseFrom(workspace.entry, resolver);
+    project = parser.parseFrom(workspace.entry, resolver);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const where = error instanceof ParseError && error.line !== undefined
@@ -312,7 +313,12 @@ function render(): void {
     `${(project.system.resources || []).length} resources`,
     `${sketch.split('\n').length} lines generated`,
   ].filter(Boolean).join(' · ');
-  setStatus('ok', project.name, counts);
+  // A retired schema still generates, but the student should be told.
+  if (parser.warnings.length > 0) {
+    setStatus('warn', project.name, `${counts}\n${parser.warnings.join('\n')}`);
+  } else {
+    setStatus('ok', project.name, counts);
+  }
 
   current = { project, sketch, topics, libraries };
 }

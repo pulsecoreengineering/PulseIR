@@ -3077,11 +3077,25 @@
       this.name = "ParseError";
     }
   };
+  var BUILTIN_DEVICE_TYPES = {
+    digital_output: { class: "actuator", driver: "gpio_control" },
+    digital_input: { class: "sensor", driver: "gpio_read" },
+    pwm_output: { class: "actuator", driver: "pwm_control" },
+    analog_input: { class: "sensor", driver: "adc_read" },
+    // Common parts, listed so `type: ds18b20` needs no `class:`.
+    ds18b20: { class: "sensor", driver: "ds18b20" },
+    dht22: { class: "sensor", driver: "dht22" },
+    bme280: { class: "sensor", driver: "bme280" }
+  };
+  function isPlainObject(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
   function describe(origin) {
     return origin ? `"${origin}"` : "The model";
   }
   var Parser = class {
     constructor() {
+      this.warnings = [];
       this.eventNames = /* @__PURE__ */ new Set();
       this.stateNames = /* @__PURE__ */ new Set();
       this.actionNames = /* @__PURE__ */ new Set();
@@ -3095,6 +3109,7 @@
      * Pass a resolver in `options` to allow the document to `include` others.
      */
     parse(yamlContent, options = {}) {
+      this.warnings.length = 0;
       try {
         const raw = this.loadDocument(yamlContent, options.origin ?? null, options, new Set(options.origin ? [options.origin] : []), 0);
         return this.parseProject(raw);
@@ -3140,15 +3155,18 @@
       if (typeof doc !== "object" || Array.isArray(doc)) {
         throw new ParseError(`${describe(origin)} must contain a YAML mapping`);
       }
-      if (doc.includes !== void 0 && doc.include === void 0) {
-        throw new ParseError(`${describe(origin)} uses "includes"; the key is "include"`);
+      if (doc.include !== void 0 && doc.imports === void 0) {
+        this.warnings.push(`${describe(origin)} uses "include"; the key is now "imports". Support will be removed in the next release.`);
       }
-      const refs = this.includeRefs(doc.include, origin);
+      if (doc.includes !== void 0 && doc.imports === void 0 && doc.include === void 0) {
+        throw new ParseError(`${describe(origin)} uses "includes"; the key is "imports"`);
+      }
+      const refs = this.includeRefs(doc.imports ?? doc.include, origin);
       if (refs.length === 0)
         return doc;
       const resolver = options.resolver;
       if (!resolver) {
-        throw new ParseError(`${describe(origin)} uses "include", but this parser was given no way to read other files. Load the model from a path (the CLI does this) or supply a resolver.`);
+        throw new ParseError(`${describe(origin)} uses "imports", but this parser was given no way to read other files. Load the model from a path (the CLI does this) or supply a resolver.`);
       }
       let merged = {};
       for (const ref of refs) {
@@ -3190,21 +3208,60 @@
      */
     mergeDocuments(base, overlay) {
       const result = { ...base, ...overlay };
+      delete result.imports;
       delete result.include;
+      for (const key of ["events", "parameters", "actions"]) {
+        const merged = this.mergeMaps(base[key], overlay[key], key);
+        if (merged !== void 0)
+          result[key] = merged;
+      }
+      for (const [parent, children] of [
+        ["hardware", ["buses", "devices"]],
+        ["machine", ["states"]]
+      ]) {
+        const left = base[parent];
+        const right = overlay[parent];
+        if (!left || !right)
+          continue;
+        const section = { ...left, ...right };
+        for (const child of children) {
+          const merged = this.mergeMaps(left[child], right[child], `${parent}.${child}`);
+          if (merged !== void 0)
+            section[child] = merged;
+        }
+        if (parent === "machine" && Array.isArray(left.transitions) && Array.isArray(right.transitions)) {
+          section.transitions = [...left.transitions, ...right.transitions];
+        }
+        result[parent] = section;
+      }
+      if (Array.isArray(base.libraries) && Array.isArray(overlay.libraries)) {
+        result.libraries = [...base.libraries, ...overlay.libraries];
+      }
       const baseSystem = base.system;
       const overlaySystem = overlay.system;
-      if (!baseSystem || !overlaySystem)
-        return result;
-      const system = { ...baseSystem, ...overlaySystem };
-      for (const key of MERGED_LISTS) {
-        const left = baseSystem[key];
-        const right = overlaySystem[key];
-        if (Array.isArray(left) && Array.isArray(right)) {
-          system[key] = [...left, ...right];
+      if (baseSystem && overlaySystem) {
+        const system = { ...baseSystem, ...overlaySystem };
+        for (const key of MERGED_LISTS) {
+          const left = baseSystem[key];
+          const right = overlaySystem[key];
+          if (Array.isArray(left) && Array.isArray(right)) {
+            system[key] = [...left, ...right];
+          }
+        }
+        result.system = system;
+      }
+      return result;
+    }
+    /** Union two name-keyed sections, refusing a name that appears in both. */
+    mergeMaps(left, right, label) {
+      if (!isPlainObject(left) || !isPlainObject(right))
+        return void 0;
+      for (const name of Object.keys(right)) {
+        if (name in left) {
+          throw new ParseError(`"${label}.${name}" is declared in two different files. Each name may only be defined once across the whole model.`);
         }
       }
-      result.system = system;
-      return result;
+      return { ...left, ...right };
     }
     // =========================================================================
     // PARSING
@@ -3214,24 +3271,332 @@
       if (!projectRaw) {
         throw new ParseError('Missing "project" section');
       }
-      const systemRaw = raw.system;
-      if (!systemRaw) {
-        throw new ParseError('Missing "system" section');
+      const legacy = raw.system !== void 0;
+      if (legacy) {
+        this.warnings.push('This model uses the retired "system:" block. Split it into the top-level domains (target, hardware, parameters, events, machine, actions) - see PLAN.md. Support will be removed in the next release.');
       }
-      const system = this.parseSystem(systemRaw);
+      const system = legacy ? this.parseSystem(raw.system) : this.parseDomains(raw);
       return {
         name: projectRaw.name || "unnamed",
         version: projectRaw.version || "0.1.0",
         description: projectRaw.description,
+        target: this.parseTarget(raw.target),
         system
       };
     }
-    parseSystem(raw) {
+    parseTarget(raw) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      if (typeof raw === "string")
+        return { board: raw };
+      const obj = raw;
+      return {
+        board: obj.board,
+        description: obj.description
+      };
+    }
+    // =========================================================================
+    // DOMAIN SCHEMA (current)
+    // =========================================================================
+    /**
+     * Read the domain-per-section shape:
+     *
+     *   target:      what it is built for
+     *   hardware:    buses and devices
+     *   parameters:  tunable configuration
+     *   events:      what the system reacts to
+     *   machine:     states and transitions
+     *   actions:     catalogue of named side effects
+     *   libraries:   third-party code
+     *
+     * Sections carrying identity (devices, parameters, events, actions, states)
+     * are maps keyed by name, so a duplicate is impossible to write. Ordered
+     * rules - transitions - stay lists, because order decides which one shadows
+     * another.
+     */
+    parseDomains(raw) {
+      this.resetValidationState();
+      const machine = raw.machine ?? {};
+      const hardware = raw.hardware ?? {};
+      const events = this.parseEventMap(raw.events);
+      events.forEach((e) => this.eventNames.add(e.name));
+      const states = this.parseStateMap(machine.states);
+      this.indexStateNames(states);
+      const actionCatalogue = this.parseActionCatalogue(raw.actions);
+      actionCatalogue.forEach((_, name) => this.actionNames.add(name));
+      const transitions = this.parseTransitionList(machine.transitions, actionCatalogue);
+      const resources = this.parseBusMap(hardware.buses);
+      const components = this.parseDeviceMap(hardware.devices);
+      const parameters = this.parseParameterMap(raw.parameters);
+      const libraries = this.parseLibraries(this.asList(raw.libraries, "library"));
+      this.assertUniqueNames(events, "event");
+      this.assertUniqueNames(components, "component");
+      this.assertUniqueNames(resources, "resource");
+      this.assertUniqueNames(parameters, "parameter");
+      this.assertUniqueNames(libraries, "library");
+      this.assertLibraryRefs(resources, libraries);
+      this.assertBusRefs(components, resources);
+      return {
+        name: raw.name || raw.project?.name || "unnamed",
+        description: machine.description,
+        events,
+        states,
+        transitions,
+        components,
+        resources,
+        parameters,
+        libraries
+      };
+    }
+    /** Accept `{ name: {...} }` and turn it into `[{ name, ... }]`. */
+    mapEntries(raw, section) {
+      if (raw === void 0 || raw === null)
+        return [];
+      if (Array.isArray(raw)) {
+        throw new ParseError(`"${section}" is a list, but this schema keys it by name:
+  ${section}:
+    my_${section.replace(/s$/, "")}:
+      ...`);
+      }
+      if (typeof raw !== "object") {
+        throw new ParseError(`"${section}" must be a mapping of name to definition`);
+      }
+      return Object.entries(raw).map(([name, value]) => {
+        if (!name.trim())
+          throw new ParseError(`"${section}" has an entry with an empty name`);
+        if (value === null || value === void 0)
+          return [name, {}];
+        if (typeof value !== "object" || Array.isArray(value)) {
+          throw new ParseError(`"${section}.${name}" must be a mapping`);
+        }
+        return [name, value];
+      });
+    }
+    asList(raw, section) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      if (!Array.isArray(raw))
+        throw new ParseError(`"${section}" must be a list`);
+      return raw;
+    }
+    parseEventMap(raw) {
+      return this.mapEntries(raw, "events").map(([name, def]) => ({
+        name,
+        source: def.source || "external",
+        description: def.description,
+        payload: def.payload
+      }));
+    }
+    parseParameterMap(raw) {
+      const entries = this.mapEntries(raw, "parameters");
+      if (entries.length === 0)
+        return void 0;
+      return entries.map(([name, def]) => {
+        const range = def.range;
+        if (range !== void 0 && (!Array.isArray(range) || range.length !== 2)) {
+          throw new ParseError(`Parameter "${name}" has a "range" that is not [min, max]`);
+        }
+        return {
+          name,
+          type: def.type,
+          default: def.default,
+          min: range ? range[0] : def.min,
+          max: range ? range[1] : def.max,
+          unit: def.unit,
+          description: def.description
+        };
+      });
+    }
+    /**
+     * States nest by containment, so a composite is just a state that has
+     * `states:` under it. The type is inferred from that; declaring it is
+     * optional and only useful for future kinds.
+     */
+    parseStateMap(raw) {
+      return this.mapEntries(raw, "states").map(([name, def]) => {
+        const children = this.parseStateMap(def.states);
+        const declared = def.type;
+        if (children.length === 0) {
+          if (def.initial !== void 0) {
+            throw new ParseError(`State "${name}" declares "initial" but has no nested states`);
+          }
+          return { name, type: declared || "simple", description: def.description };
+        }
+        const initial = def.initial ?? children[0].name;
+        if (!children.some((c) => c.name === initial)) {
+          throw new ParseError(`State "${name}" declares initial "${initial}", which is not one of its states (${children.map((c) => c.name).join(", ")})`);
+        }
+        return {
+          name,
+          type: declared || "composite",
+          description: def.description,
+          initial,
+          regions: [{ initial, states: children }]
+        };
+      });
+    }
+    /** Catalogue of named actions, so a transition's `do:` can carry params. */
+    parseActionCatalogue(raw) {
+      const catalogue = /* @__PURE__ */ new Map();
+      for (const [name, def] of this.mapEntries(raw, "actions")) {
+        catalogue.set(name, {
+          name,
+          type: def.type || "driver",
+          driver: def.driver || name,
+          params: def.params
+        });
+      }
+      return catalogue;
+    }
+    parseTransitionList(raw, catalogue) {
+      const list = this.asList(raw, "machine.transitions");
+      if (!list)
+        return [];
+      return list.map((entry, index) => {
+        const from = entry.from;
+        const on = entry.on;
+        const to = entry.to;
+        for (const [key, value] of [["from", from], ["on", on], ["to", to]]) {
+          if (typeof value !== "string" || !value.trim()) {
+            throw new ParseError(`Transition ${index + 1} is missing "${key}"`);
+          }
+        }
+        if (on !== "*" && !this.eventNames.has(on)) {
+          throw new ParseError(`Transition ${index + 1} reacts to unknown event "${on}"`);
+        }
+        if (from !== "*" && !this.hasState(from)) {
+          throw new ParseError(`Transition "from" state "${from}" ${this.describeBadRef(from)}`);
+        }
+        if (to === "*") {
+          throw new ParseError('Transition "to" cannot be the wildcard "*"');
+        }
+        if (!this.hasState(to)) {
+          throw new ParseError(`Transition "to" state "${to}" ${this.describeBadRef(to)}`);
+        }
+        return {
+          source: from,
+          target: to,
+          event: on,
+          guard: entry.guard !== void 0 && entry.guard !== null ? this.parseGuard(entry.guard) : void 0,
+          actions: this.resolveActions(entry.do, catalogue, index),
+          description: entry.description
+        };
+      });
+    }
+    /**
+     * `do:` takes one name or a list of them. When an `actions:` catalogue
+     * exists it is authoritative, so a typo is an error rather than a silently
+     * generated stub for a function nobody will implement.
+     */
+    resolveActions(raw, catalogue, index) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      const names = Array.isArray(raw) ? raw : [raw];
+      const strict = catalogue.size > 0;
+      return names.map((entry) => {
+        if (typeof entry !== "string" || !entry.trim()) {
+          throw new ParseError(`Transition ${index + 1} has a "do" entry that is not an action name`);
+        }
+        const declared = catalogue.get(entry);
+        if (declared)
+          return { ...declared };
+        if (strict) {
+          throw new ParseError(`Transition ${index + 1} does "${entry}", which is not in the actions catalogue. Declared: ${[...catalogue.keys()].join(", ") || "none"}.`);
+        }
+        return { name: entry, type: "driver", driver: entry };
+      });
+    }
+    parseBusMap(raw) {
+      const entries = this.mapEntries(raw, "buses");
+      if (entries.length === 0)
+        return void 0;
+      return entries.map(([name, def]) => {
+        const iface = def.interface;
+        if (!iface)
+          throw new ParseError(`Bus "${name}" has no "interface"`);
+        this.assertKnownInterface(name, iface);
+        const { interface: _i, description, library, ...binding } = def;
+        return {
+          name,
+          interface: iface,
+          binding: Object.keys(binding).length > 0 ? binding : void 0,
+          library,
+          description
+        };
+      });
+    }
+    parseDeviceMap(raw) {
+      const entries = this.mapEntries(raw, "devices");
+      if (entries.length === 0)
+        return void 0;
+      return entries.map(([name, def]) => {
+        const type2 = def.type;
+        if (!type2) {
+          throw new ParseError(`Device "${name}" has no "type"`);
+        }
+        const builtin = BUILTIN_DEVICE_TYPES[type2];
+        const declaredClass = def.class;
+        if (!builtin && !declaredClass) {
+          throw new ParseError(`Device "${name}" has type "${type2}", which is not built in, so it needs an explicit "class" (sensor, actuator or service). Guessing would risk publishing an actuator as if it were a reading.
+Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
+        }
+        const { type: _t, class: _c, bus, description, ...config } = def;
+        return {
+          name,
+          class: declaredClass || builtin.class,
+          driver: def.driver || builtin?.driver || type2,
+          type: type2,
+          bus,
+          config: Object.keys(config).length > 0 ? config : void 0,
+          description
+        };
+      });
+    }
+    assertKnownInterface(name, iface) {
+      const known = [
+        "gpio",
+        "pwm",
+        "adc",
+        "uart",
+        "i2c",
+        "spi",
+        "can",
+        "onewire",
+        "wifi",
+        "ethernet",
+        "ble",
+        "mqtt",
+        "custom"
+      ];
+      if (!known.includes(iface)) {
+        throw new ParseError(`"${name}" has unknown interface "${iface}". Expected one of: ${known.join(", ")}.`);
+      }
+    }
+    assertLibraryRefs(resources, libraries) {
+      const names = new Set((libraries || []).map((l) => l.name));
+      for (const resource of resources || []) {
+        if (resource.library && !names.has(resource.library)) {
+          throw new ParseError(`"${resource.name}" needs library "${resource.library}", which is not declared`);
+        }
+      }
+    }
+    assertBusRefs(components, resources) {
+      const names = new Set((resources || []).map((r) => r.name));
+      for (const component of components || []) {
+        if (component.bus && !names.has(component.bus)) {
+          throw new ParseError(`Device "${component.name}" sits on bus "${component.bus}", which is not declared. Declared buses: ${[...names].join(", ") || "none"}.`);
+        }
+      }
+    }
+    resetValidationState() {
       this.eventNames.clear();
       this.stateNames.clear();
       this.actionNames.clear();
       this.statePaths.clear();
       this.statesByLeafName.clear();
+    }
+    parseSystem(raw) {
+      this.resetValidationState();
       const events = this.parseEvents(raw.events);
       events.forEach((e) => this.eventNames.add(e.name));
       const states = this.parseStates(raw.states);
@@ -3409,11 +3774,13 @@
       return raw.map((a) => {
         if (typeof a === "string") {
           return {
+            name: a,
             type: "driver",
             driver: a
           };
         }
         return {
+          name: a.name || a.driver,
           type: a.type || "driver",
           driver: a.driver,
           params: a.params
@@ -4163,7 +4530,7 @@ ${handlers.join("\n\n")}`;
           const t = transitions[idx];
           const guard = this.guards.get(idx);
           const target = this.states[this.resolveEntry(this.resolveRef(t.target, "target"))];
-          const calls = (t.actions || []).map((a) => `        action_${this.sanitize(a.driver)}(&systemContext);`).join("\n");
+          const calls = (t.actions || []).map((a) => `        action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
           const fire = [
             calls,
             `        fsm.transitionTo(${target.symbol});`,
@@ -4328,7 +4695,7 @@ ${implementations}`;
 // No actions defined`;
       }
       const implementations = Array.from(this.actionNames).map((name) => {
-        const action = this.project.system.transitions.flatMap((t) => t.actions || []).find((a) => a.driver === name);
+        const action = this.project.system.transitions.flatMap((t) => t.actions || []).find((a) => a.name === name);
         const paramDoc = action?.params ? Object.entries(action.params).map(([k, v]) => `  //   ${k}: ${JSON.stringify(v)}`).join("\n") : "  //   (none)";
         return `void action_${this.sanitize(name)}(SystemContext* ctx) {
   Serial.println("  -> Action: ${name}");
@@ -4453,10 +4820,10 @@ ${implementations.join("\n\n")}`;
     indexActions() {
       this.project.system.transitions.forEach((t, idx) => {
         for (const a of t.actions || []) {
-          if (!a.driver) {
+          if (!a.name) {
             throw new CodegenError(`Transition ${idx} has an action without a name`);
           }
-          this.actionNames.add(a.driver);
+          this.actionNames.add(a.name);
         }
       });
     }
@@ -4811,29 +5178,31 @@ ${implementations.join("\n\n")}`;
     "starter \u2014 a two-state blinker": {
       entry: "blinker.yaml",
       files: {
-        "blinker.yaml": '# A minimal model. Edit anything and the panes update as you type.\nproject:\n  name: blinker\n  version: "1.0"\n\nsystem:\n  name: blinker\n\n  events:\n    - name: PRESS\n      source: external\n\n  states:\n    - name: off\n      type: simple\n    - name: on\n      type: simple\n\n  transitions:\n    - source: off\n      event: PRESS\n      target: on\n      actions:\n        - led_on\n\n    - source: on\n      event: PRESS\n      target: off\n      actions:\n        - led_off\n\n  components:\n    - name: led\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO2\n\n  parameters:\n    - name: blink_ms\n      type: int\n      default: 500\n      unit: ms\n      min: 50\n      max: 5000\n'
+        "blinker.yaml": '# A minimal model. Edit anything and the panes update as you type.\nproject:\n  name: blinker\n  version: "1.0"\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    led:\n      type: digital_output\n      pin: GPIO2\n\nparameters:\n  blink_ms:\n    type: int\n    default: 500\n    range: [50, 5000]\n    unit: ms\n\nevents:\n  PRESS:\n    source: external\n\nmachine:\n  states:\n    off:\n    on:\n\n  transitions:\n    - from: off\n      on: PRESS\n      to: on\n      do: led_on\n\n    - from: on\n      on: PRESS\n      to: off\n      do: led_off\n'
       }
     },
-    "boiler \u2014 hierarchical states, guards, wildcard stop": {
-      entry: "boiler.yaml",
+    "boiler \u2014 multi-file, hierarchical states, guards": {
+      entry: "pulse.yaml",
       files: {
-        "boiler.yaml": 'project:\n  name: boiler_control\n  version: 1.0\n  description: Simple boiler temperature control system\n\nsystem:\n  name: boiler_system\n  description: Controls heating, cooling, and monitoring\n\n  # Events the system responds to\n  events:\n    - name: START\n      source: external\n      description: User presses start button\n\n    - name: STOP\n      source: external\n      description: User presses stop button\n\n    - name: TEMP_REACHED\n      source: sensor\n      description: Temperature sensor indicates setpoint reached\n\n    - name: OVER_TEMP\n      source: sensor\n      description: Temperature exceeds safety limit\n\n    - name: EMERGENCY_STOP\n      source: external\n      description: Emergency stop button pressed\n\n  # States the system can be in\n  states:\n    - name: idle\n      type: simple\n      description: System is off\n\n    - name: running\n      type: composite\n      initial: heating\n      description: System is actively heating/cooling\n      regions:\n        - initial: heating\n          states:\n            - name: heating\n              type: simple\n            - name: maintaining\n              type: simple\n            - name: cooling\n              type: simple\n\n    - name: fault\n      type: simple\n      description: System in fault state\n\n  # Transitions between states\n  transitions:\n    # Idle -> Running\n    - source: idle\n      event: START\n      target: running\n      actions:\n        - start_pump\n      description: Start the system\n\n    # Running -> Idle\n    - source: running\n      event: STOP\n      target: idle\n      actions:\n        - stop_pump\n      description: Stop the system\n\n    # Heating -> Maintaining\n    - source: running/heating\n      event: TEMP_REACHED\n      guard:\n        name: temp_at_setpoint\n        description: water temperature has reached the setpoint\n      target: running/maintaining\n      actions:\n        - reduce_heat\n      description: Temperature reached, switch to maintaining\n\n    # Maintaining -> Cooling (if temp overshoots)\n    - source: running/maintaining\n      event: OVER_TEMP\n      guard:\n        name: over_safe_temp\n        description: temperature has exceeded the safety limit\n      target: running/cooling\n      actions:\n        - activate_cooling\n      description: Temperature too high, cool down\n\n    # Emergency stop from anywhere\n    - source: "*"\n      event: EMERGENCY_STOP\n      target: fault\n      actions:\n        - shutdown_all\n      description: Emergency stop overrides everything\n\n  # Actions that can be triggered\n  actions:\n    start_pump:\n      type: driver\n      driver: gpio_control\n      params:\n        pin: PUMP\n        value: HIGH\n\n    stop_pump:\n      type: driver\n      driver: gpio_control\n      params:\n        pin: PUMP\n        value: LOW\n\n    reduce_heat:\n      type: driver\n      driver: pwm_control\n      params:\n        pin: HEATER\n        value: 25\n\n    activate_cooling:\n      type: driver\n      driver: gpio_control\n      params:\n        pin: COOLING_FAN\n        value: HIGH\n\n    shutdown_all:\n      type: driver\n      driver: shutdown\n      params:\n        all: true\n\n  # Components in the system\n  components:\n    - name: temperature_sensor\n      class: sensor\n      driver: ds18b20\n      config:\n        interface: onewire\n        pin: GPIO4\n      description: Water temperature sensor\n\n    - name: pump\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO25\n      description: Main circulation pump\n\n    - name: heater\n      class: actuator\n      driver: pwm_control\n      config:\n        pin: GPIO27\n      description: Heating element (PWM controlled)\n\n    - name: cooling_fan\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO32\n      description: Emergency cooling fan\n\n  # Hardware resources\n  resources:\n    - name: onewire_bus\n      interface: onewire\n      binding:\n        pin: GPIO4\n      description: OneWire bus for temperature sensor\n\n    - name: gpio_pins\n      interface: gpio\n      description: GPIO pins used throughout\n\n    - name: pwm_channels\n      interface: gpio\n      binding:\n        mode: pwm\n      description: PWM channels for heater control\n\n  # System parameters (configuration)\n  parameters:\n    - name: setpoint\n      type: float\n      default: 60.0\n      unit: degC\n      min: 10.0\n      max: 90.0\n      description: Target temperature\n\n    - name: max_safe_temp\n      type: float\n      default: 75.0\n      unit: degC\n      description: Emergency shutdown temperature\n\n    - name: hysteresis\n      type: float\n      default: 2.0\n      unit: degC\n      description: Temperature tolerance band\n'
+        "hardware.yaml": "# What is physically wired up.\n#\n# The machine refers to `pump` and `heater`, never to GPIO25 - so the same\n# behaviour survives a change of board or a change of pinout.\n\nhardware:\n  buses:\n    sensor_bus:\n      interface: onewire\n      pin: GPIO4\n      description: OneWire bus for the temperature probe\n\n  devices:\n    water_temp:\n      type: ds18b20\n      bus: sensor_bus\n      unit: degC\n      description: Boiler water temperature\n\n    pump:\n      type: digital_output\n      pin: GPIO25\n\n    heater:\n      type: pwm_output\n      pin: GPIO27\n      channel: 0\n      frequency: 5000\n      resolution: 8\n\n    cooling_fan:\n      type: digital_output\n      pin: GPIO32\n",
+        "machine.yaml": '# Behaviour: what the system reacts to, and how it moves.\n#\n# Guards and actions are names only. You implement them in src/ - see\n# FUNCTION_CONTRACT.md.\n\nevents:\n  START:\n    source: external\n    description: User presses start\n  STOP:\n    source: external\n  TEMP_REACHED:\n    source: sensor\n  OVER_TEMP:\n    source: sensor\n  EMERGENCY_STOP:\n    source: external\n\nactions:\n  start_pump:\n    driver: gpio_control\n    params: {device: pump, value: HIGH}\n  stop_pump:\n    driver: gpio_control\n    params: {device: pump, value: LOW}\n  reduce_heat:\n    driver: pwm_control\n    params: {device: heater, duty: 30}\n  activate_cooling:\n    driver: gpio_control\n    params: {device: cooling_fan, value: HIGH}\n  shutdown_all:\n    driver: gpio_control\n    params: {devices: [pump, heater, cooling_fan], value: LOW}\n\nmachine:\n  states:\n    idle:\n      description: System is off\n    running:\n      initial: heating\n      states:\n        heating:\n        maintaining:\n        cooling:\n    fault:\n\n  transitions:\n    - from: idle\n      on: START\n      to: running          # enters running/heating\n      do: start_pump\n\n    - from: running        # applies from any child\n      on: STOP\n      to: idle\n      do: stop_pump\n\n    - from: running/heating\n      on: TEMP_REACHED\n      guard:\n        name: temp_at_setpoint\n        description: water temperature has reached the setpoint\n      to: running/maintaining\n      do: reduce_heat\n\n    - from: running/maintaining\n      on: OVER_TEMP\n      guard:\n        name: over_safe_temp\n        description: temperature has exceeded the safety limit\n      to: running/cooling\n      do: activate_cooling\n\n    - from: "*"\n      on: EMERGENCY_STOP\n      to: fault\n      do: shutdown_all\n',
+        "parameters.yaml": "# Configuration contract. These become a C struct, and the dashboard reads\n# their unit and range straight from here.\n\nparameters:\n  setpoint:\n    type: float\n    default: 60.0\n    range: [10.0, 90.0]\n    unit: degC\n    description: Target temperature\n\n  max_safe_temp:\n    type: float\n    default: 75.0\n    range: [50.0, 95.0]\n    unit: degC\n    description: Emergency shutdown temperature\n\n  hysteresis:\n    type: float\n    default: 2.0\n    range: [0.1, 10.0]\n    unit: degC\n    description: Temperature tolerance band\n",
+        "pulse.yaml": '# Entry file. Only this one declares `project`.\n#\n#   hardware.yaml    buses and devices\n#   parameters.yaml  tunable configuration\n#   machine.yaml     events, states and transitions\n#   src/             your C++ - guards and actions live here\n#\n# Generate with:\n#   pulse-ir examples/boiler/pulse.yaml --outdir build/boiler\n\nproject:\n  name: boiler_control\n  version: "1.0"\n  description: Simple boiler temperature control system\n\ntarget:\n  board: esp32\n\nimports:\n  - hardware.yaml\n  - parameters.yaml\n  - machine.yaml\n'
       }
     },
     "hierarchy \u2014 nesting and inner-vs-outer precedence": {
       entry: "hierarchy.yaml",
       files: {
-        "hierarchy.yaml": "# Fixture exercising the parts of the IR the boiler example does not reach:\n#   - entering a composite state descends to its initial child (recursively)\n#   - a transition on an enclosing state applies to nested children\n#   - an inner transition outranks an enclosing one on the same event\n#   - a transition may carry several actions\n#   - the bare `guard: <name>` shorthand (boiler.yaml covers the mapping form\n#     that carries a description)\n\nproject:\n  name: hierarchy_test\n  version: 1.0\n  description: Hierarchy and dispatch semantics fixture\n\nsystem:\n  name: hierarchy_system\n\n  events:\n    - name: GO\n      source: external\n    - name: NEXT\n      source: internal\n    - name: ABORT\n      source: external\n    - name: BLOCKED\n      source: internal\n\n  states:\n    - name: off\n      type: simple\n\n    - name: active\n      type: composite\n      initial: phase_one\n      regions:\n        - initial: phase_one\n          states:\n            - name: phase_one\n              type: simple\n\n            # Nested two levels deep, so entry has to descend more than once.\n            - name: phase_two\n              type: composite\n              initial: deep\n              regions:\n                - initial: deep\n                  states:\n                    - name: deep\n                      type: simple\n\n    - name: halted\n      type: simple\n\n  transitions:\n    # Target is composite: entry must land on active/phase_one.\n    - source: off\n      event: GO\n      target: active\n      actions:\n        - log_start\n        - arm_system\n\n    # Target is composite and nested: entry must land on active/phase_two/deep.\n    - source: phase_one\n      event: NEXT\n      target: phase_two\n\n    # Enclosing source: applies while any descendant of active is current.\n    - source: active\n      event: ABORT\n      target: halted\n\n    # Inner source on the same event: must outrank the `active` transition\n    # whenever phase_one is the current state.\n    - source: phase_one\n      event: ABORT\n      target: off\n\n    # Named guard; the generated stub returns false, so this stays blocked.\n    - source: phase_one\n      event: BLOCKED\n      target: halted\n      guard: never_ready\n"
+        "hierarchy.yaml": '# Fixture exercising the parts of the IR the boiler example does not reach:\n#   - entering a composite state descends to its initial child (recursively)\n#   - a transition on an enclosing state applies to nested children\n#   - an inner transition outranks an enclosing one on the same event\n#   - a transition may carry several actions\n#   - the bare `guard: <name>` shorthand (boiler covers the mapping form)\n\nproject:\n  name: hierarchy_test\n  version: "1.0"\n  description: Hierarchy and dispatch semantics fixture\n\nevents:\n  GO:\n    source: external\n  NEXT:\n    source: internal\n  ABORT:\n    source: external\n  BLOCKED:\n    source: internal\n\nmachine:\n  states:\n    off:\n    active:\n      initial: phase_one\n      states:\n        phase_one:\n        # Nested two levels deep, so entry has to descend more than once.\n        phase_two:\n          initial: deep\n          states:\n            deep:\n    halted:\n\n  transitions:\n    # Target is composite: entry must land on active/phase_one.\n    - from: off\n      on: GO\n      to: active\n      do: [log_start, arm_system]\n\n    # Target is composite and nested: entry must land on active/phase_two/deep.\n    - from: phase_one\n      on: NEXT\n      to: phase_two\n\n    # Enclosing source: applies while any descendant of active is current.\n    - from: active\n      on: ABORT\n      to: halted\n\n    # Inner source on the same event: must outrank the `active` transition\n    # whenever phase_one is the current state.\n    - from: phase_one\n      on: ABORT\n      to: off\n\n    # Named guard; the generated stub returns false, so this stays blocked.\n    - from: phase_one\n      on: BLOCKED\n      to: halted\n      guard: never_ready\n'
       }
     },
-    "greenhouse \u2014 multi-file, interfaces and libraries": {
+    "greenhouse \u2014 interfaces, libraries and MQTT": {
       entry: "greenhouse.yaml",
       files: {
-        "behaviour.yaml": 'system:\n  states:\n    - name: idle\n      type: simple\n      description: Powered but not regulating\n\n    - name: running\n      type: composite\n      initial: sampling\n      description: Regulating the climate\n      regions:\n        - initial: sampling\n          states:\n            - name: sampling\n              type: simple\n            - name: venting\n              type: simple\n\n    - name: fault\n      type: simple\n\n  transitions:\n    - source: idle\n      event: START\n      target: running\n      actions:\n        - open_log\n        - start_sampling\n\n    - source: idle\n      event: REMOTE_START\n      target: running\n      actions:\n        - open_log\n        - start_sampling\n\n    # Declared on the composite, so it applies from either child.\n    - source: running\n      event: STOP\n      target: idle\n      actions:\n        - stop_all\n\n    - source: running/sampling\n      event: SAMPLE_DUE\n      target: running/sampling\n      actions:\n        - read_climate\n        - publish_climate\n\n    - source: running/sampling\n      event: TOO_HOT\n      guard:\n        name: above_temp_setpoint\n        description: air temperature is above the setpoint plus hysteresis\n      target: running/venting\n      actions:\n        - open_vent\n\n    - source: running/venting\n      event: RECOVERED\n      guard: back_within_band\n      target: running/sampling\n      actions:\n        - close_vent\n\n    - source: "*"\n      event: SENSOR_FAULT\n      target: fault\n      actions:\n        - stop_all\n        - raise_alarm\n',
-        "events.yaml": "system:\n  events:\n    - name: START\n      source: external\n      description: Local start button\n\n    - name: STOP\n      source: external\n\n    - name: SAMPLE_DUE\n      source: timer\n      description: Sampling interval elapsed\n\n    - name: TOO_HOT\n      source: sensor\n\n    - name: RECOVERED\n      source: sensor\n\n    - name: SENSOR_FAULT\n      source: internal\n\n    # Declaring the source as mqtt is what makes this remotely triggerable;\n    # the topic manifest exposes only these.\n    - name: REMOTE_START\n      source: mqtt\n      description: Start requested from the dashboard\n",
-        "greenhouse.yaml": '# Multi-file model.\n#\n# Only this file declares `project`. Everything else is split by concern so a\n# change to the wiring never touches the behaviour, and a merge conflict in one\n# area cannot corrupt another.\n#\n#   hardware.yaml   buses, libraries, sensors and actuators\n#   events.yaml     what the system reacts to\n#   behaviour.yaml  states and transitions\n#   tuning.yaml     parameters the dashboard can push down\n#\n# Paths are relative to this file. Lists (events, states, transitions,\n# components, resources, parameters, libraries) are concatenated across files;\n# anything else declared here wins.\n\nproject:\n  name: greenhouse\n  version: "1.0"\n  description: Climate control for a small greenhouse\n\ninclude:\n  - hardware.yaml\n  - events.yaml\n  - behaviour.yaml\n  - tuning.yaml\n\nsystem:\n  name: greenhouse_controller\n  description: Samples climate, ventilates, and reports to a dashboard\n',
-        "hardware.yaml": '# Buses, libraries and devices. Interfaces declare how the board is wired;\n# the backend turns them into begin() calls for its platform.\n\nsystem:\n  libraries:\n    # Only third-party libraries need declaring. Wire, SPI and WiFi are\n    # implied by the interfaces below and get added automatically.\n    - name: Adafruit_BME280\n      include: Adafruit_BME280.h\n      version: "^2.2"\n      source: registry\n      description: Temperature, humidity and pressure over I2C\n\n  resources:\n    - name: sensor_bus\n      interface: i2c\n      library: Adafruit_BME280\n      binding:\n        sda: GPIO21\n        scl: GPIO22\n        frequency: 400000\n      description: Shared I2C bus for climate sensors\n\n    - name: card_slot\n      interface: spi\n      binding:\n        sck: GPIO18\n        miso: GPIO19\n        mosi: GPIO23\n        cs: GPIO5\n      description: SD card for offline logging\n\n    - name: gps\n      interface: uart\n      binding:\n        port: 2\n        baud: 9600\n        rx: GPIO16\n        tx: GPIO17\n      description: NMEA receiver\n\n    - name: vent_drive\n      interface: pwm\n      binding:\n        pin: GPIO25\n        channel: 0\n        frequency: 5000\n        resolution: 8\n      description: Vent motor speed\n\n    - name: uplink\n      interface: wifi\n      binding:\n        ssid: greenhouse-ap\n        hostname: greenhouse-01\n      description: Site Wi-Fi\n\n    - name: broker\n      interface: mqtt\n      binding:\n        host: mqtt.example.local\n        port: 8883\n        tls: true\n      description: Dashboard uplink\n\n  components:\n    - name: air_temp\n      class: sensor\n      driver: bme280\n      config:\n        interface: i2c\n        address: 0x76\n        unit: degC\n\n    - name: humidity\n      class: sensor\n      driver: bme280\n      config:\n        interface: i2c\n        address: 0x76\n        unit: percent\n\n    - name: vent\n      class: actuator\n      driver: pwm_control\n      config:\n        pin: GPIO25\n\n    - name: pump\n      class: actuator\n      driver: gpio_control\n      config:\n        pin: GPIO26\n',
-        "tuning.yaml": "# Parameters become writable MQTT setpoints, carrying their unit and range so\n# a dashboard can render a bounded control.\n\nsystem:\n  parameters:\n    - name: temp_setpoint\n      type: float\n      default: 26.0\n      unit: degC\n      min: 10.0\n      max: 40.0\n      description: Target air temperature\n\n    - name: hysteresis\n      type: float\n      default: 1.5\n      unit: degC\n      min: 0.1\n      max: 5.0\n      description: Band around the setpoint before venting\n\n    - name: sample_interval\n      type: int\n      default: 5000\n      unit: ms\n      min: 500\n      max: 60000\n      description: How often to sample the climate\n"
+        "greenhouse.yaml": '# Multi-file model. Only this file declares `project`.\n#\n#   hardware.yaml    buses and devices\n#   parameters.yaml  tunable configuration\n#   machine.yaml     events, states and transitions\n#\n# Paths are relative to this file. Each name may only be defined once across\n# the whole model, so two files cannot silently collide.\n\nproject:\n  name: greenhouse\n  version: "1.0"\n  description: Climate control for a small greenhouse\n\ntarget:\n  board: esp32\n\nimports:\n  - hardware.yaml\n  - parameters.yaml\n  - machine.yaml\n',
+        "hardware.yaml": '# Buses, devices and third-party libraries.\n#\n# Only libraries the platform does not imply need declaring: Wire, SPI and\n# WiFi come with the interfaces below.\n\nlibraries:\n  - name: Adafruit_BME280\n    include: Adafruit_BME280.h\n    version: "^2.2"\n    source: registry\n    description: Temperature, humidity and pressure over I2C\n\nhardware:\n  buses:\n    sensor_bus:\n      interface: i2c\n      sda: GPIO21\n      scl: GPIO22\n      frequency: 400000\n      library: Adafruit_BME280\n      description: Shared I2C bus for climate sensors\n\n    card_slot:\n      interface: spi\n      sck: GPIO18\n      miso: GPIO19\n      mosi: GPIO23\n      cs: GPIO5\n      description: SD card for offline logging\n\n    gps:\n      interface: uart\n      port: 2\n      baud: 9600\n      rx: GPIO16\n      tx: GPIO17\n\n    vent_drive:\n      interface: pwm\n      pin: GPIO25\n      channel: 0\n      frequency: 5000\n      resolution: 8\n\n    uplink:\n      interface: wifi\n      ssid: greenhouse-ap\n      hostname: greenhouse-01\n\n    broker:\n      interface: mqtt\n      host: mqtt.example.local\n      port: 8883\n      tls: true\n\n  devices:\n    air_temp:\n      type: bme280\n      bus: sensor_bus\n      address: 0x76\n      unit: degC\n\n    humidity:\n      type: bme280\n      bus: sensor_bus\n      address: 0x76\n      unit: percent\n\n    vent:\n      type: pwm_output\n      pin: GPIO25\n      channel: 0\n\n    pump:\n      type: digital_output\n      pin: GPIO26\n',
+        "machine.yaml": 'events:\n  START:\n    source: external\n    description: Local start button\n  STOP:\n    source: external\n  SAMPLE_DUE:\n    source: timer\n  TOO_HOT:\n    source: sensor\n  RECOVERED:\n    source: sensor\n  SENSOR_FAULT:\n    source: internal\n  # Declaring the source as mqtt is what makes this remotely triggerable.\n  REMOTE_START:\n    source: mqtt\n    description: Start requested from the dashboard\n\nactions:\n  open_log:\n    driver: sd_log\n  start_sampling:\n    driver: scheduler\n  stop_all:\n    driver: gpio_control\n    params: {devices: [vent, pump], value: LOW}\n  read_climate:\n    driver: bme280\n  publish_climate:\n    driver: mqtt_publish\n  open_vent:\n    driver: pwm_control\n    params: {device: vent, duty: 100}\n  close_vent:\n    driver: pwm_control\n    params: {device: vent, duty: 0}\n  raise_alarm:\n    driver: mqtt_publish\n\nmachine:\n  states:\n    idle:\n      description: Powered but not regulating\n    running:\n      initial: sampling\n      states:\n        sampling:\n        venting:\n    fault:\n\n  transitions:\n    - from: idle\n      on: START\n      to: running\n      do: [open_log, start_sampling]\n\n    - from: idle\n      on: REMOTE_START\n      to: running\n      do: [open_log, start_sampling]\n\n    - from: running\n      on: STOP\n      to: idle\n      do: stop_all\n\n    - from: running/sampling\n      on: SAMPLE_DUE\n      to: running/sampling\n      do: [read_climate, publish_climate]\n\n    - from: running/sampling\n      on: TOO_HOT\n      guard:\n        name: above_temp_setpoint\n        description: air temperature is above the setpoint plus hysteresis\n      to: running/venting\n      do: open_vent\n\n    - from: running/venting\n      on: RECOVERED\n      guard: back_within_band\n      to: running/sampling\n      do: close_vent\n\n    - from: "*"\n      on: SENSOR_FAULT\n      to: fault\n      do: [stop_all, raise_alarm]\n',
+        "parameters.yaml": "parameters:\n  temp_setpoint:\n    type: float\n    default: 26.0\n    range: [10.0, 40.0]\n    unit: degC\n    description: Target air temperature\n\n  hysteresis:\n    type: float\n    default: 1.5\n    range: [0.1, 5.0]\n    unit: degC\n    description: Band around the setpoint before venting\n\n  sample_interval:\n    type: int\n    default: 5000\n    range: [500, 60000]\n    unit: ms\n    description: How often to sample the climate\n"
       }
     }
   };
@@ -4947,7 +5316,7 @@ ${implementations.join("\n\n")}`;
       const descends = leaf && targetPath && leaf !== targetPath;
       const target = descends ? `${escapeHtml(t.target)} <span class="arrow">\u21B3</span> <code>${escapeHtml(leaf)}</code>` : escapeHtml(t.target);
       const guard = t.guard ? `<code>${escapeHtml(t.guard.name)}</code>` : '<span class="dim">\u2014</span>';
-      const actions = t.actions?.length ? t.actions.map((a) => `<code>${escapeHtml(a.driver)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
+      const actions = t.actions?.length ? t.actions.map((a) => `<code>${escapeHtml(a.name)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
       const src = t.source === "*" ? '<span class="tag wild">any state</span>' : `<code>${escapeHtml(t.source)}</code>`;
       return `<tr>
       <td>${src}</td>
@@ -5000,9 +5369,10 @@ ${implementations.join("\n\n")}`;
   function render() {
     persist();
     let project;
+    const parser = new Parser();
     try {
       const resolver = new MemoryResolver(workspace.files);
-      project = new Parser().parseFrom(workspace.entry, resolver);
+      project = parser.parseFrom(workspace.entry, resolver);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const where = error instanceof ParseError && error.line !== void 0 ? ` (line ${error.line + 1})` : "";
@@ -5035,7 +5405,12 @@ ${implementations.join("\n\n")}`;
       `${(project.system.resources || []).length} resources`,
       `${sketch.split("\n").length} lines generated`
     ].filter(Boolean).join(" \xB7 ");
-    setStatus("ok", project.name, counts);
+    if (parser.warnings.length > 0) {
+      setStatus("warn", project.name, `${counts}
+${parser.warnings.join("\n")}`);
+    } else {
+      setStatus("ok", project.name, counts);
+    }
     current = { project, sketch, topics, libraries };
   }
   function selectFile(name) {

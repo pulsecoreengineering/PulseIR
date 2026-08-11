@@ -219,8 +219,22 @@ test('include without a resolver fails with an actionable message', () => {
 test('"includes" is caught as the near-miss it is', () => {
   expectReject(
     { 'main.yaml': `project: {name: x, version: "1.0"}\nincludes: [a.yaml]\nsystem: {name: x}` },
-    'the key is "include"',
+    'the key is "imports"',
     'wrong key'
+  );
+});
+
+test('the retired "include" key still works, with a warning', () => {
+  const parser = new Parser();
+  const project = parser.parseFrom('main.yaml', new MemoryResolver({
+    'main.yaml': `project: {name: legacy, version: "1.0"}\ninclude: [part.yaml]`,
+    'part.yaml': `events: {GO: {source: external}}\nmachine: {states: {idle: {}}, transitions: []}`,
+  }));
+
+  equal(project.system.events.map(e => e.name), ['GO'], 'included content still merges');
+  assert(
+    parser.warnings.some(w => w.includes('"imports"')),
+    `expected a deprecation warning, got ${JSON.stringify(parser.warnings)}`
   );
 });
 

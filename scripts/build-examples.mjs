@@ -20,46 +20,41 @@ project:
   name: blinker
   version: "1.0"
 
-system:
-  name: blinker
+target:
+  board: esp32
 
-  events:
-    - name: PRESS
-      source: external
+hardware:
+  devices:
+    led:
+      type: digital_output
+      pin: GPIO2
 
+parameters:
+  blink_ms:
+    type: int
+    default: 500
+    range: [50, 5000]
+    unit: ms
+
+events:
+  PRESS:
+    source: external
+
+machine:
   states:
-    - name: off
-      type: simple
-    - name: on
-      type: simple
+    off:
+    on:
 
   transitions:
-    - source: off
-      event: PRESS
-      target: on
-      actions:
-        - led_on
+    - from: off
+      on: PRESS
+      to: on
+      do: led_on
 
-    - source: on
-      event: PRESS
-      target: off
-      actions:
-        - led_off
-
-  components:
-    - name: led
-      class: actuator
-      driver: gpio_control
-      config:
-        pin: GPIO2
-
-  parameters:
-    - name: blink_ms
-      type: int
-      default: 500
-      unit: ms
-      min: 50
-      max: 5000
+    - from: on
+      on: PRESS
+      to: off
+      do: led_off
 `;
 
 const SOURCES = [
@@ -69,8 +64,9 @@ const SOURCES = [
     files: { 'blinker.yaml': STARTER },
   },
   {
-    label: 'boiler — hierarchical states, guards, wildcard stop',
-    file: 'examples/boiler.yaml',
+    label: 'boiler — multi-file, hierarchical states, guards',
+    dir: 'examples/boiler',
+    entry: 'pulse.yaml',
   },
   {
     label: 'hierarchy — nesting and inner-vs-outer precedence',
@@ -79,7 +75,7 @@ const SOURCES = [
   {
     // Loaded as several buffers so `include` resolves between them, exactly
     // as it does on disk.
-    label: 'greenhouse — multi-file, interfaces and libraries',
+    label: 'greenhouse — interfaces, libraries and MQTT',
     dir: 'examples/greenhouse',
     entry: 'greenhouse.yaml',
   },

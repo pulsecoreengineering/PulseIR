@@ -1,0 +1,33 @@
+# What is physically wired up.
+#
+# The machine refers to `pump` and `heater`, never to GPIO25 - so the same
+# behaviour survives a change of board or a change of pinout.
+
+hardware:
+  buses:
+    sensor_bus:
+      interface: onewire
+      pin: GPIO4
+      description: OneWire bus for the temperature probe
+
+  devices:
+    water_temp:
+      type: ds18b20
+      bus: sensor_bus
+      unit: degC
+      description: Boiler water temperature
+
+    pump:
+      type: digital_output
+      pin: GPIO25
+
+    heater:
+      type: pwm_output
+      pin: GPIO27
+      channel: 0
+      frequency: 5000
+      resolution: 8
+
+    cooling_fan:
+      type: digital_output
+      pin: GPIO32

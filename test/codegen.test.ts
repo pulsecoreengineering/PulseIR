@@ -6,19 +6,19 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { Parser } from '../src/parser/index.js';
+import { FileResolver } from '../src/parser/fs-resolver.js';
 import { Codegen } from '../src/codegen/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const yamlPath = path.join(__dirname, '../../examples/boiler.yaml');
+const yamlPath = path.join(__dirname, '../../examples/boiler/pulse.yaml');
 const outputPath = path.join(__dirname, '../../dist/boiler_generated.ino');
 
 console.log('📖 Testing codegen with boiler.yaml...\n');
 
 try {
   // Parse
-  const yamlContent = fs.readFileSync(yamlPath, 'utf8');
   const parser = new Parser();
-  const project = parser.parse(yamlContent);
+  const project = parser.parseFrom(yamlPath, new FileResolver());
   console.log(`✓ Parsed: ${project.name}`);
 
   // Generate

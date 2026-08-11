@@ -59,7 +59,7 @@ test('baked examples match the models on disk', () => {
 
 test('baked examples are the real files, byte for byte', () => {
   const module = read('web/examples.ts');
-  const boiler = read('examples/boiler.yaml');
+  const boiler = read('examples/boiler/pulse.yaml');
 
   // JSON.stringify of the exact file contents must appear verbatim.
   assert(
