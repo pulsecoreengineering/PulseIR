@@ -1,6 +1,7 @@
 # Adoption Plan: PulseIR as a system description language
 
-**Status**: Phase 0 complete. Phase 1 next.
+**Status**: Phase 0 complete. Phase 1 under way (pin checking done; board
+profiles next).
 **Supersedes**: the roadmap that used to live in INDEX.md
 
 This plan adopts the direction that PulseIR should describe *what an embedded
@@ -85,10 +86,18 @@ changes — this was a change of surface, as intended.
 This is where the project stops being a code generator and starts being a
 compiler. Ordered by value-per-unit-effort.
 
-### 3.1 Pin conflict detection (do this first — cheap, high value)
+### 3.1 Pin conflict detection ✅ DONE
 
 Needs no board knowledge at all: two devices claiming one pin is an error
-regardless of board.
+regardless of board. Spellings are normalised, so `GPIO25`, `gpio_25` and `25`
+compare equal, and devices sharing a declared bus are correctly *not* reported.
+
+It paid for itself immediately by flagging `examples/greenhouse`, which
+declared GPIO25 as both a PWM bus and a `pwm_output` device. The underlying
+cause was that **devices generated no initialisation at all** - only buses did -
+so the model needed a fake "bus" to get its `ledcSetup`. Devices now initialise
+themselves, and the boiler finally emits the `pinMode` for its pump, which it
+never had.
 
 ```
 ERROR: GPIO25 is assigned to both "pump" and "fan"

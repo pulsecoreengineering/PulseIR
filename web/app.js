@@ -3058,6 +3058,78 @@
     safeDump
   } = yaml;
 
+  // dist/src/analysis/pins.js
+  var PIN_KEYS = ["pin", "sda", "scl", "sck", "miso", "mosi", "cs", "rx", "tx"];
+  function normalizePin(value) {
+    if (value === null || value === void 0)
+      return null;
+    if (typeof value === "number") {
+      return Number.isInteger(value) ? String(value) : null;
+    }
+    if (typeof value !== "string")
+      return null;
+    const text = value.trim();
+    if (!text)
+      return null;
+    const gpio = /^(?:GPIO|IO)[_-]?(\d+)$/i.exec(text);
+    if (gpio)
+      return gpio[1];
+    if (/^\d+$/.test(text))
+      return text;
+    return text.toUpperCase();
+  }
+  function collectPinClaims(project) {
+    const claims = [];
+    const scan = (owner, kind, bag) => {
+      if (!bag)
+        return;
+      for (const role of PIN_KEYS) {
+        const pin = normalizePin(bag[role]);
+        if (pin === null)
+          continue;
+        claims.push({ pin, written: String(bag[role]), owner, kind, role });
+      }
+    };
+    for (const bus of project.system.resources || []) {
+      scan(bus.name, "bus", bus.binding);
+    }
+    for (const device of project.system.components || []) {
+      scan(device.name, "device", device.config);
+    }
+    return claims;
+  }
+  function findPinConflicts(project) {
+    const busOf = new Map((project.system.components || []).map((c) => [c.name, c.bus]));
+    const byPin = /* @__PURE__ */ new Map();
+    for (const claim of collectPinClaims(project)) {
+      const list = byPin.get(claim.pin) || [];
+      list.push(claim);
+      byPin.set(claim.pin, list);
+    }
+    const conflicts = [];
+    for (const [pin, claims] of byPin) {
+      if (claims.length < 2)
+        continue;
+      const independent = claims.filter((claim) => {
+        if (claim.kind !== "device")
+          return true;
+        const bus = busOf.get(claim.owner);
+        if (!bus)
+          return true;
+        return !claims.some((other) => other.kind === "bus" && other.owner === bus);
+      });
+      const owners = new Set(independent.map((c) => c.owner));
+      if (owners.size > 1)
+        conflicts.push({ pin, claims: independent });
+    }
+    return conflicts;
+  }
+  function describePinConflict(conflict) {
+    const lines = conflict.claims.map((c) => `    ${c.written} \u2014 ${c.kind} "${c.owner}" (${c.role})`);
+    return `Pin ${conflict.pin} is claimed by ${conflict.claims.length} different things:
+${lines.join("\n")}`;
+  }
+
   // dist/src/parser/index.js
   var MERGED_LISTS = [
     "events",
@@ -3276,13 +3348,18 @@
         this.warnings.push('This model uses the retired "system:" block. Split it into the top-level domains (target, hardware, parameters, events, machine, actions) - see PLAN.md. Support will be removed in the next release.');
       }
       const system = legacy ? this.parseSystem(raw.system) : this.parseDomains(raw);
-      return {
+      const project = {
         name: projectRaw.name || "unnamed",
         version: projectRaw.version || "0.1.0",
         description: projectRaw.description,
         target: this.parseTarget(raw.target),
         system
       };
+      const conflicts = findPinConflicts(project);
+      if (conflicts.length > 0) {
+        throw new ParseError(conflicts.map(describePinConflict).join("\n\n"));
+      }
+      return project;
     }
     parseTarget(raw) {
       if (raw === void 0 || raw === null)
@@ -3336,6 +3413,12 @@
       this.assertUniqueNames(libraries, "library");
       this.assertLibraryRefs(resources, libraries);
       this.assertBusRefs(components, resources);
+      const busNames = new Set((resources || []).map((r) => r.name));
+      for (const device of components || []) {
+        if (busNames.has(device.name)) {
+          throw new ParseError(`"${device.name}" is declared as both a bus and a device. Names are shared between them, so pick one.`);
+        }
+      }
       return {
         name: raw.name || raw.project?.name || "unnamed",
         description: machine.description,
@@ -4134,6 +4217,12 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
     }
   };
   var ROOT_PATH = "__root";
+  var DEVICE_INTERFACE = {
+    digital_output: { interface: "gpio", mode: "OUTPUT" },
+    digital_input: { interface: "gpio", mode: "INPUT" },
+    pwm_output: { interface: "pwm" },
+    analog_input: { interface: "adc" }
+  };
   var Codegen = class {
     constructor() {
       this.states = [];
@@ -4177,6 +4266,121 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         this.generateActionImplementations()
       ].join("\n\n") + "\n";
     }
+    /**
+     * Generate the project as separate files, so regenerating never touches code
+     * you wrote.
+     *
+     * Everything derived from the model is rewritten every time. Guard and action
+     * bodies are *scaffolds*: emitted once if absent, and never again. That split
+     * is the whole point - with a single self-contained sketch, regenerating
+     * silently destroys every implementation you filled in.
+     */
+    generateFiles(project) {
+      this.reset();
+      this.project = project;
+      this.indexStates();
+      this.indexGuards();
+      this.indexActions();
+      this.indexTransitions();
+      this.indexInterfaces();
+      const base = this.sanitize(project.name);
+      const headerName = `${base}_generated.h`;
+      const guardName = "src/guards.cpp";
+      const actionName = "src/actions.cpp";
+      return {
+        generated: [
+          { path: headerName, contents: this.composeHeader(headerName) },
+          { path: `${base}.ino`, contents: this.composeSketch(headerName) }
+        ],
+        scaffolds: [
+          { path: guardName, contents: this.composeGuardFile(headerName) },
+          { path: actionName, contents: this.composeActionFile(headerName) }
+        ]
+      };
+    }
+    /** Declarations: types, macros and prototypes that every file shares. */
+    composeHeader(headerName) {
+      const guard = `PULSEIR_${this.sanitizeUpper(this.project.name)}_GENERATED_H`;
+      return [
+        this.generateHeader(),
+        `#ifndef ${guard}
+#define ${guard}`,
+        this.generateIncludes(),
+        this.declInterfaces(),
+        this.declEventEnum(),
+        this.declParameterStruct(),
+        this.declSensorStruct(),
+        this.declContextStruct(),
+        this.machineGlobals(true),
+        `// Instances the sketch defines.
+extern SystemParameters systemParameters;
+extern SystemSensors systemSensors;
+extern SystemContext systemContext;
+
+// The Arduino IDE auto-prototypes these for .ino files, but a .cpp in src/
+// needs them declared.
+void setup();
+void loop();
+void setupInterfaces();${this.declInterfaceGlobals()}`,
+        this.generateGuardDeclarations(),
+        this.generateActionDeclarations(),
+        `#endif  // ${guard}`
+      ].join("\n\n") + "\n";
+    }
+    /** Definitions the model owns. Rewritten on every generate. */
+    composeSketch(headerName) {
+      return [
+        `/**
+ * PulseHSM Generated Code - DO NOT EDIT.
+ *
+ * Regenerated from the model every time. Your guards and actions live in
+ * src/, which this file never overwrites.
+ */
+
+#include "${headerName}"`,
+        this.defEventNames(),
+        this.defParameterInstance(),
+        "SystemSensors systemSensors = {};",
+        "SystemContext systemContext;",
+        this.machineGlobals(false).replace(/^\/\/ =+\n\/\/ STATE MACHINE\n\/\/ =+\n\n/m, ""),
+        this.defInterfaces().trimStart(),
+        this.generateEventHandlers(),
+        this.generateSetupFunction(),
+        this.generateLoopFunction()
+      ].join("\n\n") + "\n";
+    }
+    composeGuardFile(headerName) {
+      return `/**
+ * Guards - YOUR CODE. Safe to edit; regenerating never overwrites this file.
+ *
+ * A guard is a pure check: return true to allow the transition, false to block
+ * it. Blocking does not consume the event, so an enclosing state still gets a
+ * chance to handle it.
+ *
+ * Delete this file and regenerate to get fresh stubs.
+ */
+
+#include "${headerName}"
+
+${this.generateGuardImplementations()}
+`;
+    }
+    composeActionFile(headerName) {
+      return `/**
+ * Actions - YOUR CODE. Safe to edit; regenerating never overwrites this file.
+ *
+ * Actions run before the state changes, so ctx->currentState is still the state
+ * being left. Everything you need is on ctx: parameters, sensor readings, the
+ * current and previous state, and the event payload.
+ *
+ * Delete this file and regenerate to get fresh stubs.
+ */
+
+#include "${headerName}"
+
+${this.generateActionImplementations()}
+`;
+    }
     reset() {
       this.states = [];
       this.byPath = /* @__PURE__ */ new Map();
@@ -4196,15 +4400,31 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
      */
     indexInterfaces() {
       for (const resource of this.project.system.resources || []) {
-        const emission = this.interfaces.emit(resource, this.sanitizeUpper(resource.name));
-        this.emissions.set(resource.name, emission);
-        for (const library of emission.libraries) {
-          if (!this.libraries.has(library.name))
-            this.libraries.set(library.name, library);
-        }
+        this.addEmission(resource.name, this.interfaces.emit(resource, this.sanitizeUpper(resource.name)));
+      }
+      for (const device of this.project.system.components || []) {
+        const mapping = DEVICE_INTERFACE[device.type || ""];
+        if (!mapping)
+          continue;
+        const binding = { ...device.config || {} };
+        if (mapping.mode && binding.mode === void 0)
+          binding.mode = mapping.mode;
+        this.addEmission(device.name, this.interfaces.emit({
+          name: device.name,
+          interface: mapping.interface,
+          binding,
+          description: device.description
+        }, this.sanitizeUpper(device.name)));
       }
       for (const library of this.interfaces.declared(this.project.system.libraries)) {
         this.libraries.set(library.name, library);
+      }
+    }
+    addEmission(name, emission) {
+      this.emissions.set(name, emission);
+      for (const library of emission.libraries) {
+        if (!this.libraries.has(library.name))
+          this.libraries.set(library.name, library);
       }
     }
     // =========================================================================
@@ -4269,19 +4489,34 @@ ${includes}`;
     // INTERFACES
     // =========================================================================
     generateInterfaces() {
-      const resources = this.project.system.resources || [];
+      return `${this.declInterfaces()}
+${this.defInterfaces()}`;
+    }
+    /** Pin and setting macros. Drivers reference these, so they go in the header. */
+    /** Buses first, then self-initialising devices - the order they set up in. */
+    initialisedResources() {
+      const buses = (this.project.system.resources || []).map((r) => ({
+        name: r.name,
+        interface: String(r.interface),
+        description: r.description
+      }));
+      const devices = (this.project.system.components || []).filter((d) => DEVICE_INTERFACE[d.type || ""]).map((d) => ({
+        name: d.name,
+        interface: DEVICE_INTERFACE[d.type].interface,
+        description: d.description
+      }));
+      return [...buses, ...devices];
+    }
+    declInterfaces() {
+      const resources = this.initialisedResources();
       if (resources.length === 0) {
         return `// ============================================================================
 // INTERFACES
 // ============================================================================
 
-// No resources declared.
-
-void setupInterfaces() {}`;
+// No resources declared.`;
       }
       const blocks = [];
-      const globals = [];
-      const body = [];
       const todos = [];
       for (const resource of resources) {
         const emission = this.emissions.get(resource.name);
@@ -4292,12 +4527,6 @@ void setupInterfaces() {}`;
           blocks.push([heading, ...emission.defines].join("\n"));
         } else {
           blocks.push(heading);
-        }
-        globals.push(...emission.globals);
-        if (emission.init.length > 0) {
-          body.push(`  // ${resource.name}`);
-          body.push(...emission.init.map((line) => line.startsWith("#") ? line : `  ${line}`));
-          body.push("");
         }
         todos.push(...emission.todos);
       }
@@ -4312,13 +4541,53 @@ ${todos.map((t) => `//   - ${t}`).join("\n")}
 // Pin arguments to begin() require an ESP32/ESP8266/RP2040 core; the fallbacks
 // below cover cores without them. Adjust setupInterfaces() for other boards.
 ${todoBlock}
-${blocks.join("\n\n")}
-${globals.length > 0 ? `
+${blocks.join("\n\n")}`;
+    }
+    /** Client objects and the init sequence: definitions the sketch owns. */
+    defInterfaces() {
+      const resources = this.initialisedResources();
+      if (resources.length === 0)
+        return "\nvoid setupInterfaces() {}";
+      const globals = [];
+      const body = [];
+      for (const resource of resources) {
+        const emission = this.emissions.get(resource.name);
+        if (!emission)
+          continue;
+        globals.push(...emission.globals);
+        if (emission.init.length > 0) {
+          body.push(`  // ${resource.name}`);
+          body.push(...emission.init.map((line) => line.startsWith("#") ? line : `  ${line}`));
+          body.push("");
+        }
+      }
+      return `${globals.length > 0 ? `
 ${globals.join("\n")}
 ` : ""}
 void setupInterfaces() {
 ${body.length > 0 ? body.join("\n").replace(/\n+$/, "") : "  // Nothing to initialise"}
 }`;
+    }
+    /**
+     * `extern` forms of the interface objects, so a driver in src/ can reach the
+     * OneWire bus or MQTT client that the sketch defines.
+     */
+    declInterfaceGlobals() {
+      const externs = [];
+      for (const emission of this.emissions.values()) {
+        for (const line of emission.globals) {
+          if (line.trimStart().startsWith("//"))
+            continue;
+          const match = /^([A-Za-z_][\w:<>]*)\s+([A-Za-z_]\w*)\s*(?:\([^)]*\))?;$/.exec(line.trim());
+          if (match)
+            externs.push(`extern ${match[1]} ${match[2]};`);
+        }
+      }
+      if (externs.length === 0)
+        return "";
+      return `
+// Objects the sketch defines, available to your drivers.
+${externs.join("\n")}`;
     }
     // =========================================================================
     // EVENT ENUM
@@ -4346,10 +4615,27 @@ const char* eventNames[] = {
 ${eventNames.map((name) => `  "${name}"`).join(",\n")}
 };`;
     }
+    /** The enum alone, plus an extern for the names array the sketch defines. */
+    declEventEnum() {
+      const [enumPart] = this.generateEventEnum().split("\nconst char* eventNames");
+      return `${enumPart}
+extern const char* eventNames[];`;
+    }
+    defEventNames() {
+      const names = this.project.system.events.map((e) => this.sanitizeUpper(e.name));
+      return `const char* eventNames[] = {
+${names.map((n) => `  "${n}"`).join(",\n")}
+};`;
+    }
     // =========================================================================
     // SYSTEM PARAMETERS (from YAML)
     // =========================================================================
     generateParameterStruct() {
+      return `${this.declParameterStruct()}
+
+${this.defParameterInstance()}`;
+    }
+    declParameterStruct() {
       const parameters = this.project.system.parameters || [];
       if (parameters.length === 0) {
         return `// ============================================================================
@@ -4357,9 +4643,7 @@ ${eventNames.map((name) => `  "${name}"`).join(",\n")}
 // ============================================================================
 
 // No parameters defined in the model.
-struct SystemParameters {};
-
-SystemParameters systemParameters = {};`;
+struct SystemParameters {};`;
       }
       const fields = parameters.map((p) => {
         const unit = p.unit ? `  // ${p.unit}` : "";
@@ -4376,9 +4660,18 @@ SystemParameters systemParameters = {};`;
 // Generated from the model's "parameters" section.
 struct SystemParameters {
 ${fields}
-};
-
-// Initialized with the defaults declared in the model.
+};`;
+    }
+    /** The instance, with defaults from the model. Belongs to one translation unit. */
+    defParameterInstance() {
+      const parameters = this.project.system.parameters || [];
+      if (parameters.length === 0)
+        return "SystemParameters systemParameters = {};";
+      const inits = parameters.map((p, idx) => {
+        const comma = idx < parameters.length - 1 ? "," : "";
+        return `  ${this.cLiteral(p)}${comma}   // ${this.sanitize(p.name)}`;
+      }).join("\n");
+      return `// Initialized with the defaults declared in the model.
 SystemParameters systemParameters = {
 ${inits}
 };`;
@@ -4387,6 +4680,11 @@ ${inits}
     // SYSTEM SENSORS (user fills in)
     // =========================================================================
     generateSensorStruct() {
+      return `${this.declSensorStruct()}
+
+SystemSensors systemSensors = {};`;
+    }
+    declSensorStruct() {
       const sensors = (this.project.system.components || []).filter((c) => String(c.class) === "sensor");
       const fields = sensors.length > 0 ? sensors.map((c) => `  float ${this.sanitize(c.name)};  // driver: ${c.driver}`).join("\n") : "  // TODO: Add your sensor readings here (e.g. float temperature;)";
       return `// ============================================================================
@@ -4397,14 +4695,17 @@ ${inits}
 // hardware reads in loop() - the generator never reads hardware for you.
 struct SystemSensors {
 ${fields}
-};
-
-SystemSensors systemSensors = {};`;
+};`;
     }
     // =========================================================================
     // SYSTEM CONTEXT
     // =========================================================================
     generateContextStruct() {
+      return `${this.declContextStruct()}
+
+SystemContext systemContext;`;
+    }
+    declContextStruct() {
       return `// ============================================================================
 // SYSTEM CONTEXT (see FUNCTION_CONTRACT.md)
 // ============================================================================
@@ -4415,20 +4716,28 @@ struct SystemContext {
   int32_t eventData;                   // Payload of the event being dispatched
   const SystemParameters* parameters;  // Read-only system parameters
   const SystemSensors* sensors;        // Current sensor readings
-};
-
-SystemContext systemContext;`;
+};`;
     }
     // =========================================================================
     // MACHINE + STATE INDEX GLOBALS
     // =========================================================================
     generateMachineDeclarations() {
-      const indices = this.states.map((s) => `int ${s.symbol} = -1;${s.path === ROOT_PATH ? "  // synthetic root for wildcard transitions" : `  // ${s.path}`}`).join("\n");
+      return this.machineGlobals(false);
+    }
+    /**
+     * `extern` when the header declares them for user code to reference;
+     * definitions when the sketch owns them.
+     */
+    machineGlobals(asExtern) {
+      const indices = this.states.map((s) => {
+        const note = s.path === ROOT_PATH ? "  // synthetic root for wildcard transitions" : `  // ${s.path}`;
+        return asExtern ? `extern int ${s.symbol};${note}` : `int ${s.symbol} = -1;${note}`;
+      }).join("\n");
       return `// ============================================================================
 // STATE MACHINE
 // ============================================================================
 
-PulseHSM fsm;
+${asExtern ? "extern PulseHSM fsm;" : "PulseHSM fsm;"}
 
 // State indices returned by addState(). Globals, per the PulseHSM contract.
 ${indices}`;
@@ -4614,8 +4923,6 @@ void setup() {
   // Buses and peripherals declared as resources
   setupInterfaces();
 
-  // Initialize components
-${initCode || "  // Initialize pins and peripherals here"}
 
   // Wire up the context handed to every guard and action
   systemContext.parameters = &systemParameters;
@@ -5200,7 +5507,7 @@ ${implementations.join("\n\n")}`;
       entry: "greenhouse.yaml",
       files: {
         "greenhouse.yaml": '# Multi-file model. Only this file declares `project`.\n#\n#   hardware.yaml    buses and devices\n#   parameters.yaml  tunable configuration\n#   machine.yaml     events, states and transitions\n#\n# Paths are relative to this file. Each name may only be defined once across\n# the whole model, so two files cannot silently collide.\n\nproject:\n  name: greenhouse\n  version: "1.0"\n  description: Climate control for a small greenhouse\n\ntarget:\n  board: esp32\n\nimports:\n  - hardware.yaml\n  - parameters.yaml\n  - machine.yaml\n',
-        "hardware.yaml": '# Buses, devices and third-party libraries.\n#\n# Only libraries the platform does not imply need declaring: Wire, SPI and\n# WiFi come with the interfaces below.\n\nlibraries:\n  - name: Adafruit_BME280\n    include: Adafruit_BME280.h\n    version: "^2.2"\n    source: registry\n    description: Temperature, humidity and pressure over I2C\n\nhardware:\n  buses:\n    sensor_bus:\n      interface: i2c\n      sda: GPIO21\n      scl: GPIO22\n      frequency: 400000\n      library: Adafruit_BME280\n      description: Shared I2C bus for climate sensors\n\n    card_slot:\n      interface: spi\n      sck: GPIO18\n      miso: GPIO19\n      mosi: GPIO23\n      cs: GPIO5\n      description: SD card for offline logging\n\n    gps:\n      interface: uart\n      port: 2\n      baud: 9600\n      rx: GPIO16\n      tx: GPIO17\n\n    vent_drive:\n      interface: pwm\n      pin: GPIO25\n      channel: 0\n      frequency: 5000\n      resolution: 8\n\n    uplink:\n      interface: wifi\n      ssid: greenhouse-ap\n      hostname: greenhouse-01\n\n    broker:\n      interface: mqtt\n      host: mqtt.example.local\n      port: 8883\n      tls: true\n\n  devices:\n    air_temp:\n      type: bme280\n      bus: sensor_bus\n      address: 0x76\n      unit: degC\n\n    humidity:\n      type: bme280\n      bus: sensor_bus\n      address: 0x76\n      unit: percent\n\n    vent:\n      type: pwm_output\n      pin: GPIO25\n      channel: 0\n\n    pump:\n      type: digital_output\n      pin: GPIO26\n',
+        "hardware.yaml": '# Buses, devices and third-party libraries.\n#\n# Only libraries the platform does not imply need declaring: Wire, SPI and\n# WiFi come with the interfaces below.\n\nlibraries:\n  - name: Adafruit_BME280\n    include: Adafruit_BME280.h\n    version: "^2.2"\n    source: registry\n    description: Temperature, humidity and pressure over I2C\n\nhardware:\n  buses:\n    sensor_bus:\n      interface: i2c\n      sda: GPIO21\n      scl: GPIO22\n      frequency: 400000\n      library: Adafruit_BME280\n      description: Shared I2C bus for climate sensors\n\n    card_slot:\n      interface: spi\n      sck: GPIO18\n      miso: GPIO19\n      mosi: GPIO23\n      cs: GPIO5\n      description: SD card for offline logging\n\n    gps:\n      interface: uart\n      port: 2\n      baud: 9600\n      rx: GPIO16\n      tx: GPIO17\n\n    uplink:\n      interface: wifi\n      ssid: greenhouse-ap\n      hostname: greenhouse-01\n\n    broker:\n      interface: mqtt\n      host: mqtt.example.local\n      port: 8883\n      tls: true\n\n  devices:\n    air_temp:\n      type: bme280\n      bus: sensor_bus\n      address: 0x76\n      unit: degC\n\n    humidity:\n      type: bme280\n      bus: sensor_bus\n      address: 0x76\n      unit: percent\n\n    vent:\n      type: pwm_output\n      pin: GPIO25\n      channel: 0\n      frequency: 5000\n      resolution: 8\n\n    pump:\n      type: digital_output\n      pin: GPIO26\n',
         "machine.yaml": 'events:\n  START:\n    source: external\n    description: Local start button\n  STOP:\n    source: external\n  SAMPLE_DUE:\n    source: timer\n  TOO_HOT:\n    source: sensor\n  RECOVERED:\n    source: sensor\n  SENSOR_FAULT:\n    source: internal\n  # Declaring the source as mqtt is what makes this remotely triggerable.\n  REMOTE_START:\n    source: mqtt\n    description: Start requested from the dashboard\n\nactions:\n  open_log:\n    driver: sd_log\n  start_sampling:\n    driver: scheduler\n  stop_all:\n    driver: gpio_control\n    params: {devices: [vent, pump], value: LOW}\n  read_climate:\n    driver: bme280\n  publish_climate:\n    driver: mqtt_publish\n  open_vent:\n    driver: pwm_control\n    params: {device: vent, duty: 100}\n  close_vent:\n    driver: pwm_control\n    params: {device: vent, duty: 0}\n  raise_alarm:\n    driver: mqtt_publish\n\nmachine:\n  states:\n    idle:\n      description: Powered but not regulating\n    running:\n      initial: sampling\n      states:\n        sampling:\n        venting:\n    fault:\n\n  transitions:\n    - from: idle\n      on: START\n      to: running\n      do: [open_log, start_sampling]\n\n    - from: idle\n      on: REMOTE_START\n      to: running\n      do: [open_log, start_sampling]\n\n    - from: running\n      on: STOP\n      to: idle\n      do: stop_all\n\n    - from: running/sampling\n      on: SAMPLE_DUE\n      to: running/sampling\n      do: [read_climate, publish_climate]\n\n    - from: running/sampling\n      on: TOO_HOT\n      guard:\n        name: above_temp_setpoint\n        description: air temperature is above the setpoint plus hysteresis\n      to: running/venting\n      do: open_vent\n\n    - from: running/venting\n      on: RECOVERED\n      guard: back_within_band\n      to: running/sampling\n      do: close_vent\n\n    - from: "*"\n      on: SENSOR_FAULT\n      to: fault\n      do: [stop_all, raise_alarm]\n',
         "parameters.yaml": "parameters:\n  temp_setpoint:\n    type: float\n    default: 26.0\n    range: [10.0, 40.0]\n    unit: degC\n    description: Target air temperature\n\n  hysteresis:\n    type: float\n    default: 1.5\n    range: [0.1, 5.0]\n    unit: degC\n    description: Band around the setpoint before venting\n\n  sample_interval:\n    type: int\n    default: 5000\n    range: [500, 60000]\n    unit: ms\n    description: How often to sample the climate\n"
       }

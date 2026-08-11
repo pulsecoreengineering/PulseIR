@@ -22,6 +22,7 @@ import type {
   StateRef,
 } from '../model/index.js';
 import type { SourceResolver } from './resolver.js';
+import { findPinConflicts, describePinConflict } from '../analysis/pins.js';
 
 export interface ParseOptions {
   /** Id of the document being parsed, used to resolve relative includes. */
@@ -346,13 +347,23 @@ export class Parser {
       ? this.parseSystem(raw.system as Record<string, unknown>)
       : this.parseDomains(raw);
 
-    return {
+    const project: PulseProject = {
       name: projectRaw.name as string || 'unnamed',
       version: projectRaw.version as string || '0.1.0',
       description: projectRaw.description as string | undefined,
       target: this.parseTarget(raw.target),
       system,
     };
+
+    // Two things wired to one pin is wrong on every board, so this needs no
+    // board profile. Reported here rather than at codegen so the editor and
+    // every emitter get it for free.
+    const conflicts = findPinConflicts(project);
+    if (conflicts.length > 0) {
+      throw new ParseError(conflicts.map(describePinConflict).join('\n\n'));
+    }
+
+    return project;
   }
 
   private parseTarget(raw: unknown): PulseProject['target'] {
@@ -417,6 +428,18 @@ export class Parser {
 
     this.assertLibraryRefs(resources, libraries);
     this.assertBusRefs(components, resources);
+
+    // Buses and devices generate macros from the same name, so a collision
+    // between the two would silently produce one set of defines.
+    const busNames = new Set((resources || []).map(r => r.name));
+    for (const device of components || []) {
+      if (busNames.has(device.name)) {
+        throw new ParseError(
+          `"${device.name}" is declared as both a bus and a device. ` +
+          'Names are shared between them, so pick one.'
+        );
+      }
+    }
 
     return {
       name: (raw.name as string) || ((raw.project as Record<string, unknown>)?.name as string) || 'unnamed',

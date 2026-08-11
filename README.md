@@ -265,6 +265,46 @@ uses, compiled to a bundle. It cannot drift from what `pulse-ir` writes to disk.
 Re-run `npm run build:web` after changing anything under `src/` or `examples/`;
 `npm test` fails if the committed bundle or baked examples go stale.
 
+## Generating a Sketch Folder
+
+`--outdir` is the recommended way to generate, because it keeps generated code
+and your code apart:
+
+```bash
+node dist/src/cli.js examples/boiler/pulse.yaml --outdir build/boiler
+```
+
+```
+build/boiler/
+├── boiler_control.ino            regenerated every run - do not edit
+├── boiler_control_generated.h    regenerated every run - do not edit
+├── PulseHSM.h / .cpp             the runtime, vendored so it just builds
+└── src/
+    ├── guards.cpp                YOURS - written once, never overwritten
+    └── actions.cpp               YOURS - written once, never overwritten
+```
+
+Fill in the stubs in `src/`, then regenerate as often as you like: the sketch
+and header are rewritten, and your implementations are left alone. The folder
+opens directly in the Arduino IDE with nothing to install.
+
+`--output <file>` still emits one self-contained sketch, which is handy for a
+quick look but **loses your edits on the next run**.
+
+## What the Compiler Catches
+
+Beyond generating code, the model is checked before anything is written:
+
+- a pin claimed by two different devices or buses, whatever the spelling
+  (`GPIO25`, `gpio_25` and `25` are the same pin)
+- a transition to a state that does not exist, or an ambiguous bare name
+- an action a transition performs that the catalogue never declared
+- a device on a bus that was never declared
+- a name declared in two different files
+- an import cycle
+
+Devices sharing a bus are not a conflict - that is what a bus is for.
+
 ## Development
 
 ```bash

@@ -280,6 +280,84 @@ test('interfaces generate real init code, and never leak a credential', () => {
   }
 });
 
+test('a generated sketch folder compiles, links and runs', () => {
+  // --outdir splits generated code from yours. It has to build as a whole.
+  const project = new Parser().parseFrom(
+    path.join(repoRoot, 'examples/boiler/pulse.yaml'),
+    new FileResolver()
+  );
+  const files = new Codegen().generateFiles(project);
+  const dir = path.join(buildDir, 'sketch-folder');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  for (const file of [...files.generated, ...files.scaffolds]) {
+    const target = path.join(dir, file.path);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, file.contents);
+  }
+
+  fs.writeFileSync(path.join(dir, 'driver.cpp'), `
+#include "boiler_control_generated.h"
+int main() {
+  setup();
+  Serial.print("STATE: ");
+  Serial.println(fsm.getCurrentName());
+  fsm.sendEvent(EVENT_START);
+  fsm.update();
+  Serial.print("STATE: ");
+  Serial.println(fsm.getCurrentName());
+  return 0;
+}
+`);
+
+  const binary = path.join(buildDir, 'sketch-folder-app');
+  execFileSync('g++', [
+    '-std=c++17', '-Wall', '-Wextra', '-Werror', '-x', 'c++',
+    path.join(dir, 'boiler_control.ino'),
+    path.join(dir, 'src/guards.cpp'),
+    path.join(dir, 'src/actions.cpp'),
+    path.join(dir, 'driver.cpp'),
+    path.join(harnessDir, 'serial.cpp'),
+    path.join(depsDir, 'PulseHSM.cpp'),
+    `-I${dir}`, `-I${harnessDir}`, `-I${depsDir}`,
+    '-o', binary,
+  ], { stdio: 'pipe' });
+
+  assertTrace(
+    execFileSync(binary, { encoding: 'utf8' }),
+    ['idle', 'running/heating'],
+    'sketch folder dispatch trace mismatch'
+  );
+
+  // The header must carry declarations, and the sketch the definitions - or
+  // linking two translation units against it would double-define.
+  const header = files.generated.find(f => f.path.endsWith('.h'))!.contents;
+  assert(header.includes('extern PulseHSM fsm;'), 'header does not declare fsm');
+  assert(!/^PulseHSM fsm;/m.test(header), 'header defines fsm instead of declaring it');
+  assert(header.includes('bool guard_temp_at_setpoint(const SystemContext* ctx);'),
+    'header does not declare the guards');
+
+  // Stub bodies must live only in the scaffolds, or filling one in would
+  // clash with a definition the sketch keeps regenerating.
+  const sketch = files.generated.find(f => f.path.endsWith('.ino'))!.contents;
+  assert(!sketch.includes('bool guard_temp_at_setpoint(const SystemContext* ctx) {'),
+    'the regenerated sketch contains a guard body, which would clobber your code');
+  assert(
+    files.scaffolds.some(f => f.contents.includes('bool guard_temp_at_setpoint(const SystemContext* ctx) {')),
+    'the guard body is not in a scaffold file'
+  );
+});
+
+test('devices generate their own initialisation', () => {
+  // Declaring `pump: {type: digital_output, pin: GPIO25}` should be enough;
+  // needing a separate gpio bus for the pinMode was pure boilerplate.
+  const sketch = generate(path.join(repoRoot, 'examples/boiler/pulse.yaml'));
+
+  assert(sketch.includes('pinMode(PUMP_PIN, OUTPUT);'), 'digital_output got no pinMode');
+  assert(sketch.includes('ledcAttachPin(HEATER_PIN, HEATER_CHANNEL);'), 'pwm_output got no ledc setup');
+  assert(sketch.includes('#define PUMP_PIN 25'), 'device pin macro missing');
+});
+
 test('generated guards and actions match the FUNCTION_CONTRACT signatures', () => {
   const sketch = generate(path.join(repoRoot, 'examples/boiler/pulse.yaml'));
 

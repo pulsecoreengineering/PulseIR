@@ -35,13 +35,6 @@ hardware:
       rx: GPIO16
       tx: GPIO17
 
-    vent_drive:
-      interface: pwm
-      pin: GPIO25
-      channel: 0
-      frequency: 5000
-      resolution: 8
-
     uplink:
       interface: wifi
       ssid: greenhouse-ap
@@ -70,6 +63,8 @@ hardware:
       type: pwm_output
       pin: GPIO25
       channel: 0
+      frequency: 5000
+      resolution: 8
 
     pump:
       type: digital_output
