@@ -9,6 +9,7 @@
 
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { writeIfChanged } from './write-if-changed.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -28,12 +29,19 @@ You do not need it just to use the editor - web/app.js is committed:
   process.exit(1);
 }
 
-await esbuild.build({
+// write: false so the bundle can be compared before it touches the tree.
+const result = await esbuild.build({
   entryPoints: [path.join(repoRoot, 'dist/web/main.js')],
   outfile: path.join(repoRoot, 'web/app.js'),
   bundle: true,
   format: 'iife',
   logLevel: 'warning',
+  write: false,
 });
 
-console.log('✓ Bundled the editor into web/app.js');
+const [bundle] = result.outputFiles;
+const changed = writeIfChanged(path.join(repoRoot, 'web/app.js'), bundle.text);
+
+console.log(changed
+  ? '✓ Bundled the editor into web/app.js'
+  : '· web/app.js already current');

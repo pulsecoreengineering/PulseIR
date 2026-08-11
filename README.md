@@ -265,6 +265,17 @@ uses, compiled to a bundle. It cannot drift from what `pulse-ir` writes to disk.
 Re-run `npm run build:web` after changing anything under `src/` or `examples/`;
 `npm test` fails if the committed bundle or baked examples go stale.
 
+`web/app.js` and `web/examples.ts` are generated but committed, and the build
+writes them **only when the output actually changes** — so rebuilding on an
+unchanged checkout leaves the tree clean and never blocks a `git pull`. If an
+older build did leave them modified and a pull refuses to run, they are
+regenerable, so discarding is safe:
+
+```bash
+git checkout -- web/app.js web/examples.ts
+git pull
+```
+
 ## Generating a Sketch Folder
 
 `--outdir` is the recommended way to generate, because it keeps generated code

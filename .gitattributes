@@ -1,0 +1,4 @@
+# Generated but committed, so the editor opens from a clone with no install.
+# Marking them keeps diffs collapsed and keeps them out of language stats.
+web/app.js       linguist-generated=true
+web/examples.ts  linguist-generated=true
