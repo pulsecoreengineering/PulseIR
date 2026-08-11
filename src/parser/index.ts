@@ -358,9 +358,23 @@ export class Parser {
     // Two things wired to one pin is wrong on every board, so this needs no
     // board profile. Reported here rather than at codegen so the editor and
     // every emitter get it for free.
+    //
+    // A bus-versus-device clash is the one ambiguous case, and the retired
+    // schema had no `bus:` field to resolve it - so for those models it is a
+    // warning. Device-versus-device and bus-versus-bus stay errors everywhere.
     const conflicts = findPinConflicts(project);
-    if (conflicts.length > 0) {
-      throw new ParseError(conflicts.map(describePinConflict).join('\n\n'));
+    const fatal = conflicts.filter(c => !(legacy && c.busDeviceOnly));
+    const ambiguous = conflicts.filter(c => legacy && c.busDeviceOnly);
+
+    for (const conflict of ambiguous) {
+      this.warnings.push(
+        `${describePinConflict(conflict)}\n  Reported as a warning because this ` +
+        'model uses the retired schema, which cannot declare that a device sits on a bus.'
+      );
+    }
+
+    if (fatal.length > 0) {
+      throw new ParseError(fatal.map(describePinConflict).join('\n\n'));
     }
 
     return project;

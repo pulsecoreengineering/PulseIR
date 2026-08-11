@@ -168,6 +168,62 @@ hardware:
 `, 'declared as both a bus and a device', 'name collision');
 });
 
+test('a legacy model gets a warning, not an error, for the ambiguous case', () => {
+  // The retired schema had no `bus:` field, so a probe sharing its bus's pin
+  // is indistinguishable from a genuine clash. Refusing to build every such
+  // model would break the deprecation promise, so it is downgraded.
+  const parser = new Parser();
+  const project = parser.parse(`
+project: {name: legacy, version: "1.0"}
+system:
+  name: legacy
+  events: [{name: GO, source: external}]
+  states: [{name: idle, type: simple}]
+  transitions: []
+  components:
+    - {name: probe, class: sensor, driver: ds18b20, config: {interface: onewire, pin: GPIO4}}
+  resources:
+    - {name: onewire_bus, interface: onewire, binding: {pin: GPIO4}}
+`);
+
+  assert(project.system.components!.length === 1, 'the model still parses');
+  assert(
+    parser.warnings.some(w => w.includes('Pin 4 is claimed by')),
+    `expected a pin warning, got ${JSON.stringify(parser.warnings)}`
+  );
+});
+
+test('a legacy model still fails hard on an unambiguous clash', () => {
+  // Two devices on one pin is wrong in any schema - no downgrade.
+  expectConflict(`
+project: {name: legacy, version: "1.0"}
+system:
+  name: legacy
+  events: [{name: GO, source: external}]
+  states: [{name: idle, type: simple}]
+  transitions: []
+  components:
+    - {name: pump, class: actuator, driver: gpio_control, config: {pin: GPIO25}}
+    - {name: fan, class: actuator, driver: gpio_control, config: {pin: GPIO25}}
+`, 'Pin 25 is claimed by', 'legacy device-vs-device');
+});
+
+test('the message says how to resolve a bus/device clash', () => {
+  let message = '';
+  try {
+    parse(`${HEAD}
+hardware:
+  buses:
+    probe_bus: {interface: onewire, pin: GPIO4}
+  devices:
+    led: {type: digital_output, pin: GPIO4}
+`);
+  } catch (error) {
+    message = (error as Error).message;
+  }
+  assert(message.includes('bus: probe_bus'), `no actionable hint: ${message}`);
+});
+
 test('the shipped examples allocate pins cleanly', () => {
   // These are the models students copy from, so a clash in one teaches the
   // mistake. Parsing throws on a conflict, so this really does check them.

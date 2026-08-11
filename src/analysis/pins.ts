@@ -31,6 +31,17 @@ export interface PinClaim {
 export interface PinConflict {
   pin: string;
   claims: PinClaim[];
+  /**
+   * True when the clash is a single bus against a single device.
+   *
+   * That shape is ambiguous: a sensor sharing its bus's pin is normal wiring,
+   * and only `bus:` distinguishes it from a genuine collision. A model written
+   * against the retired schema had no such field, so it cannot say which it
+   * means - see the caller, which downgrades this case for legacy models.
+   *
+   * Two devices, or two buses, are never ambiguous.
+   */
+  busDeviceOnly: boolean;
 }
 
 /**
@@ -115,7 +126,16 @@ export function findPinConflicts(project: PulseProject): PinConflict[] {
     });
 
     const owners = new Set(independent.map(c => c.owner));
-    if (owners.size > 1) conflicts.push({ pin, claims: independent });
+    if (owners.size <= 1) continue;
+
+    const busOwners = new Set(independent.filter(c => c.kind === 'bus').map(c => c.owner));
+    const deviceOwners = new Set(independent.filter(c => c.kind === 'device').map(c => c.owner));
+
+    conflicts.push({
+      pin,
+      claims: independent,
+      busDeviceOnly: busOwners.size === 1 && deviceOwners.size === 1,
+    });
   }
 
   return conflicts;
@@ -126,5 +146,13 @@ export function describePinConflict(conflict: PinConflict): string {
   const lines = conflict.claims.map(
     c => `    ${c.written} — ${c.kind} "${c.owner}" (${c.role})`
   );
-  return `Pin ${conflict.pin} is claimed by ${conflict.claims.length} different things:\n${lines.join('\n')}`;
+
+  // When a device and a bus share a pin, the likely fix is to say so.
+  const hint = conflict.busDeviceOnly
+    ? `\n  If the device sits on that bus, say so with "bus: ${
+        conflict.claims.find(c => c.kind === 'bus')!.owner
+      }" and this stops being a clash.`
+    : '';
+
+  return `Pin ${conflict.pin} is claimed by ${conflict.claims.length} different things:\n${lines.join('\n')}${hint}`;
 }
