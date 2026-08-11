@@ -30,7 +30,7 @@
 
 ### Layer 1: Intermediate Representation
 - **src/model/types.ts** (400 lines)
-  - 8 enums (StateType, EventSource, GuardType, ActionType, ComponentClass, InterfaceType)
+  - 5 enums (StateType, EventSource, ActionType, ComponentClass, InterfaceType)
   - 12 interfaces (State, Event, Transition, Guard, Action, Component, Resource, Parameter, Region, PulseSystem, PulseProject)
   - Full type system for embedded systems automation
 
@@ -52,8 +52,45 @@
   - Generates guard and action stubs with the FUNCTION_CONTRACT signatures
   - Tested ✅ (compiled, linked and executed — see test/compile.test.ts)
 
+### Interface Backend (IR → platform calls)
+- **src/codegen/interfaces.ts** ⭐
+  - Turns `Resource` declarations into includes, `#define`s and `begin()` calls
+  - Knows the Arduino platform so the IR does not have to; an ESP-IDF backend
+    would translate the same model differently
+  - Board-specific calls sit behind preprocessor guards rather than assumptions
+  - Credential-shaped binding keys are emitted as blank placeholders, never
+    with a value from the model
+
+### Consumer 2: MQTT Topic Manifest (IR → JSON)
+- **src/emit/topics.ts** ⭐
+  - The first consumer of the IR that is **not** a code generator
+  - Sensors → publish topics; parameters → setpoint topics carrying type,
+    unit, default and range; leaf states → a `state` topic
+  - Only events declared `source: mqtt` are exposed as remote commands
+  - Device and dashboard derive their topics from one model, so a renamed
+    sensor cannot silently blank a chart
+
+### Consumer 3: Library Manifest (IR → JSON)
+- **src/emit/libraries.ts**
+  - Merges libraries implied by interfaces with those the model declares
+  - Emits PlatformIO `lib_deps`, excluding core-bundled libraries
+
+### Consumer 4: Web Editor (IR → live browser preview)
+- **web/main.ts** ⭐
+  - Runs the real Parser / Codegen / TopicEmitter as a browser bundle, so the
+    editor cannot drift from the CLI
+  - Live panes: generated sketch, MQTT manifest, library manifest, and a
+    structure view showing composite-state descent, inner-vs-outer transition
+    precedence, and declared interfaces
+  - Multi-file models: one tab per file, with the open buffers acting as the
+    filesystem via MemoryResolver, so `include` resolves between tabs
+  - Errors are reported in place; panes keep the last valid output, labelled
+  - Entirely offline: no server, no upload, no CDN
+- **src/analysis/states.ts** — shared hierarchy walk (leaves, entry descent,
+  path resolution), used by both the topic emitter and the editor
+
 ### CLI & Utils
-- **src/cli.ts** (60 lines) — Command-line interface
+- **src/cli.ts** — Command-line interface (`--output`, `--topics`, `--namespace`)
 - **src/model/index.ts** — Re-export all types
 
 ---
@@ -73,6 +110,22 @@
   - Parser reference checking: unknown/ambiguous/duplicate states, bad events,
     wildcard targets, malformed guards, and the `guard: <name>` string form
 
+- **test/multifile.test.ts**
+  - Include merging and order, relative resolution, cycles, missing files,
+    duplicate names across files, and the no-resolver error path
+
+- **test/analysis.test.ts**
+  - Hierarchy walk: pre-order flattening, initial-child qualification, entry
+    descent through nested composites, ambiguous-name refusal
+
+- **test/web.test.ts**
+  - Fails if the committed bundle or the baked examples go stale, and if the
+    page ever references an external resource
+
+- **test/topics.test.ts**
+  - Topic shape, parameter metadata, wildcard-safe segments, and that only
+    `source: mqtt` events become remotely triggerable commands
+
 - **test/compile.test.ts** ⭐
   - Compiles the generated sketch with `g++ -Wall -Wextra -Werror`, links it
     against `deps/PulseHSM.cpp`, **runs it**, and asserts the dispatch trace
@@ -87,6 +140,8 @@
 - **test/harness/serial.cpp** — provides the `Serial` global
 
 ### Examples
+- **examples/greenhouse/** ⭐ — multi-file model exercising `include`, every
+  interface kind, implied and declared libraries, and an MQTT-triggerable event
 - **examples/boiler.yaml** (180 lines)
   - Complete industrial system: boiler temperature control
   - Hierarchical states (running/heating/cooling/maintaining)
@@ -167,8 +222,14 @@ npm run test
 # Generate code
 node dist/src/cli.js examples/boiler.yaml --output boiler.ino
 
+# Generate the MQTT topic manifest for PulseDash
+node dist/src/cli.js examples/boiler.yaml --topics topics.json --namespace pulsecompiler
+
+# Web editor (or just open web/index.html)
+npm run web
+
 # View generated code
-cat /tmp/boiler_generated.ino
+cat boiler.ino
 ```
 
 ---
@@ -216,12 +277,29 @@ pulse-ir/
 │   │   └── index.ts                 (YAML → IR)
 │   ├── codegen/
 │   │   └── index.ts                 (IR → C++)
+│   ├── emit/
+│   │   └── topics.ts                (IR → MQTT manifest) ⭐
+│   ├── analysis/
+│   │   └── states.ts                (Shared hierarchy walk)
 │   └── cli.ts                       (CLI)
+│
+├── web/                             (Browser editor) ⭐
+│   ├── index.html                   (UI)
+│   ├── main.ts                      (Glue - runs the real pipeline)
+│   ├── examples.ts                  (Generated from the models on disk)
+│   └── app.js                       (Generated bundle, committed)
+│
+├── scripts/
+│   ├── build-examples.mjs           (Bakes models into the editor)
+│   └── serve.mjs                    (Static server)
 │
 ├── test/
 │   ├── parser.test.ts               (Parser smoke test)
 │   ├── codegen.test.ts              (Codegen smoke test)
 │   ├── validation.test.ts           (Reference validation)
+│   ├── topics.test.ts               (MQTT manifest)
+│   ├── analysis.test.ts             (Hierarchy walk)
+│   ├── web.test.ts                  (Editor build freshness)
 │   ├── compile.test.ts              (Compile + link + run) ⭐
 │   ├── fixtures/
 │   │   └── hierarchy.yaml           (Dispatch semantics fixture)
@@ -275,25 +353,95 @@ pulse-ir/
 
 ---
 
-## ⏳ What's Next (v0.2-v1.1)
+## ⏳ What's Next
 
-- [ ] Orthogonal regions (parallel states) — `Region[]` is modelled but only
-      the first region of a composite state is generated
-- [ ] State history support
-- [ ] Entry/exit actions on states (PulseHSM supports them; the IR has no field)
-- [ ] Timeout transitions (PulseHSM's `timeoutMs`/`timeoutNext` are always 0/-1)
+Ordered by what the project is actually *for*: reducing the cognitive load of
+learning a multi-tool ecosystem. PulseIR pays for itself only if it removes the
+incidental complexity of each tool's flavour — not if it becomes one more thing
+to learn on top of them.
+
+**The test to hold this to:** can a student finish a beginner project, including
+debugging it when it breaks, without reading the underlying tool's source? While
+the answer is no, PulseIR is adding load rather than removing it.
+
+### 1. Prove the spine (blocking — do this first)
+
+- [ ] Write the same small project by hand against three PulseCore tools and
+      diff them. Whatever is genuinely common becomes the IR; whatever is not
+      becomes a backend detail. **Do not extend the schema before this.**
+- [ ] Decide from that diff whether the tools share a reactive/event-driven
+      core. If they do, one spine with per-tool backends is right. If they do
+      not, PulseIR stays a state-machine IR and unification moves up a level,
+      to shared project layout and naming conventions.
+
+### 2. Make the ecosystem hooks real
+
+The IR already models devices and wiring, but codegen barely uses it. This is
+the part that generalises beyond PulseHSM.
+
+- [x] **MQTT topic manifest** (`src/emit/topics.ts`) — proves the IR has a
+      non-C++ consumer
+- [x] **`Resource` codegen** — interfaces now generate includes, defines and
+      `begin()` calls instead of nothing
+- [x] **Library management** — implied plus declared, with a PlatformIO manifest
+- [x] **Multi-file models** — `include`, so a model is not one giant file
+- [ ] Emit the MQTT publish/subscribe wiring into the firmware, so the device
+      side of the topic map stops being hand-written
+- [ ] `Component` → driver binding — still only comments and a sensor struct
+- [x] Multi-file support in the web editor — file tabs backed by a
+      MemoryResolver over the open buffers
+- [ ] A second backend (ESP-IDF), to prove the spine is not PulseHSM-shaped
+- [x] **Web editor** (`web/`) — live YAML → sketch / topics / structure, running
+      the real pipeline in the browser. First step toward the IR not being
+      hand-authored.
+- [ ] Structured editing in the browser (add a state or transition through the
+      UI rather than by typing YAML) — the next step toward **nobody
+      hand-writing this YAML**
+- [ ] PulseCore IDE serialization — the IR is a serialization format, not an
+      authoring format
+- [ ] PulseSim. Not blocked by guards being opaque — it never needs to evaluate
+      them. Two routes, both open: *interactive stepping*, where the simulator
+      asks whether a guard holds instead of computing it (better for teaching
+      bubbling and entry/exit order anyway), or *running the real guards on the
+      host*. The second is already half-built: `test/harness/` compiles a
+      generated sketch against an Arduino shim and executes it. Add scripted
+      event injection and a trace format and that harness is PulseSim.
+
+### 3. Cheap completions (unblocked, low cost)
+
+PulseHSM already supports both of these; only the IR lacks the fields.
+
+- [ ] Entry/exit actions on states (`addState` takes them; we always pass
+      `nullptr`)
+- [ ] Timeout transitions (`timeoutMs` / `timeoutNext` are always `0` / `-1`)
 - [ ] Dependency graph validation
-- [ ] PulseCore IDE serialization
-- [ ] PulseSim integration
-- [ ] Multi-target codegen (ESP-IDF)
+
+### 4. Blocked — needs a decision or a runtime change
+
+- [ ] **Orthogonal regions.** Not a codegen feature. PulseHSM has a single
+      `int currentState` and one parent chain in `_dispatchEvent`; parallel
+      regions need several simultaneously-active leaves. This requires
+      redesigning the runtime. `Region[]` existing in the IR types makes it
+      look closer than it is.
+- [ ] **State history.** Same constraint — needs runtime support.
 - [ ] Visual diagram generation
+
+### How to measure progress
+
+Not in generated lines — the boiler example turns 168 lines of YAML into ~199
+lines of scaffolding, which is roughly break-even as pure code generation. The
+metric that matters is **time to first working project on tool N, given the
+student already knows tool 1.** That is testable with real students, and it
+beats any architectural argument.
 
 ---
 
 ## 🎯 Key Decisions
 
 1. **Binding spec first** — FUNCTION_CONTRACT.md defines guard/action contract across all targets
-2. **YAML is never a language** — No expressions, no logic, only names
+2. **YAML is never a language** — No expressions, no logic, only names. The
+   schema has no expression field and the parser rejects the retired one, so
+   this is enforced rather than merely intended (FUNCTION_CONTRACT.md §6)
 3. **Platform-agnostic IR** — Same model, different scaffolding per target
 4. **Validation early** — Parser catches typos, codegen assumes valid input
 5. **Generate shape, not behavior** — Codegen produces stubs, user implements logic

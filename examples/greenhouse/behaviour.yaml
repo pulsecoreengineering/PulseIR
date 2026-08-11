@@ -1,0 +1,72 @@
+system:
+  states:
+    - name: idle
+      type: simple
+      description: Powered but not regulating
+
+    - name: running
+      type: composite
+      initial: sampling
+      description: Regulating the climate
+      regions:
+        - initial: sampling
+          states:
+            - name: sampling
+              type: simple
+            - name: venting
+              type: simple
+
+    - name: fault
+      type: simple
+
+  transitions:
+    - source: idle
+      event: START
+      target: running
+      actions:
+        - open_log
+        - start_sampling
+
+    - source: idle
+      event: REMOTE_START
+      target: running
+      actions:
+        - open_log
+        - start_sampling
+
+    # Declared on the composite, so it applies from either child.
+    - source: running
+      event: STOP
+      target: idle
+      actions:
+        - stop_all
+
+    - source: running/sampling
+      event: SAMPLE_DUE
+      target: running/sampling
+      actions:
+        - read_climate
+        - publish_climate
+
+    - source: running/sampling
+      event: TOO_HOT
+      guard:
+        name: above_temp_setpoint
+        description: air temperature is above the setpoint plus hysteresis
+      target: running/venting
+      actions:
+        - open_vent
+
+    - source: running/venting
+      event: RECOVERED
+      guard: back_within_band
+      target: running/sampling
+      actions:
+        - close_vent
+
+    - source: "*"
+      event: SENSOR_FAULT
+      target: fault
+      actions:
+        - stop_all
+        - raise_alarm

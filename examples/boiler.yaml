@@ -75,8 +75,8 @@ system:
     - source: running/heating
       event: TEMP_REACHED
       guard:
-        type: expression
-        expression: "temperature >= setpoint"
+        name: temp_at_setpoint
+        description: water temperature has reached the setpoint
       target: running/maintaining
       actions:
         - reduce_heat
@@ -86,8 +86,8 @@ system:
     - source: running/maintaining
       event: OVER_TEMP
       guard:
-        type: expression
-        expression: "temperature > max_safe_temp"
+        name: over_safe_temp
+        description: temperature has exceeded the safety limit
       target: running/cooling
       actions:
         - activate_cooling

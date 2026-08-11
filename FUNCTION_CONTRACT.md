@@ -20,6 +20,8 @@ A guard is a **pure boolean check** — no side effects allowed.
 
 ### YAML Definition
 
+A guard is **a name, never a condition**:
+
 ```yaml
 transitions:
   - source: heating
@@ -29,6 +31,17 @@ transitions:
     actions:
       - reduce_heat
 ```
+
+To record what the check means, use the mapping form. The description is
+prose — it is copied into the generated stub as a comment and is never parsed:
+
+```yaml
+    guard:
+      name: temp_ready
+      description: water temperature has reached the setpoint
+```
+
+There is deliberately **no expression field**. See §6.
 
 ### Generated Stub (Fixed Signature)
 
@@ -213,12 +226,49 @@ These are hard boundaries:
 
 - ❌ Parse or evaluate expressions written in YAML
 - ❌ Support boolean composition (AND/OR/NOT) in YAML
-- ❌ Model hardware peripherals or interrupts in YAML
+- ❌ Contain peripheral *logic* - register writes, protocol sequences, ISR bodies
 - ❌ Diverge guard/action signatures between targets
 - ❌ Evaluate YAML parameters as guards (e.g., `"param >= 60"`)
 - ❌ Provide built-in conditional actions (no if/then/else in YAML)
 
 **If a feature request would require any of the above, it's out of scope.**
+
+### Declaring hardware is allowed; driving it is not
+
+An earlier version of this list said PulseIR would never "model hardware
+peripherals", which was already untrue - `Resource` and `InterfaceType` have
+described buses since the first version. The real boundary is narrower:
+
+- **Allowed (declarative facts).** "There is an I2C bus on pins 21 and 22 at
+  400 kHz." That is data about how the board is wired, and each backend
+  translates it for its platform: `Wire.begin(21, 22)` on Arduino,
+  `i2c_param_config()` on ESP-IDF. The model itself stays platform-agnostic.
+- **Not allowed (logic).** `Wire.beginTransmission(0x48)`, a register map, a
+  retry policy, an ISR body. Those are behaviour, and they live in driver code
+  for exactly the reasons guards do - they need a debugger and a type checker.
+
+The test is the same one that applies to guards: the model says *what exists*,
+never *what happens*.
+
+### Why there is no expression field
+
+The schema has no place to put a condition, and this is enforced by the parser
+rather than left to discipline. An earlier version accepted
+`expression: "temperature >= setpoint"` and emitted it as a comment, which was
+worse than either alternative: the model looked executable but nothing ran it.
+
+Anything evaluable here becomes a programming language. It starts as one
+comparison and grows precedence, scoping, type rules, `&&`, `!`, function calls
+and arithmetic — a language with no debugger, no IDE support, and error
+messages we would have to invent. More importantly it is **one more dialect for
+a learner to pick up on top of the C they already need**, which is the exact
+cost PulseIR exists to remove.
+
+A guard written in C is debuggable, type-checked, and steppable. For a teaching
+ecosystem, writing it is the lesson.
+
+Models using the retired form fail to parse with migration guidance rather than
+having the condition silently dropped.
 
 ---
 

@@ -17,9 +17,9 @@
  *   bool guard_<name>(const SystemContext* ctx)
  *   void action_<name>(SystemContext* ctx)
  *
- * The generator emits *shape* only. It never evaluates a guard expression or
- * an action parameter — those are reproduced verbatim as comments in the stub
- * bodies for the user to implement.
+ * The generator emits *shape* only. Guards and actions are names of functions
+ * the user writes in C; any description attached to them is reproduced as a
+ * comment in the stub body, never as code.
  */
 
 import type {
@@ -29,6 +29,8 @@ import type {
   Parameter,
   StateRef,
 } from '../model/index.js';
+import { InterfaceBackend } from './interfaces.js';
+import type { ImpliedLibrary, InterfaceEmission } from './interfaces.js';
 
 export class CodegenError extends Error {
   constructor(message: string) {
@@ -52,9 +54,8 @@ interface FlatState {
 }
 
 interface GuardBinding {
-  fnName: string;       // "guard_temp_ready"
-  expression?: string;  // documented in the stub, never evaluated
-  evaluator?: string;
+  fnName: string;        // "guard_temp_ready"
+  description?: string;  // human intent, copied into the stub as a comment
 }
 
 /** Name of the synthetic superstate that owns wildcard ("*") transitions. */
@@ -78,6 +79,12 @@ export class Codegen {
   /** state index → transitions leaving that state, in model order */
   private transitionsBySource: Map<number, number[]> = new Map();
 
+  private readonly interfaces = new InterfaceBackend();
+  /** resource name → what its interface contributes to the sketch */
+  private emissions: Map<string, InterfaceEmission> = new Map();
+  /** Every library needed, deduplicated by name. */
+  private libraries: Map<string, ImpliedLibrary> = new Map();
+
   /**
    * Generate C++ code from a validated PulseModel
    */
@@ -88,9 +95,12 @@ export class Codegen {
     this.indexGuards();
     this.indexActions();
     this.indexTransitions();
+    this.indexInterfaces();
 
     return [
       this.generateHeader(),
+      this.generateIncludes(),
+      this.generateInterfaces(),
       this.generateEventEnum(),
       this.generateParameterStruct(),
       this.generateSensorStruct(),
@@ -115,6 +125,29 @@ export class Codegen {
     this.guardStubs = new Map();
     this.actionNames = new Set();
     this.transitionsBySource = new Map();
+    this.emissions = new Map();
+    this.libraries = new Map();
+  }
+
+  /**
+   * Work out what each declared resource contributes, and collect every
+   * library needed - both the ones an interface implies and the ones the
+   * model declares.
+   */
+  private indexInterfaces(): void {
+    for (const resource of this.project.system.resources || []) {
+      const emission = this.interfaces.emit(resource, this.sanitizeUpper(resource.name));
+      this.emissions.set(resource.name, emission);
+
+      for (const library of emission.libraries) {
+        if (!this.libraries.has(library.name)) this.libraries.set(library.name, library);
+      }
+    }
+
+    // Declared libraries win, so a model can pin a version or override a header.
+    for (const library of this.interfaces.declared(this.project.system.libraries)) {
+      this.libraries.set(library.name, library);
+    }
   }
 
   // =========================================================================
@@ -152,6 +185,111 @@ export class Codegen {
 
 #include <Arduino.h>
 #include "PulseHSM.h"`;
+  }
+
+  // =========================================================================
+  // LIBRARY INCLUDES
+  // =========================================================================
+
+  private generateIncludes(): string {
+    if (this.libraries.size === 0) {
+      return `// ============================================================================
+// LIBRARIES
+// ============================================================================
+
+// No external libraries required.`;
+    }
+
+    const libraries = Array.from(this.libraries.values())
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    const includes = libraries
+      .map(l => `#include <${l.include}>`)
+      .join('\n');
+
+    // The install list is the "how do I get these" half of the story; the
+    // machine-readable version comes out of `--libraries`.
+    const install = libraries
+      .map(l => {
+        const via = l.source === 'builtin'
+          ? 'bundled with the board core'
+          : 'install via Library Manager / lib_deps';
+        return `//   ${l.name.padEnd(16)} ${via}  (${l.reason})`;
+      })
+      .join('\n');
+
+    return `// ============================================================================
+// LIBRARIES
+// ============================================================================
+//
+// Required before this sketch will build:
+${install}
+
+${includes}`;
+  }
+
+  // =========================================================================
+  // INTERFACES
+  // =========================================================================
+
+  private generateInterfaces(): string {
+    const resources = this.project.system.resources || [];
+    if (resources.length === 0) {
+      return `// ============================================================================
+// INTERFACES
+// ============================================================================
+
+// No resources declared.
+
+void setupInterfaces() {}`;
+    }
+
+    const blocks: string[] = [];
+    const globals: string[] = [];
+    const body: string[] = [];
+    const todos: string[] = [];
+
+    for (const resource of resources) {
+      const emission = this.emissions.get(resource.name);
+      if (!emission) continue;
+
+      const heading = `// ${resource.name} (${resource.interface})` +
+        (resource.description ? ` - ${resource.description}` : '');
+
+      if (emission.defines.length > 0) {
+        blocks.push([heading, ...emission.defines].join('\n'));
+      } else {
+        blocks.push(heading);
+      }
+
+      globals.push(...emission.globals);
+
+      if (emission.init.length > 0) {
+        body.push(`  // ${resource.name}`);
+        // Preprocessor directives must start at column zero.
+        body.push(...emission.init.map(line => (line.startsWith('#') ? line : `  ${line}`)));
+        body.push('');
+      }
+
+      todos.push(...emission.todos);
+    }
+
+    const todoBlock = todos.length > 0
+      ? `//\n// Still yours to finish:\n${todos.map(t => `//   - ${t}`).join('\n')}\n`
+      : '';
+
+    return `// ============================================================================
+// INTERFACES
+// ============================================================================
+//
+// Pin arguments to begin() require an ESP32/ESP8266/RP2040 core; the fallbacks
+// below cover cores without them. Adjust setupInterfaces() for other boards.
+${todoBlock}
+${blocks.join('\n\n')}
+${globals.length > 0 ? `\n${globals.join('\n')}\n` : ''}
+void setupInterfaces() {
+${body.length > 0 ? body.join('\n').replace(/\n+$/, '') : '  // Nothing to initialise'}
+}`;
   }
 
   // =========================================================================
@@ -539,6 +677,9 @@ void setup() {
   Serial.begin(115200);
   Serial.println("\\n\\n=== ${this.project.name} v${this.project.version} ===");
 
+  // Buses and peripherals declared as resources
+  setupInterfaces();
+
   // Initialize components
 ${initCode || '  // Initialize pins and peripherals here'}
 
@@ -599,16 +740,14 @@ void loop() {
 
     const implementations = Array.from(this.guardStubs.entries())
       .map(([fnName, binding]) => {
-        // The expression is documentation only - the contract forbids the
-        // generator from evaluating it.
-        const intent = binding.expression
-          ? `  // Intent (from the model, NOT evaluated by codegen):\n  //   ${binding.expression}`
-          : `  // Custom evaluator: ${binding.evaluator}`;
+        // The description is prose from the model, carried through purely as
+        // documentation for whoever implements this.
+        const intent = binding.description
+          ? `  // Intent: ${binding.description}\n  //\n`
+          : '';
 
         return `bool ${fnName}(const SystemContext* ctx) {
-${intent}
-  //
-  // TODO: Implement this check using ctx->sensors, ctx->parameters,
+${intent}  // TODO: Implement this check using ctx->sensors, ctx->parameters,
   //       ctx->currentState and ctx->eventData.
   (void)ctx;
   return false;
@@ -781,40 +920,26 @@ ${implementations.join('\n\n')}`;
   }
 
   private indexGuards(): void {
-    const used = new Set<string>();
-
     this.project.system.transitions.forEach((t, idx) => {
       if (!t.guard) return;
 
-      // A named evaluator keeps its name so the same user-written function is
-      // reusable across targets. An anonymous expression guard gets a stable
-      // name derived from where it appears.
-      let base: string;
-      if (t.guard.evaluator) {
-        base = this.sanitize(t.guard.evaluator);
-      } else {
-        const src = t.source === '*' ? 'any' : this.sanitize(t.source);
-        base = `${src}_${this.sanitize(t.event)}`;
+      if (!t.guard.name) {
+        throw new CodegenError(`Transition ${idx} has a guard without a name`);
       }
 
-      let fnName = `guard_${base}`;
-      if (!t.guard.evaluator) {
-        // Two anonymous guards on the same source/event pair would collide.
-        let suffix = 2;
-        while (used.has(fnName)) {
-          fnName = `guard_${base}_${suffix++}`;
-        }
-      }
-      used.add(fnName);
-
-      const binding: GuardBinding = {
-        fnName,
-        expression: t.guard.expression,
-        evaluator: t.guard.evaluator,
-      };
+      // The guard's name is the user's, unchanged, so the same hand-written
+      // function ports across targets. Two transitions naming the same guard
+      // share one stub deliberately.
+      const fnName = `guard_${this.sanitize(t.guard.name)}`;
+      const binding: GuardBinding = { fnName, description: t.guard.description };
 
       this.guards.set(idx, binding);
-      if (!this.guardStubs.has(fnName)) {
+
+      const existing = this.guardStubs.get(fnName);
+      if (!existing) {
+        this.guardStubs.set(fnName, binding);
+      } else if (!existing.description && binding.description) {
+        // Keep whichever mention bothered to document itself.
         this.guardStubs.set(fnName, binding);
       }
     });

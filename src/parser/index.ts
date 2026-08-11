@@ -15,11 +15,34 @@ import type {
   Component,
   Resource,
   Parameter,
+  Library,
   Guard,
   Action,
   Region,
   StateRef,
 } from '../model/index.js';
+import type { SourceResolver } from './resolver.js';
+
+export interface ParseOptions {
+  /** Id of the document being parsed, used to resolve relative includes. */
+  origin?: string;
+  /** Supplies included files. Without one, `include` is an error. */
+  resolver?: SourceResolver;
+}
+
+/** Sections of `system` that concatenate across included files. */
+const MERGED_LISTS = [
+  'events',
+  'states',
+  'transitions',
+  'components',
+  'resources',
+  'parameters',
+  'libraries',
+] as const;
+
+/** Guards against a runaway include graph even if cycle detection is bypassed. */
+const MAX_INCLUDE_DEPTH = 32;
 
 export class ParseError extends Error {
   constructor(
@@ -30,6 +53,11 @@ export class ParseError extends Error {
     super(message);
     this.name = 'ParseError';
   }
+}
+
+/** Name a document in an error message, whether or not it came from a file. */
+function describe(origin: string | null): string {
+  return origin ? `"${origin}"` : 'The model';
 }
 
 export class Parser {
@@ -45,10 +73,18 @@ export class Parser {
   /**
    * Parse YAML string into PulseModel
    * Throws ParseError if invalid
+   *
+   * Pass a resolver in `options` to allow the document to `include` others.
    */
-  parse(yamlContent: string): PulseProject {
+  parse(yamlContent: string, options: ParseOptions = {}): PulseProject {
     try {
-      const raw = yaml.load(yamlContent) as Record<string, unknown>;
+      const raw = this.loadDocument(
+        yamlContent,
+        options.origin ?? null,
+        options,
+        new Set(options.origin ? [options.origin] : []),
+        0
+      );
       return this.parseProject(raw);
     } catch (error) {
       if (error instanceof yaml.YAMLException) {
@@ -63,6 +99,147 @@ export class Parser {
       }
       throw new ParseError(`Unknown error: ${error}`);
     }
+  }
+
+  /**
+   * Read a model from a resolver, following includes.
+   * `entry` is resolved the same way an include would be.
+   */
+  parseFrom(entry: string, resolver: SourceResolver): PulseProject {
+    const origin = resolver.resolve(entry, null);
+    let content: string;
+    try {
+      content = resolver.read(origin);
+    } catch (error) {
+      throw new ParseError(
+        `Cannot read model "${entry}": ${error instanceof Error ? error.message : error}`
+      );
+    }
+    return this.parse(content, { origin, resolver });
+  }
+
+  // =========================================================================
+  // MULTI-FILE LOADING
+  // =========================================================================
+
+  /**
+   * Load one document and splice in anything it includes.
+   *
+   * Includes are merged first, in the order listed, and the including file is
+   * layered on top - so a file always overrides what it pulls in, and list
+   * sections read in a predictable order.
+   */
+  private loadDocument(
+    content: string,
+    origin: string | null,
+    options: ParseOptions,
+    seen: Set<string>,
+    depth: number
+  ): Record<string, unknown> {
+    if (depth > MAX_INCLUDE_DEPTH) {
+      throw new ParseError(`Include nesting deeper than ${MAX_INCLUDE_DEPTH} levels`);
+    }
+
+    const doc = (yaml.load(content) ?? {}) as Record<string, unknown>;
+    if (typeof doc !== 'object' || Array.isArray(doc)) {
+      throw new ParseError(`${describe(origin)} must contain a YAML mapping`);
+    }
+
+    if (doc.includes !== undefined && doc.include === undefined) {
+      throw new ParseError(`${describe(origin)} uses "includes"; the key is "include"`);
+    }
+
+    const refs = this.includeRefs(doc.include, origin);
+    if (refs.length === 0) return doc;
+
+    const resolver = options.resolver;
+    if (!resolver) {
+      throw new ParseError(
+        `${describe(origin)} uses "include", but this parser was given no way to ` +
+        'read other files. Load the model from a path (the CLI does this) or ' +
+        'supply a resolver.'
+      );
+    }
+
+    let merged: Record<string, unknown> = {};
+
+    for (const ref of refs) {
+      const id = resolver.resolve(ref, origin);
+
+      if (seen.has(id)) {
+        throw new ParseError(
+          `Include cycle: "${ref}" is already being loaded (${id})`
+        );
+      }
+
+      let included: string;
+      try {
+        included = resolver.read(id);
+      } catch (error) {
+        throw new ParseError(
+          `${describe(origin)} includes "${ref}", which cannot be read: ` +
+          `${error instanceof Error ? error.message : error}`
+        );
+      }
+
+      seen.add(id);
+      const loaded = this.loadDocument(included, id, options, seen, depth + 1);
+      seen.delete(id);
+
+      if (loaded.project !== undefined) {
+        throw new ParseError(
+          `Included file "${ref}" declares "project". Only the top-level model ` +
+          'may declare it, so the project has one identity.'
+        );
+      }
+
+      merged = this.mergeDocuments(merged, loaded);
+    }
+
+    // The including file wins over everything it pulled in.
+    return this.mergeDocuments(merged, doc);
+  }
+
+  private includeRefs(value: unknown, origin: string | null): string[] {
+    if (value === undefined || value === null) return [];
+
+    const list = Array.isArray(value) ? value : [value];
+    return list.map(entry => {
+      if (typeof entry !== 'string' || !entry.trim()) {
+        throw new ParseError(`${describe(origin)} has an include entry that is not a file path`);
+      }
+      return entry;
+    });
+  }
+
+  /**
+   * Combine two raw documents. List sections concatenate so several files can
+   * each contribute states or events; everything else is overridden by the
+   * later document.
+   */
+  private mergeDocuments(
+    base: Record<string, unknown>,
+    overlay: Record<string, unknown>
+  ): Record<string, unknown> {
+    const result: Record<string, unknown> = { ...base, ...overlay };
+    delete result.include;
+
+    const baseSystem = base.system as Record<string, unknown> | undefined;
+    const overlaySystem = overlay.system as Record<string, unknown> | undefined;
+    if (!baseSystem || !overlaySystem) return result;
+
+    const system: Record<string, unknown> = { ...baseSystem, ...overlaySystem };
+
+    for (const key of MERGED_LISTS) {
+      const left = baseSystem[key];
+      const right = overlaySystem[key];
+      if (Array.isArray(left) && Array.isArray(right)) {
+        system[key] = [...left, ...right];
+      }
+    }
+
+    result.system = system;
+    return result;
   }
 
   // =========================================================================
@@ -119,6 +296,25 @@ export class Parser {
     const components = this.parseComponents(raw.components as Record<string, unknown>[]);
     const resources = this.parseResources(raw.resources as Record<string, unknown>[]);
     const parameters = this.parseParameters(raw.parameters as Record<string, unknown>[]);
+    const libraries = this.parseLibraries(raw.libraries as Record<string, unknown>[]);
+
+    // Splitting a model across files makes accidental duplicates easy, and a
+    // duplicate name silently shadows rather than failing later.
+    this.assertUniqueNames(events, 'event');
+    this.assertUniqueNames(components, 'component');
+    this.assertUniqueNames(resources, 'resource');
+    this.assertUniqueNames(parameters, 'parameter');
+    this.assertUniqueNames(libraries, 'library');
+
+    // A resource may name a library, which must actually be declared.
+    const libraryNames = new Set((libraries || []).map(l => l.name));
+    for (const resource of resources || []) {
+      if (resource.library && !libraryNames.has(resource.library)) {
+        throw new ParseError(
+          `Resource "${resource.name}" needs library "${resource.library}", which is not declared`
+        );
+      }
+    }
 
     return {
       name: raw.name as string || 'unnamed',
@@ -130,7 +326,58 @@ export class Parser {
       components,
       resources,
       parameters,
+      libraries,
     };
+  }
+
+  private assertUniqueNames(items: { name: string }[] | undefined, kind: string): void {
+    if (!items) return;
+
+    const seen = new Set<string>();
+    for (const item of items) {
+      if (seen.has(item.name)) {
+        throw new ParseError(
+          `Duplicate ${kind} "${item.name}" (check whether two included files both declare it)`
+        );
+      }
+      seen.add(item.name);
+    }
+  }
+
+  private parseLibraries(raw: Record<string, unknown>[] | undefined): Library[] | undefined {
+    if (!raw || !Array.isArray(raw)) return undefined;
+
+    return raw.map(entry => {
+      // `libraries: [Wire, SPI]` is enough when there is nothing to configure.
+      if (typeof entry === 'string') {
+        return { name: entry };
+      }
+
+      const name = entry.name;
+      if (typeof name !== 'string' || !name.trim()) {
+        throw new ParseError('Library requires a "name"');
+      }
+
+      const source = entry.source as string | undefined;
+      if (source && !['builtin', 'registry', 'git', 'local'].includes(source)) {
+        throw new ParseError(
+          `Library "${name}" has unknown source "${source}" ` +
+          '(expected builtin, registry, git or local)'
+        );
+      }
+      if ((source === 'git' || source === 'local') && !entry.url) {
+        throw new ParseError(`Library "${name}" has source "${source}" but no "url"`);
+      }
+
+      return {
+        name,
+        include: entry.include as string | undefined,
+        version: entry.version as string | undefined,
+        source: source as Library['source'],
+        url: entry.url as string | undefined,
+        description: entry.description as string | undefined,
+      };
+    });
   }
 
   private parseEvents(raw: Record<string, unknown>[] | undefined): Event[] {
@@ -227,29 +474,44 @@ export class Parser {
   }
 
   private parseGuard(raw: unknown): Guard {
-    // FUNCTION_CONTRACT.md's preferred form is a bare name referencing a
-    // user-written evaluator: `guard: temp_ready`.
+    // The canonical form is a bare name referencing a user-written function:
+    //   guard: temp_ready
     if (typeof raw === 'string') {
-      return {
-        type: 'custom' as any,
-        evaluator: raw,
-      };
+      if (!raw.trim()) {
+        throw new ParseError('Guard name cannot be empty');
+      }
+      return { name: raw };
+    }
+
+    if (typeof raw !== 'object') {
+      throw new ParseError(`Guard must be a name or a mapping, got ${typeof raw}`);
     }
 
     const obj = raw as Record<string, unknown>;
-    const type = ((obj.type as string) || 'expression') as any;
 
-    if (type === 'custom' && !obj.evaluator) {
-      throw new ParseError('Guard of type "custom" requires an "evaluator" name');
+    // The old schema carried a C-like condition string. Point at the
+    // replacement rather than silently ignoring it, since a dropped guard
+    // would change behaviour without any visible error.
+    if (obj.expression !== undefined || obj.type !== undefined || obj.evaluator !== undefined) {
+      throw new ParseError(
+        'Guards no longer take "type", "expression" or "evaluator". ' +
+        'A guard is the name of a function you implement in C. Use:\n' +
+        '  guard: my_guard_name\n' +
+        'or, to keep the intent as documentation:\n' +
+        '  guard:\n' +
+        '    name: my_guard_name\n' +
+        '    description: what this checks'
+      );
     }
-    if (type === 'expression' && !obj.expression) {
-      throw new ParseError('Guard of type "expression" requires an "expression" string');
+
+    const name = obj.name;
+    if (typeof name !== 'string' || !name.trim()) {
+      throw new ParseError('Guard requires a "name"');
     }
 
     return {
-      type,
-      expression: obj.expression as string | undefined,
-      evaluator: obj.evaluator as string | undefined,
+      name,
+      description: obj.description as string | undefined,
     };
   }
 
@@ -283,12 +545,32 @@ export class Parser {
 
   private parseResources(raw: Record<string, unknown>[] | undefined): Resource[] | undefined {
     if (!raw || !Array.isArray(raw)) return undefined;
-    return raw.map(r => ({
-      name: r.name as string,
-      interface: (r.interface as string) as any,
-      binding: r.binding as Record<string, unknown> | undefined,
-      description: r.description as string | undefined,
-    }));
+
+    const known = [
+      'gpio', 'pwm', 'adc', 'uart', 'i2c', 'spi',
+      'can', 'onewire', 'wifi', 'ethernet', 'ble', 'mqtt', 'custom',
+    ];
+
+    return raw.map(r => {
+      const iface = r.interface as string;
+      if (!iface) {
+        throw new ParseError(`Resource "${r.name}" has no "interface"`);
+      }
+      if (!known.includes(iface)) {
+        throw new ParseError(
+          `Resource "${r.name}" has unknown interface "${iface}". ` +
+          `Expected one of: ${known.join(', ')}.`
+        );
+      }
+
+      return {
+        name: r.name as string,
+        interface: iface as any,
+        binding: r.binding as Record<string, unknown> | undefined,
+        library: r.library as string | undefined,
+        description: r.description as string | undefined,
+      };
+    });
   }
 
   private parseParameters(raw: Record<string, unknown>[] | undefined): Parameter[] | undefined {

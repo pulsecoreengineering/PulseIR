@@ -179,8 +179,7 @@ transitions:
     event: START
     target: running
     guard:
-      type: expression
-      expression: "ready == true"
+      name: ready_to_run
     actions:
       - start_pump
 ```
@@ -191,12 +190,12 @@ bool onEventIdle(uint8_t evt) {
   switch (evt) {
     case EVENT_START:
       // Check guard
-      if (!guard_idle_START()) {
+      if (!guard_idle_START(&systemContext)) {
         return false;  // Guard failed, bubble up
       }
       
       // Execute action
-      action_start_pump();
+      action_start_pump(&systemContext);
       
       // Transition
       hsm.transitionTo(STATE_RUNNING);
@@ -211,8 +210,7 @@ bool onEventIdle(uint8_t evt) {
 **YAML Guard**:
 ```yaml
 guard:
-  type: expression
-  expression: "temperature >= setpoint"
+  name: temp_at_setpoint
 ```
 
 **Generated C++**:
@@ -221,7 +219,7 @@ guard:
 float temperature = 0.0;
 float setpoint = 60.0;
 
-bool guard_idle_START() {
+bool guard_idle_START(const SystemContext* ctx) {
   return temperature >= setpoint;
 }
 ```
@@ -241,7 +239,7 @@ actions:
 
 **Generated Stub**:
 ```cpp
-void action_start_pump() {
+void action_start_pump(SystemContext* ctx) {
   Serial.print("  -> Action: start_pump");
   
   // TODO: Implement
@@ -405,29 +403,29 @@ void onEnterMaintaining();
 void onEnterCooling();
 void onEnterFault();
 
-void action_start_pump();
-void action_stop_pump();
-void action_reduce_heat();
-void action_activate_cooling();
-void action_shutdown_all();
+void action_start_pump(SystemContext* ctx);
+void action_stop_pump(SystemContext* ctx);
+void action_reduce_heat(SystemContext* ctx);
+void action_activate_cooling(SystemContext* ctx);
+void action_shutdown_all(SystemContext* ctx);
 
-bool guard_idle_START();
-bool guard_heating_TEMP_REACHED();
-bool guard_maintaining_OVER_TEMP();
+bool guard_idle_START(const SystemContext* ctx);
+bool guard_heating_TEMP_REACHED(const SystemContext* ctx);
+bool guard_maintaining_OVER_TEMP(const SystemContext* ctx);
 
 // ============================================================================
 // GUARD IMPLEMENTATIONS
 // ============================================================================
 
-bool guard_idle_START() {
+bool guard_idle_START(const SystemContext* ctx) {
   return true;  // No guard
 }
 
-bool guard_heating_TEMP_REACHED() {
+bool guard_heating_TEMP_REACHED(const SystemContext* ctx) {
   return temperature >= setpoint;
 }
 
-bool guard_maintaining_OVER_TEMP() {
+bool guard_maintaining_OVER_TEMP(const SystemContext* ctx) {
   return temperature > max_safe_temp;
 }
 
@@ -435,12 +433,12 @@ bool guard_maintaining_OVER_TEMP() {
 // ACTION IMPLEMENTATIONS
 // ============================================================================
 
-void action_start_pump() {
+void action_start_pump(SystemContext* ctx) {
   Serial.println("  -> Action: start_pump");
   digitalWrite(PUMP_PIN, HIGH);
 }
 
-void action_stop_pump() {
+void action_stop_pump(SystemContext* ctx) {
   Serial.println("  -> Action: stop_pump");
   digitalWrite(PUMP_PIN, LOW);
 }
@@ -454,13 +452,13 @@ void action_stop_pump() {
 bool onEventIdle(uint8_t evt) {
   switch (evt) {
     case EVENT_START:
-      if (!guard_idle_START()) return false;
-      action_start_pump();
+      if (!guard_idle_START(&systemContext)) return false;
+      action_start_pump(&systemContext);
       hsm.transitionTo(STATE_HEATING);
       return true;
     
     case EVENT_EMERGENCY_STOP:
-      action_shutdown_all();
+      action_shutdown_all(&systemContext);
       hsm.transitionTo(STATE_FAULT);
       return true;
   }
@@ -470,13 +468,13 @@ bool onEventIdle(uint8_t evt) {
 bool onEventHeating(uint8_t evt) {
   switch (evt) {
     case EVENT_TEMP_REACHED:
-      if (!guard_heating_TEMP_REACHED()) return false;
-      action_reduce_heat();
+      if (!guard_heating_TEMP_REACHED(&systemContext)) return false;
+      action_reduce_heat(&systemContext);
       hsm.transitionTo(STATE_MAINTAINING);
       return true;
     
     case EVENT_EMERGENCY_STOP:
-      action_shutdown_all();
+      action_shutdown_all(&systemContext);
       hsm.transitionTo(STATE_FAULT);
       return true;
   }
@@ -558,7 +556,7 @@ transitions:
 ```cpp
 bool onEventIdle(uint8_t evt) {
   if (evt == EVENT_START) {
-    action_start_pump();
+    action_start_pump(&systemContext);
     hsm.transitionTo(STATE_RUNNING);
     return true;
   }
@@ -573,8 +571,7 @@ transitions:
   - source: heating
     event: TEMP_REACHED
     guard:
-      type: expression
-      expression: "temperature >= setpoint"
+      name: temp_at_setpoint
     target: maintaining
     actions:
       - reduce_heat
@@ -583,15 +580,15 @@ transitions:
 ```cpp
 bool onEventHeating(uint8_t evt) {
   if (evt == EVENT_TEMP_REACHED) {
-    if (!guard_heating_TEMP_REACHED()) return false;
-    action_reduce_heat();
+    if (!guard_heating_TEMP_REACHED(&systemContext)) return false;
+    action_reduce_heat(&systemContext);
     hsm.transitionTo(STATE_MAINTAINING);
     return true;
   }
   return false;
 }
 
-bool guard_heating_TEMP_REACHED() {
+bool guard_heating_TEMP_REACHED(const SystemContext* ctx) {
   return temperature >= setpoint;
 }
 ```
@@ -611,7 +608,7 @@ transitions:
 // Generated in EVERY state's event handler
 bool onEventIdle(uint8_t evt) {
   if (evt == EVENT_EMERGENCY_STOP) {
-    action_shutdown_all();
+    action_shutdown_all(&systemContext);
     hsm.transitionTo(STATE_FAULT);
     return true;
   }
@@ -620,7 +617,7 @@ bool onEventIdle(uint8_t evt) {
 
 bool onEventHeating(uint8_t evt) {
   if (evt == EVENT_EMERGENCY_STOP) {
-    action_shutdown_all();
+    action_shutdown_all(&systemContext);
     hsm.transitionTo(STATE_FAULT);
     return true;
   }

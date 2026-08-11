@@ -14,6 +14,7 @@ import * as path from 'path';
 import { execFileSync, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { Parser } from '../src/parser/index.js';
+import { FileResolver } from '../src/parser/fs-resolver.js';
 import { Codegen } from '../src/codegen/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -35,8 +36,8 @@ if (!hasCompiler()) {
 fs.mkdirSync(buildDir, { recursive: true });
 
 function generate(yamlPath: string): string {
-  const yamlContent = fs.readFileSync(yamlPath, 'utf8');
-  const project = new Parser().parse(yamlContent);
+  // parseFrom follows `include`, so multi-file models work here too.
+  const project = new Parser().parseFrom(yamlPath, new FileResolver());
   return new Codegen().generate(project);
 }
 
@@ -219,11 +220,71 @@ int main() {
   assert(startIdx < armIdx, 'multi-action transition ran actions out of order');
 });
 
+test('multi-file greenhouse model compiles with its interfaces wired up', () => {
+  const sketch = generate(path.join(repoRoot, 'examples/greenhouse/greenhouse.yaml'));
+
+  const driver = `${DRIVER_PRELUDE}
+int main() {
+  setup();          // runs setupInterfaces()
+  report();
+
+  step(EVENT_START);          // idle -> running, descends to sampling
+  step(EVENT_TOO_HOT);        // guard stub returns false, so nothing moves
+  step(EVENT_SENSOR_FAULT);   // wildcard, handled by the synthetic root
+  return 0;
+}`;
+
+  const output = buildAndRun('greenhouse', sketch, driver);
+
+  assertTrace(
+    output,
+    ['idle', 'running/sampling', 'running/sampling', 'fault'],
+    'greenhouse dispatch trace mismatch'
+  );
+});
+
+test('interfaces generate real init code, and never leak a credential', () => {
+  const sketch = generate(path.join(repoRoot, 'examples/greenhouse/greenhouse.yaml'));
+
+  // Buses are initialised from their declared pins.
+  assert(sketch.includes('Wire.begin(SENSOR_BUS_SDA, SENSOR_BUS_SCL);'), 'I2C not initialised from bindings');
+  assert(sketch.includes('Wire.setClock(SENSOR_BUS_FREQUENCY);'), 'I2C clock not set');
+  assert(sketch.includes('SPI.begin(CARD_SLOT_SCK'), 'SPI not initialised from bindings');
+  assert(sketch.includes('Serial2.begin(GPS_BAUD'), 'UART port not honoured');
+  assert(sketch.includes('setupInterfaces();'), 'setup() never calls setupInterfaces()');
+
+  // "GPIO21" is not a macro any core defines, so it must be normalised.
+  assert(sketch.includes('#define SENSOR_BUS_SDA 21'), 'GPIO pin was not normalised to a number');
+
+  // Implied libraries appear without being declared.
+  for (const include of ['<Wire.h>', '<SPI.h>', '<PubSubClient.h>', '<Adafruit_BME280.h>']) {
+    assert(sketch.includes(`#include ${include}`), `missing include ${include}`);
+  }
+
+  // TLS needs its own header; a plain WiFi resource must not dedupe it away.
+  assert(sketch.includes('WiFiClientSecure brokerTransport;'), 'secure transport not declared');
+  assert(sketch.includes('#include <WiFiClientSecure.h>'), 'secure transport header missing');
+
+  // Every credential macro the code references must exist, and be blank.
+  assert(
+    sketch.includes('#define UPLINK_PASSWORD ""'),
+    'Wi-Fi password macro is referenced but never defined'
+  );
+  // Every credential macro must be defined as an empty string. Checking the
+  // captured value, not just "quote followed by something" - the closing quote
+  // of "" is itself non-whitespace.
+  const credentials = [...sketch.matchAll(/#define\s+\w*(?:PASSWORD|SECRET|TOKEN|APIKEY)\s+"([^"]*)"/g)];
+  assert(credentials.length > 0, 'expected at least one credential placeholder');
+  for (const match of credentials) {
+    assert(match[1] === '', `a credential value was baked into generated code: ${match[0]}`);
+  }
+});
+
 test('generated guards and actions match the FUNCTION_CONTRACT signatures', () => {
   const sketch = generate(path.join(repoRoot, 'examples/boiler.yaml'));
 
   assert(
-    sketch.includes('bool guard_running_heating_temp_reached(const SystemContext* ctx)'),
+    sketch.includes('bool guard_temp_at_setpoint(const SystemContext* ctx)'),
     'guard stub does not use the contract signature'
   );
   assert(
@@ -239,7 +300,7 @@ test('generated guards and actions match the FUNCTION_CONTRACT signatures', () =
     'SystemParameters was not generated from the model parameters'
   );
   assert(
-    sketch.includes('guard_running_heating_temp_reached(&systemContext)'),
+    sketch.includes('guard_temp_at_setpoint(&systemContext)'),
     'guards are not called with the system context'
   );
   assert(
@@ -247,15 +308,22 @@ test('generated guards and actions match the FUNCTION_CONTRACT signatures', () =
     'actions are not called with the system context'
   );
 
-  // The contract forbids the generator from evaluating YAML expressions: the
-  // expression may only appear as a comment, never as executable code.
-  const expressionLines = sketch
+  // A guard's description is prose for the implementer. It must survive into
+  // the stub, and it must never become code.
+  const intentLines = sketch
     .split('\n')
-    .filter(line => line.includes('temperature >= setpoint'));
-  assert(expressionLines.length > 0, 'guard expression was dropped entirely');
+    .filter(line => line.includes('water temperature has reached the setpoint'));
+  assert(intentLines.length > 0, 'guard description was dropped entirely');
   assert(
-    expressionLines.every(line => line.trimStart().startsWith('//')),
-    'guard expression leaked into generated code instead of staying a comment'
+    intentLines.every(line => line.trimStart().startsWith('//')),
+    'guard description leaked into generated code instead of staying a comment'
+  );
+
+  // The guard name comes from the model verbatim, so hand-written guards port
+  // between targets unchanged.
+  assert(
+    !/guard_running_heating/.test(sketch),
+    'guard name was derived from source/event instead of taken from the model'
   );
 });
 

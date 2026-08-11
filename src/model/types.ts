@@ -24,11 +24,6 @@ export enum EventSource {
   CUSTOM = "custom",          // Plugin-defined
 }
 
-export enum GuardType {
-  EXPRESSION = "expression",  // C-like expression
-  CUSTOM = "custom",          // Plugin-defined evaluator
-}
-
 export enum ActionType {
   DRIVER = "driver",          // Call a driver/plugin
   BUILTIN = "builtin",        // Reserved for future built-in actions
@@ -42,13 +37,29 @@ export enum ComponentClass {
 
 export enum InterfaceType {
   GPIO = "gpio",
+  PWM = "pwm",
+  ADC = "adc",
   UART = "uart",
   I2C = "i2c",
   SPI = "spi",
   CAN = "can",
-  MQTT = "mqtt",
   ONEWIRE = "onewire",
+  WIFI = "wifi",
+  ETHERNET = "ethernet",
+  BLE = "ble",
+  MQTT = "mqtt",
   CUSTOM = "custom",
+}
+
+/**
+ * Where a library comes from. This tells a build system how to obtain it and
+ * a generator whether to use `<angle>` or "quoted" includes.
+ */
+export enum LibrarySource {
+  BUILTIN = "builtin",    // ships with the core toolchain (Wire, SPI, WiFi)
+  REGISTRY = "registry",  // Arduino Library Manager / PlatformIO registry
+  GIT = "git",
+  LOCAL = "local",        // vendored beside the sketch
 }
 
 // ============================================================================
@@ -95,10 +106,19 @@ export interface Parameter {
 // GUARDS - Conditions on transitions
 // ============================================================================
 
+/**
+ * A guard is a *reference* to a user-written function, never a condition the
+ * IR can evaluate.
+ *
+ * There is deliberately no expression field. Anything evaluable here would
+ * grow into a programming language - precedence, scoping, type rules, error
+ * messages - with no debugger and no IDE support, and it would be one more
+ * dialect for a learner to pick up on top of the C they already need. The
+ * condition lives in C, where it can be stepped through and type-checked.
+ */
 export interface Guard {
-  type: GuardType;
-  expression?: string;        // For type == EXPRESSION
-  evaluator?: string;         // For type == CUSTOM (plugin name)
+  name: string;               // user implements bool guard_<name>(const SystemContext*)
+  description?: string;       // human-readable intent, copied into the stub. Never parsed.
   metadata?: Metadata;
 }
 
@@ -184,7 +204,45 @@ export interface Component {
 export interface Resource {
   name: string;
   interface: InterfaceType;
-  binding?: Record<string, unknown>;  // Interface-specific bindings (pins, baudrate, topic, etc.)
+  /**
+   * Interface-specific settings: pins, baud rate, bus frequency, host.
+   *
+   * These are declarative facts about how the board is wired, never peripheral
+   * logic. A backend translates them into whatever its platform requires -
+   * `Wire.begin(sda, scl)` on Arduino, `i2c_param_config()` on ESP-IDF - so
+   * the model itself stays platform-agnostic.
+   *
+   * Credential-shaped keys (password, token, key, secret...) are deliberately
+   * NOT baked into generated code; see Library and the codegen notes.
+   */
+  binding?: Record<string, unknown>;
+  /** Name of a declared Library this interface needs, when not implied. */
+  library?: string;
+  description?: string;
+  metadata?: Metadata;
+}
+
+// ============================================================================
+// LIBRARIES - Third-party code the generated sketch depends on
+// ============================================================================
+
+/**
+ * A library the generated code needs. The model declares *what* is required;
+ * how to obtain it is left to the build system, and how to call it is left to
+ * the user's driver code.
+ *
+ * Libraries implied by an interface (Wire for I2C, SPI for SPI) do not need
+ * declaring - each backend knows its own platform's built-ins.
+ */
+export interface Library {
+  name: string;               // "PubSubClient"
+  /** Header to include, e.g. "PubSubClient.h". Defaults to `<name>.h`. */
+  include?: string;
+  /** Version constraint for the build system, e.g. "^2.8". */
+  version?: string;
+  source?: LibrarySource;
+  /** Repository or path, for GIT and LOCAL sources. */
+  url?: string;
   description?: string;
   metadata?: Metadata;
 }
@@ -207,6 +265,7 @@ export interface PulseSystem {
   components?: Component[];
   resources?: Resource[];
   parameters?: Parameter[];
+  libraries?: Library[];
   
   metadata?: Metadata;
 }

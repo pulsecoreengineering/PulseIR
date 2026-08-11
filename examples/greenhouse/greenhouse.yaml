@@ -1,0 +1,29 @@
+# Multi-file model.
+#
+# Only this file declares `project`. Everything else is split by concern so a
+# change to the wiring never touches the behaviour, and a merge conflict in one
+# area cannot corrupt another.
+#
+#   hardware.yaml   buses, libraries, sensors and actuators
+#   events.yaml     what the system reacts to
+#   behaviour.yaml  states and transitions
+#   tuning.yaml     parameters the dashboard can push down
+#
+# Paths are relative to this file. Lists (events, states, transitions,
+# components, resources, parameters, libraries) are concatenated across files;
+# anything else declared here wins.
+
+project:
+  name: greenhouse
+  version: "1.0"
+  description: Climate control for a small greenhouse
+
+include:
+  - hardware.yaml
+  - events.yaml
+  - behaviour.yaml
+  - tuning.yaml
+
+system:
+  name: greenhouse_controller
+  description: Samples climate, ventilates, and reports to a dashboard

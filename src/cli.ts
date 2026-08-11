@@ -2,55 +2,98 @@
 
 /**
  * PulseIR CLI
- * 
+ *
  * Usage:
- *   pulse-ir <input.yaml> --output <output.cpp>
+ *   pulse-ir <input.yaml> --output <output.ino>
+ *   pulse-ir <input.yaml> --topics <topics.json> [--namespace <prefix>]
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { Parser } from './parser/index.js';
+import { FileResolver } from './parser/fs-resolver.js';
 import { Codegen } from './codegen/index.js';
+import { TopicEmitter } from './emit/topics.js';
+import { LibraryEmitter } from './emit/libraries.js';
+
+const USAGE = `Usage: pulse-ir <input.yaml> [options]
+
+Options:
+  --output <file>      Write the generated Arduino sketch
+  --topics <file>      Write the MQTT topic manifest (JSON)
+  --libraries <file>   Write the library manifest (JSON)
+  --namespace <name>   Topic namespace (defaults to the project name)
+
+A model may "include" other files; paths are resolved relative to the file
+that lists them.
+
+With no output flag at all, the sketch is printed to stdout.`;
 
 async function main() {
   const args = process.argv.slice(2);
-  
+
   // Parse CLI arguments
   const inputFile = args[0];
-  const outputIndex = args.indexOf('--output');
-  const outputFile = outputIndex !== -1 ? args[outputIndex + 1] : null;
+  const flag = (name: string): string | null => {
+    const idx = args.indexOf(name);
+    if (idx === -1) return null;
+    const value = args[idx + 1];
+    if (!value || value.startsWith('--')) {
+      console.error(`❌ Error: ${name} requires a value`);
+      process.exit(1);
+    }
+    return value;
+  };
 
-  if (!inputFile) {
-    console.error('Usage: pulse-ir <input.yaml> --output <output.cpp>');
+  const outputFile = flag('--output');
+  const topicsFile = flag('--topics');
+  const librariesFile = flag('--libraries');
+  const namespace = flag('--namespace');
+
+  if (!inputFile || inputFile.startsWith('--')) {
+    console.error(USAGE);
     process.exit(1);
   }
 
   try {
-    // Read input
+    // Parse. parseFrom() reads the entry file and follows any includes.
     console.log(`📖 Reading ${inputFile}...`);
-    const yamlContent = fs.readFileSync(inputFile, 'utf8');
-
-    // Parse
-    console.log('🔍 Parsing...');
-    const parser = new Parser();
-    const project = parser.parse(yamlContent);
+    const project = new Parser().parseFrom(inputFile, new FileResolver());
     console.log(`✓ Parsed project: ${project.name}`);
 
     // Validate
     console.log('✓ Validated');
 
-    // Generate
-    console.log('🔨 Generating C++ code...');
-    const codegen = new Codegen();
-    const cppCode = codegen.generate(project);
+    // Topic manifest, when asked for
+    if (topicsFile) {
+      console.log('📡 Generating MQTT topic manifest...');
+      const manifest = new TopicEmitter().toJSON(project, namespace ?? undefined);
+      const topicsPath = path.resolve(topicsFile);
+      fs.writeFileSync(topicsPath, manifest);
+      console.log(`✓ Written to ${topicsPath}`);
+    }
 
-    // Write output
-    if (outputFile) {
-      const outputPath = path.resolve(outputFile);
-      fs.writeFileSync(outputPath, cppCode);
-      console.log(`✓ Written to ${outputPath}`);
-    } else {
-      console.log(cppCode);
+    if (librariesFile) {
+      console.log('📚 Generating library manifest...');
+      const manifest = new LibraryEmitter().toJSON(project);
+      const librariesPath = path.resolve(librariesFile);
+      fs.writeFileSync(librariesPath, manifest);
+      console.log(`✓ Written to ${librariesPath}`);
+    }
+
+    // Generate the sketch unless the run only asked for manifests
+    if (outputFile || !(topicsFile || librariesFile)) {
+      console.log('🔨 Generating C++ code...');
+      const codegen = new Codegen();
+      const cppCode = codegen.generate(project);
+
+      if (outputFile) {
+        const outputPath = path.resolve(outputFile);
+        fs.writeFileSync(outputPath, cppCode);
+        console.log(`✓ Written to ${outputPath}`);
+      } else {
+        console.log(cppCode);
+      }
     }
 
     console.log('✨ Done');

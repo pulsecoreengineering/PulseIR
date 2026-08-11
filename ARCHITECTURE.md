@@ -36,7 +36,7 @@ Layer 3: Codegen (IR → C++)
 - **States** (SIMPLE, COMPOSITE, ORTHOGONAL) — hierarchical state machine
 - **Events** (EXTERNAL, TIMER, SENSOR, MQTT, INTERNAL, CUSTOM) — system events
 - **Transitions** (source → event → target) — state changes
-- **Guards** (type + expression) — conditional transitions
+- **Guards** (name + optional description) — conditional transitions
 - **Actions** (type + driver) — things that happen
 - **Components** (SENSOR, ACTUATOR, SERVICE) — system parts
 - **Resources** (GPIO, UART, I2C, SPI, CAN, MQTT, CUSTOM) — hardware interfaces
@@ -62,7 +62,7 @@ Layer 3: Codegen (IR → C++)
 - **Clear error messages**: Line numbers and specific reference issues
 
 **What it doesn't do** (yet):
-- Validate guard expressions (deferred to runtime)
+- Validate guard expressions (out of scope - guards are names, see §3.2)
 - Type-check action parameters (drivers define their own schemas)
 - Resolve dependencies between components (planned for v1.1)
 
@@ -71,21 +71,26 @@ Layer 3: Codegen (IR → C++)
 **What it does**:
 1. Take validated `PulseProject`
 2. Generate complete Arduino sketch
-3. Include state/event enums, transition table, event processing loop
-4. Stub action handlers (user fills in logic)
+3. Register the state hierarchy with PulseHSM and wire up per-state handlers
+4. Stub guard and action handlers (user fills in logic)
 
 **Generated code includes**:
-- State machine enums
-- Event queue
-- Transition table with guard/action pointers
-- `processEvent()` function (event processing loop)
-- Action stubs ready for implementation
+- `PULSEHSM_MAX_*` sizing macros, emitted above the include so they take effect
+- Event enum (`uint8_t`, to match `sendEvent` / `EventCb`)
+- `SystemParameters`, `SystemSensors` and `SystemContext`
+- One `addState()` registration per state, parents before children
+- One `onEvent` handler per state with outgoing transitions
+- Guard and action stubs ready for implementation
 - Serial logging for debugging
 
 **Design**:
-- **Self-contained**: Generated .ino file includes all HSM logic
-- **Uses PulseHSM library conventions**: Compatible with existing firmware
-- **Extensible stubs**: Action implementations are pre-declared, user fills in
+- **Drives the real runtime**: dispatch, entry/exit chains and LCA handling
+  belong to PulseHSM; codegen does not reimplement them
+- **Hierarchy comes from the library**: event bubbling makes an inner
+  transition outrank an enclosing one, so there is no precedence logic to write
+- **Always transitions to a leaf**: composite targets are resolved through
+  their initial children before `transitionTo()`
+- **Extensible stubs**: guards and actions are pre-declared, user fills in
 - **Zero assumptions**: Doesn't assume specific hardware, pins, or libraries
 
 ---
@@ -118,25 +123,42 @@ components:
       pin: GPIO4
 ```
 
-### 3.2 "Guard Type + Expression Abstraction"
+### 3.2 "Guards Are Names, Not Conditions"
 
-**Decision**: Don't make YAML itself a programming language.
+**Decision**: Don't make YAML itself a programming language. There is no
+expression field in the schema.
 
-**Why**: YAML is for data, not code. And different targets (C++, JavaScript, WASM) need different expression syntax.
+**Why**: YAML is for data, not code. An evaluable condition never stays one
+comparison — it grows precedence, scoping, type rules, `&&`, function calls
+and arithmetic, until it is a language with no debugger and no IDE support.
+It would also be one more dialect for a learner to absorb on top of the C
+they already need, which is the cost PulseIR exists to remove.
+
+An earlier version of this schema carried
+`expression: "temperature >= setpoint"` and emitted it as a comment. That was
+the worst option available: the model looked executable, but nothing ran it.
 
 **How**:
 ```yaml
-guard:
-  type: expression
-  expression: "temperature >= setpoint"
+guard: temp_at_setpoint
 ```
 
-Later, we can support:
+With the intent recorded as prose, copied into the generated stub as a comment
+and never parsed:
 ```yaml
 guard:
-  type: custom
-  evaluator: my_guard_plugin
+  name: temp_at_setpoint
+  description: water temperature has reached the setpoint
 ```
+
+The condition itself lives in C, where it is type-checked and steppable:
+```c
+bool guard_temp_at_setpoint(const SystemContext* ctx) {
+  return ctx->sensors->temperature_sensor >= ctx->parameters->setpoint;
+}
+```
+
+See FUNCTION_CONTRACT.md §6.
 
 ### 3.3 "Action Type + Driver Pattern"
 
@@ -300,7 +322,7 @@ PulseProject (IR)
 - ❌ Orthogonal regions (parallel states)
 - ❌ State history
 - ❌ Dependency graph validation
-- ❌ Guard expression validation
+- ❌ Guard expression validation (out of scope by design)
 - ❌ Component driver plugin system
 - ❌ PulseSim integration
 - ❌ PulseDash integration
@@ -384,7 +406,7 @@ const code = codegen.generate(project);
 The generated .ino includes action stubs:
 
 ```cpp
-void action_start_pump() {
+void action_start_pump(SystemContext* ctx) {
   Serial.print("  -> Action: start_pump");
   
   // TODO: Implement action logic
@@ -456,7 +478,7 @@ pulse-ir/
 ### Immediate (v0.2)
 - [ ] Orthogonal regions (parallel states)
 - [ ] State history support
-- [ ] Guard expression validation/parsing
+- [x] Guard expressions removed from the schema (see §3.2)
 - [ ] Component driver validation
 
 ### Short term (v1.0)
@@ -520,16 +542,14 @@ A: Linear transition table lookup is O(n). For typical systems (~10-20 transitio
 A: Generated loop has a TODO for sensor logic. User fills in:
 ```cpp
 void loop() {
-  // Poll sensors
-  if (tempSensor.read() > setpoint) {
-    pendingEvent = EVENT_TEMP_REACHED;
+  // Poll sensors into the struct guards and actions read
+  systemSensors.water_temp = tempSensor.read();
+
+  if (systemSensors.water_temp > systemParameters.setpoint) {
+    fsm.sendEvent(EVENT_TEMP_REACHED);
   }
-  
-  // Process event
-  if (pendingEvent != -1) {
-    processEvent(pendingEvent);
-    pendingEvent = -1;
-  }
+
+  fsm.update();   // dispatches queued events; never call delay()
 }
 ```
 
@@ -558,7 +578,7 @@ void loop() {
 ## 14. How to Extend This Document
 
 Add new files as complexity grows:
-- `PARSER_DETAILS.md` — guard expression parsing, validation rules
+- `PARSER_DETAILS.md` — reference resolution, validation rules
 - `CODEGEN_TARGETS.md` — supporting multiple output languages (ESP-IDF, bare metal, etc.)
 - `SCHEMA_SPEC.md` — formal YAML schema specification
 - `EXAMPLES.md` — walkthroughs for different system types

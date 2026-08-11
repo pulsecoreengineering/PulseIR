@@ -106,10 +106,11 @@ node dist/src/cli.js my_system.yaml --output my_system.ino
 ```
 
 This generates a complete Arduino sketch with:
-- ✅ State machine enums
-- ✅ Event processing loop
-- ✅ Transition table
-- ✅ Action stubs (you fill in logic)
+- ✅ `PULSEHSM_MAX_*` macros sized from your model
+- ✅ Event enum and `SystemContext` / `SystemParameters` / `SystemSensors`
+- ✅ Every state registered with `addState()`, parents first
+- ✅ One `onEvent` handler per state, wired to guards and actions
+- ✅ Guard and action stubs (you fill in the logic)
 
 ---
 
@@ -118,30 +119,35 @@ This generates a complete Arduino sketch with:
 Open `my_system.ino` and find the action stub:
 
 ```cpp
-void action_begin_work() {
-  Serial.print("  -> Action: begin_work");
-  
-  // TODO: Implement action logic
-  // Parameters: { "pin": "LED", "value": "HIGH" }
-  
-  // Add your code here:
-  digitalWrite(LED_PIN, HIGH);
+void action_begin_work(SystemContext* ctx) {
+  Serial.println("  -> Action: begin_work");
+  // Parameters declared in the model (documentation only):
+  //   pin: "LED"
+  //   value: "HIGH"
+  //
+  // TODO: Implement the hardware calls for this action.
+  (void)ctx;
 }
 ```
 
-Fill in the logic:
+Fill in the logic. Everything you need is on `ctx` - parameters, sensor
+readings, and the current state:
 
 ```cpp
-void action_begin_work() {
-  Serial.print("  -> Action: begin_work");
+void action_begin_work(SystemContext* ctx) {
+  Serial.println("  -> Action: begin_work");
   digitalWrite(LED_PIN, HIGH);
 }
 
-void action_end_work() {
-  Serial.print("  -> Action: end_work");
+void action_end_work(SystemContext* ctx) {
+  Serial.print("  -> Action: end_work, blink delay ");
+  Serial.println(ctx->parameters->blink_delay);
   digitalWrite(LED_PIN, LOW);
 }
 ```
+
+The signature is fixed and identical on every target, so these functions port
+unchanged - see FUNCTION_CONTRACT.md.
 
 ---
 
@@ -151,25 +157,24 @@ In `loop()`, generate events based on your sensors/inputs:
 
 ```cpp
 void loop() {
-  // TODO: Generate events based on sensor inputs, timers, etc.
-  
-  // Example: button press triggers START
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    delay(20);  // debounce
-    if (digitalRead(BUTTON_PIN) == LOW) {
-      pendingEvent = EVENT_START;
-    }
+  // Read sensors into the context the guards and actions see
+  systemSensors.water_temp = readTemperature();
+
+  // Raise events with fsm.sendEvent(). It only queues - fsm.update()
+  // dispatches. sendEvent() is ISR-safe, so interrupts may call it too.
+  static unsigned long lastPress = 0;
+  if (digitalRead(BUTTON_PIN) == LOW && millis() - lastPress > 50) {
+    lastPress = millis();          // debounce without blocking
+    fsm.sendEvent(EVENT_START);
   }
 
-  // Process pending event
-  if (pendingEvent != (SystemEvent)-1) {
-    processEvent(pendingEvent);
-    pendingEvent = (SystemEvent)-1;
-  }
-
-  delay(10);
+  fsm.update();
 }
 ```
+
+> **Never call `delay()`.** It starves `fsm.update()`, so events pile up in the
+> ring buffer and timeouts fire late. Compare against `millis()` or
+> `fsm.getStateElapsed()` instead.
 
 ---
 
@@ -239,9 +244,20 @@ events:
 ```yaml
 - source: running
   event: TEMP_REACHED
+  guard: temp_at_setpoint
+  target: maintaining
+```
+
+A guard is the **name of a function you write in C** — the YAML never contains
+the condition itself. To record what it checks, use the mapping form; the
+description becomes a comment in the generated stub:
+
+```yaml
+- source: running
+  event: TEMP_REACHED
   guard:
-    type: expression
-    expression: "temperature >= setpoint"
+    name: temp_at_setpoint
+    description: water temperature has reached the setpoint
   target: maintaining
 ```
 
@@ -346,7 +362,7 @@ transitions:
 In Arduino:
 ```cpp
 if (digitalRead(BUTTON_PIN) == LOW) {
-  pendingEvent = EVENT_BUTTON_PRESSED;
+  fsm.sendEvent(EVENT_BUTTON_PRESSED);
 }
 ```
 
@@ -360,9 +376,7 @@ events:
 transitions:
   - source: heating
     event: TEMP_CHECK
-    guard:
-      type: expression
-      expression: "temp >= target"
+    guard: temp_at_target
     target: maintaining
     actions:
       - reduce_heat
@@ -370,11 +384,14 @@ transitions:
 
 In Arduino:
 ```cpp
-float temp = tempSensor.read();
-if (temp >= TARGET_TEMP) {
-  pendingEvent = EVENT_TEMP_CHECK;
+systemSensors.water_temp = tempSensor.read();
+if (systemSensors.water_temp >= systemParameters.setpoint) {
+  fsm.sendEvent(EVENT_TEMP_CHECK);
 }
 ```
+
+The guard `temp_at_target` then decides whether the transition actually fires,
+reading the same values through `ctx`.
 
 ### Pattern 3: Timeout / Timer Event
 
@@ -397,10 +414,14 @@ static unsigned long lastActivity = 0;
 unsigned long now = millis();
 
 if (now - lastActivity > TIMEOUT_MS) {
-  pendingEvent = EVENT_TIMEOUT;
+  fsm.sendEvent(EVENT_TIMEOUT);
   lastActivity = now;
 }
 ```
+
+For a timeout that always leaves the same state, PulseHSM can do this for you
+via `addState()`'s `timeoutMs` / `timeoutNext`. The IR has no field for it yet
+(see INDEX.md), so raise the event yourself for now.
 
 ### Pattern 4: Emergency Stop (From Any State)
 
@@ -453,16 +474,16 @@ Event: UNKNOWN in state: RUNNING
 
 Check your YAML for the transition definition.
 
-### Guard Failed
+### Guard Blocked the Transition
 
-If a guard blocks a transition:
+If nothing happens when an event arrives, a guard may have returned false.
 
-```
-Event: TEMP_REACHED in state: RUNNING
-  -> Guard failed, transition blocked
-```
+Generated guard stubs `return false` until you implement them, so a freshly
+generated sketch will appear to ignore every guarded transition. That is
+expected — fill in the stub.
 
-The condition in your guard expression was false.
+Note that a blocked guard does **not** consume the event. It keeps bubbling up
+the hierarchy, so an enclosing state may still handle it.
 
 ---
 
@@ -504,19 +525,23 @@ Then upload `my_system.ino` to Arduino IDE.
 **Q: "Unknown event in state X"**  
 A: The transition for that event/state combo doesn't exist. Check YAML.
 
-**Q: "Guard failed"**  
-A: The guard expression evaluated to false. Check sensor values and guard condition.
+**Q: "A guarded transition never fires"**  
+A: Your `guard_*` function returned false. Generated stubs return false until
+you implement them — check you have filled the stub in, then check the sensor
+values you read from `ctx->sensors`.
 
 **Q: "Compilation errors in .ino"**  
 A: Usually missing `#include` or pin definitions. Check generated code comments and add missing headers.
 
 **Q: "State never changes"**  
-A: No events are being generated. Check that you're setting `pendingEvent` in `loop()`.
+A: No events are being raised. Call `fsm.sendEvent(EVENT_NAME)` from `loop()`
+(or an ISR — it is ISR-safe), and make sure `fsm.update()` runs every
+iteration. Never call `delay()`; it starves `fsm.update()`.
 
 **Q: "How do I call a function from an action?"**  
 A: The action stub is just a function. Call anything you want:
 ```cpp
-void action_my_action() {
+void action_my_action(SystemContext* ctx) {
   myCustomFunction();
   digitalWrite(PIN, HIGH);
   Serial.println("Done");

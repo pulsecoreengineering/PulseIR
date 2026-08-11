@@ -47,4 +47,18 @@ public:
 
 extern SerialShim Serial;
 
+// Extra UARTs, as declared by `interface: uart` resources.
+#define SERIAL_8N1 0x800001c
+class HardwareSerialShim {
+public:
+  void begin(unsigned long) {}
+  void begin(unsigned long baud, int config, int rx, int tx) {
+    (void)baud; (void)config; (void)rx; (void)tx;
+  }
+  int available() { return 0; }
+  int read() { return -1; }
+};
+extern HardwareSerialShim Serial1;
+extern HardwareSerialShim Serial2;
+
 #endif
