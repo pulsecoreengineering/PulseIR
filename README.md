@@ -197,12 +197,16 @@ disk. The entry file — the only one declaring `project` — is marked ▶; use
 tab to rename, and × to delete. Everything persists across a reload.
 
 ```bash
-npm run web          # build the bundle and serve on :8080
+npm run serve        # serve the committed bundle on :8080
+npm run web          # rebuild the bundle first, then serve
 ```
 
-`web/app.js` is committed, so after cloning you can also just open
-`web/index.html` in a browser — no Node, no install, no network. Everything
-runs in the page; nothing is uploaded.
+`web/app.js` is committed, so `npm run serve` needs nothing but Node — and you
+can skip that too and open `web/index.html` straight from disk. Everything runs
+in the page; nothing is uploaded.
+
+Only `npm run web` needs esbuild. If it reports esbuild is missing, run
+`npm install` (it is a devDependency) or use `npm run serve` instead.
 
 The editor imports the **same** `Parser`, `Codegen` and `TopicEmitter` the CLI
 uses, compiled to a bundle. It cannot drift from what `pulse-ir` writes to disk.

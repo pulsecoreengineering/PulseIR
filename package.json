@@ -7,7 +7,8 @@
   "scripts": {
     "build": "npm run examples && tsc",
     "examples": "node scripts/build-examples.mjs",
-    "build:web": "npm run build && esbuild dist/web/main.js --bundle --format=iife --outfile=web/app.js --log-level=warning",
+    "build:web": "npm run build && node scripts/build-web.mjs",
+    "serve": "node scripts/serve.mjs",
     "web": "npm run build:web && node scripts/serve.mjs",
     "dev": "tsc --watch",
     "test": "node --test dist/test/**/*.test.js",
