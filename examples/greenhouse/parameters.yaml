@@ -1,0 +1,21 @@
+parameters:
+  temp_setpoint:
+    type: float
+    default: 26.0
+    range: [10.0, 40.0]
+    unit: degC
+    description: Target air temperature
+
+  hysteresis:
+    type: float
+    default: 1.5
+    range: [0.1, 5.0]
+    unit: degC
+    description: Band around the setpoint before venting
+
+  sample_interval:
+    type: int
+    default: 5000
+    range: [500, 60000]
+    unit: ms
+    description: How often to sample the climate

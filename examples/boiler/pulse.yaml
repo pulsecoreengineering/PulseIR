@@ -1,0 +1,22 @@
+# Entry file. Only this one declares `project`.
+#
+#   hardware.yaml    buses and devices
+#   parameters.yaml  tunable configuration
+#   machine.yaml     events, states and transitions
+#   src/             your C++ - guards and actions live here
+#
+# Generate with:
+#   pulse-ir examples/boiler/pulse.yaml --outdir build/boiler
+
+project:
+  name: boiler_control
+  version: "1.0"
+  description: Simple boiler temperature control system
+
+target:
+  board: esp32
+
+imports:
+  - hardware.yaml
+  - parameters.yaml
+  - machine.yaml

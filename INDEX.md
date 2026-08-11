@@ -21,7 +21,8 @@
 6. **SYSTEMCONTEXT.md** ⭐ **NEW** — How guards/actions receive system state
 
 ### For Project Status
-6. **MILESTONE.md** (200 lines) — What was built, scope, roadmap
+6. **PLAN.md** ⭐ **NEW** — Where the project is going, and why
+7. **MILESTONE.md** (200 lines) — What was built, scope, roadmap
 7. **BUILD_SUMMARY.txt** — Visual summary of the MVP
 
 ---
@@ -359,84 +360,26 @@ pulse-ir/
 
 ## ⏳ What's Next
 
-Ordered by what the project is actually *for*: reducing the cognitive load of
-learning a multi-tool ecosystem. PulseIR pays for itself only if it removes the
-incidental complexity of each tool's flavour — not if it becomes one more thing
-to learn on top of them.
+The roadmap now lives in **PLAN.md**, which adopts the direction that PulseIR
+describes *what an embedded system is* while C/C++ stays the language for
+*how arbitrary computation happens*.
 
-**The test to hold this to:** can a student finish a beginner project, including
-debugging it when it breaks, without reading the underlying tool's source? While
-the answer is no, PulseIR is adding load rather than removing it.
+Summary of the order of work:
 
-### 1. Prove the spine (blocking — do this first)
+1. **Phase 0 — reshape the schema** (breaking, cheap now): split the top level
+   into `target` / `hardware` / `parameters` / `events` / `machine` / `actions`,
+   and adopt `from` / `on` / `to` / `do` for transitions.
+2. **Phase 1 — target, hardware model and validation**: pin conflict detection
+   first (cheap, and the clearest case for a compiler over hand-written code),
+   then `target: board:`, one verified board profile, and logical device types.
+3. **Gate — five different projects** must fit the model without hacks before
+   any new domain is added.
+4. **Phase 2 — one domain at a time**: communication, telemetry, storage,
+   diagnostics, safety.
 
-- [ ] Write the same small project by hand against three PulseCore tools and
-      diff them. Whatever is genuinely common becomes the IR; whatever is not
-      becomes a backend detail. **Do not extend the schema before this.**
-- [ ] Decide from that diff whether the tools share a reactive/event-driven
-      core. If they do, one spine with per-tool backends is right. If they do
-      not, PulseIR stays a state-machine IR and unification moves up a level,
-      to shared project layout and naming conventions.
-
-### 2. Make the ecosystem hooks real
-
-The IR already models devices and wiring, but codegen barely uses it. This is
-the part that generalises beyond PulseHSM.
-
-- [x] **MQTT topic manifest** (`src/emit/topics.ts`) — proves the IR has a
-      non-C++ consumer
-- [x] **`Resource` codegen** — interfaces now generate includes, defines and
-      `begin()` calls instead of nothing
-- [x] **Library management** — implied plus declared, with a PlatformIO manifest
-- [x] **Multi-file models** — `include`, so a model is not one giant file
-- [ ] Emit the MQTT publish/subscribe wiring into the firmware, so the device
-      side of the topic map stops being hand-written
-- [ ] `Component` → driver binding — still only comments and a sensor struct
-- [x] Multi-file support in the web editor — file tabs backed by a
-      MemoryResolver over the open buffers
-- [ ] A second backend (ESP-IDF), to prove the spine is not PulseHSM-shaped
-- [x] **Web editor** (`web/`) — live YAML → sketch / topics / structure, running
-      the real pipeline in the browser. First step toward the IR not being
-      hand-authored.
-- [ ] Structured editing in the browser (add a state or transition through the
-      UI rather than by typing YAML) — the next step toward **nobody
-      hand-writing this YAML**
-- [ ] PulseCore IDE serialization — the IR is a serialization format, not an
-      authoring format
-- [ ] PulseSim. Not blocked by guards being opaque — it never needs to evaluate
-      them. Two routes, both open: *interactive stepping*, where the simulator
-      asks whether a guard holds instead of computing it (better for teaching
-      bubbling and entry/exit order anyway), or *running the real guards on the
-      host*. The second is already half-built: `test/harness/` compiles a
-      generated sketch against an Arduino shim and executes it. Add scripted
-      event injection and a trace format and that harness is PulseSim.
-
-### 3. Cheap completions (unblocked, low cost)
-
-PulseHSM already supports both of these; only the IR lacks the fields.
-
-- [ ] Entry/exit actions on states (`addState` takes them; we always pass
-      `nullptr`)
-- [ ] Timeout transitions (`timeoutMs` / `timeoutNext` are always `0` / `-1`)
-- [ ] Dependency graph validation
-
-### 4. Blocked — needs a decision or a runtime change
-
-- [ ] **Orthogonal regions.** Not a codegen feature. PulseHSM has a single
-      `int currentState` and one parent chain in `_dispatchEvent`; parallel
-      regions need several simultaneously-active leaves. This requires
-      redesigning the runtime. `Region[]` existing in the IR types makes it
-      look closer than it is.
-- [ ] **State history.** Same constraint — needs runtime support.
-- [ ] Visual diagram generation
-
-### How to measure progress
-
-Not in generated lines — the boiler example turns 168 lines of YAML into ~199
-lines of scaffolding, which is roughly break-even as pure code generation. The
-metric that matters is **time to first working project on tool N, given the
-student already knows tool 1.** That is testable with real students, and it
-beats any architectural argument.
+Open decisions, and the two places the proposal needs pushback (`limits:`
+quietly reintroduces expression evaluation; safety `priority` needs runtime
+support PulseHSM does not have), are recorded in PLAN.md §6 and §8.
 
 ---
 

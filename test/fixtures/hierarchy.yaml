@@ -3,80 +3,62 @@
 #   - a transition on an enclosing state applies to nested children
 #   - an inner transition outranks an enclosing one on the same event
 #   - a transition may carry several actions
-#   - the bare `guard: <name>` shorthand (boiler.yaml covers the mapping form
-#     that carries a description)
+#   - the bare `guard: <name>` shorthand (boiler covers the mapping form)
 
 project:
   name: hierarchy_test
-  version: 1.0
+  version: "1.0"
   description: Hierarchy and dispatch semantics fixture
 
-system:
-  name: hierarchy_system
+events:
+  GO:
+    source: external
+  NEXT:
+    source: internal
+  ABORT:
+    source: external
+  BLOCKED:
+    source: internal
 
-  events:
-    - name: GO
-      source: external
-    - name: NEXT
-      source: internal
-    - name: ABORT
-      source: external
-    - name: BLOCKED
-      source: internal
-
+machine:
   states:
-    - name: off
-      type: simple
-
-    - name: active
-      type: composite
+    off:
+    active:
       initial: phase_one
-      regions:
-        - initial: phase_one
+      states:
+        phase_one:
+        # Nested two levels deep, so entry has to descend more than once.
+        phase_two:
+          initial: deep
           states:
-            - name: phase_one
-              type: simple
-
-            # Nested two levels deep, so entry has to descend more than once.
-            - name: phase_two
-              type: composite
-              initial: deep
-              regions:
-                - initial: deep
-                  states:
-                    - name: deep
-                      type: simple
-
-    - name: halted
-      type: simple
+            deep:
+    halted:
 
   transitions:
     # Target is composite: entry must land on active/phase_one.
-    - source: off
-      event: GO
-      target: active
-      actions:
-        - log_start
-        - arm_system
+    - from: off
+      on: GO
+      to: active
+      do: [log_start, arm_system]
 
     # Target is composite and nested: entry must land on active/phase_two/deep.
-    - source: phase_one
-      event: NEXT
-      target: phase_two
+    - from: phase_one
+      on: NEXT
+      to: phase_two
 
     # Enclosing source: applies while any descendant of active is current.
-    - source: active
-      event: ABORT
-      target: halted
+    - from: active
+      on: ABORT
+      to: halted
 
     # Inner source on the same event: must outrank the `active` transition
     # whenever phase_one is the current state.
-    - source: phase_one
-      event: ABORT
-      target: off
+    - from: phase_one
+      on: ABORT
+      to: off
 
     # Named guard; the generated stub returns false, so this stays blocked.
-    - source: phase_one
-      event: BLOCKED
-      target: halted
+    - from: phase_one
+      on: BLOCKED
+      to: halted
       guard: never_ready

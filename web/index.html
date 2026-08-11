@@ -16,6 +16,8 @@
     --ok-fg: #10603a;
     --err-bg: #fdeaea;
     --err-fg: #97231f;
+    --warn-bg: #fdf3e2;
+    --warn-fg: #7a4b06;
     --code: #f3f4f6;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
@@ -31,6 +33,8 @@
       --ok-fg: #7fd4a4;
       --err-bg: #2e1618;
       --err-fg: #f6a6a2;
+      --warn-bg: #2c2313;
+      --warn-fg: #e9c07a;
       --code: #10131a;
     }
   }
@@ -127,6 +131,7 @@
     padding: 7px 14px; border-top: 1px solid var(--border); font-size: 13px;
   }
   .status.ok { background: var(--ok-bg); color: var(--ok-fg); }
+  .status.warn { background: var(--warn-bg); color: var(--warn-fg); }
   .status.error { background: var(--err-bg); color: var(--err-fg); }
   .status span { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
 

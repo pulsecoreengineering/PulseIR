@@ -22,6 +22,7 @@ import type {
   StateRef,
 } from '../model/index.js';
 import type { SourceResolver } from './resolver.js';
+import { findPinConflicts, describePinConflict } from '../analysis/pins.js';
 
 export interface ParseOptions {
   /** Id of the document being parsed, used to resolve relative includes. */
@@ -55,12 +56,35 @@ export class ParseError extends Error {
   }
 }
 
+/**
+ * Device types the model understands without further declaration. Each implies
+ * a class (so the topic emitter knows a reading from a control) and a driver.
+ * Anything else must state its class explicitly.
+ */
+const BUILTIN_DEVICE_TYPES: Record<string, { class: string; driver: string }> = {
+  digital_output: { class: 'actuator', driver: 'gpio_control' },
+  digital_input:  { class: 'sensor',   driver: 'gpio_read' },
+  pwm_output:     { class: 'actuator', driver: 'pwm_control' },
+  analog_input:   { class: 'sensor',   driver: 'adc_read' },
+  // Common parts, listed so `type: ds18b20` needs no `class:`.
+  ds18b20:        { class: 'sensor',   driver: 'ds18b20' },
+  dht22:          { class: 'sensor',   driver: 'dht22' },
+  bme280:         { class: 'sensor',   driver: 'bme280' },
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /** Name a document in an error message, whether or not it came from a file. */
 function describe(origin: string | null): string {
   return origin ? `"${origin}"` : 'The model';
 }
 
 export class Parser {
+  /** Non-fatal notes from the last parse, e.g. use of a retired schema. */
+  readonly warnings: string[] = [];
+
   private eventNames: Set<string> = new Set();
   private stateNames: Set<string> = new Set();
   private actionNames: Set<string> = new Set();
@@ -77,6 +101,7 @@ export class Parser {
    * Pass a resolver in `options` to allow the document to `include` others.
    */
   parse(yamlContent: string, options: ParseOptions = {}): PulseProject {
+    this.warnings.length = 0;
     try {
       const raw = this.loadDocument(
         yamlContent,
@@ -145,17 +170,23 @@ export class Parser {
       throw new ParseError(`${describe(origin)} must contain a YAML mapping`);
     }
 
-    if (doc.includes !== undefined && doc.include === undefined) {
-      throw new ParseError(`${describe(origin)} uses "includes"; the key is "include"`);
+    if (doc.include !== undefined && doc.imports === undefined) {
+      this.warnings.push(
+        `${describe(origin)} uses "include"; the key is now "imports". ` +
+        'Support will be removed in the next release.'
+      );
+    }
+    if (doc.includes !== undefined && doc.imports === undefined && doc.include === undefined) {
+      throw new ParseError(`${describe(origin)} uses "includes"; the key is "imports"`);
     }
 
-    const refs = this.includeRefs(doc.include, origin);
+    const refs = this.includeRefs(doc.imports ?? doc.include, origin);
     if (refs.length === 0) return doc;
 
     const resolver = options.resolver;
     if (!resolver) {
       throw new ParseError(
-        `${describe(origin)} uses "include", but this parser was given no way to ` +
+        `${describe(origin)} uses "imports", but this parser was given no way to ` +
         'read other files. Load the model from a path (the CLI does this) or ' +
         'supply a resolver.'
       );
@@ -222,24 +253,72 @@ export class Parser {
     overlay: Record<string, unknown>
   ): Record<string, unknown> {
     const result: Record<string, unknown> = { ...base, ...overlay };
+    delete result.imports;
     delete result.include;
 
-    const baseSystem = base.system as Record<string, unknown> | undefined;
-    const overlaySystem = overlay.system as Record<string, unknown> | undefined;
-    if (!baseSystem || !overlaySystem) return result;
-
-    const system: Record<string, unknown> = { ...baseSystem, ...overlaySystem };
-
-    for (const key of MERGED_LISTS) {
-      const left = baseSystem[key];
-      const right = overlaySystem[key];
-      if (Array.isArray(left) && Array.isArray(right)) {
-        system[key] = [...left, ...right];
-      }
+    // Domains keyed by name: hardware.yaml and machine.yaml each contribute
+    // entries, and a name declared in both is an error rather than a silent
+    // override - neither file looks wrong on its own.
+    for (const key of ['events', 'parameters', 'actions'] as const) {
+      const merged = this.mergeMaps(base[key], overlay[key], key);
+      if (merged !== undefined) result[key] = merged;
     }
 
-    result.system = system;
+    for (const [parent, children] of [
+      ['hardware', ['buses', 'devices']],
+      ['machine', ['states']],
+    ] as const) {
+      const left = base[parent] as Record<string, unknown> | undefined;
+      const right = overlay[parent] as Record<string, unknown> | undefined;
+      if (!left || !right) continue;
+
+      const section: Record<string, unknown> = { ...left, ...right };
+      for (const child of children) {
+        const merged = this.mergeMaps(left[child], right[child], `${parent}.${child}`);
+        if (merged !== undefined) section[child] = merged;
+      }
+      // Transitions are ordered rules, so they concatenate rather than merge.
+      if (parent === 'machine' && Array.isArray(left.transitions) && Array.isArray(right.transitions)) {
+        section.transitions = [...left.transitions, ...right.transitions];
+      }
+      result[parent] = section;
+    }
+
+    if (Array.isArray(base.libraries) && Array.isArray(overlay.libraries)) {
+      result.libraries = [...base.libraries, ...overlay.libraries];
+    }
+
+    // Retired shape: everything under `system:`, all sections lists.
+    const baseSystem = base.system as Record<string, unknown> | undefined;
+    const overlaySystem = overlay.system as Record<string, unknown> | undefined;
+    if (baseSystem && overlaySystem) {
+      const system: Record<string, unknown> = { ...baseSystem, ...overlaySystem };
+      for (const key of MERGED_LISTS) {
+        const left = baseSystem[key];
+        const right = overlaySystem[key];
+        if (Array.isArray(left) && Array.isArray(right)) {
+          system[key] = [...left, ...right];
+        }
+      }
+      result.system = system;
+    }
+
     return result;
+  }
+
+  /** Union two name-keyed sections, refusing a name that appears in both. */
+  private mergeMaps(left: unknown, right: unknown, label: string): unknown {
+    if (!isPlainObject(left) || !isPlainObject(right)) return undefined;
+
+    for (const name of Object.keys(right)) {
+      if (name in left) {
+        throw new ParseError(
+          `"${label}.${name}" is declared in two different files. ` +
+          'Each name may only be defined once across the whole model.'
+        );
+      }
+    }
+    return { ...left, ...right };
   }
 
   // =========================================================================
@@ -252,28 +331,421 @@ export class Parser {
       throw new ParseError('Missing "project" section');
     }
 
-    const systemRaw = raw.system as Record<string, unknown>;
-    if (!systemRaw) {
-      throw new ParseError('Missing "system" section');
+    // The retired shape put everything under `system:`. It still parses for
+    // one release so existing models keep working, but it is announced rather
+    // than silently translated.
+    const legacy = raw.system !== undefined;
+    if (legacy) {
+      this.warnings.push(
+        'This model uses the retired "system:" block. Split it into the ' +
+        'top-level domains (target, hardware, parameters, events, machine, ' +
+        'actions) - see PLAN.md. Support will be removed in the next release.'
+      );
     }
 
-    const system = this.parseSystem(systemRaw);
+    const system = legacy
+      ? this.parseSystem(raw.system as Record<string, unknown>)
+      : this.parseDomains(raw);
 
-    return {
+    const project: PulseProject = {
       name: projectRaw.name as string || 'unnamed',
       version: projectRaw.version as string || '0.1.0',
       description: projectRaw.description as string | undefined,
+      target: this.parseTarget(raw.target),
       system,
+    };
+
+    // Two things wired to one pin is wrong on every board, so this needs no
+    // board profile. Reported here rather than at codegen so the editor and
+    // every emitter get it for free.
+    const conflicts = findPinConflicts(project);
+    if (conflicts.length > 0) {
+      throw new ParseError(conflicts.map(describePinConflict).join('\n\n'));
+    }
+
+    return project;
+  }
+
+  private parseTarget(raw: unknown): PulseProject['target'] {
+    if (raw === undefined || raw === null) return undefined;
+
+    if (typeof raw === 'string') return { board: raw };
+
+    const obj = raw as Record<string, unknown>;
+    return {
+      board: obj.board as string | undefined,
+      description: obj.description as string | undefined,
     };
   }
 
-  private parseSystem(raw: Record<string, unknown>): PulseSystem {
-    // Clear validation state
+  // =========================================================================
+  // DOMAIN SCHEMA (current)
+  // =========================================================================
+
+  /**
+   * Read the domain-per-section shape:
+   *
+   *   target:      what it is built for
+   *   hardware:    buses and devices
+   *   parameters:  tunable configuration
+   *   events:      what the system reacts to
+   *   machine:     states and transitions
+   *   actions:     catalogue of named side effects
+   *   libraries:   third-party code
+   *
+   * Sections carrying identity (devices, parameters, events, actions, states)
+   * are maps keyed by name, so a duplicate is impossible to write. Ordered
+   * rules - transitions - stay lists, because order decides which one shadows
+   * another.
+   */
+  private parseDomains(raw: Record<string, unknown>): PulseSystem {
+    this.resetValidationState();
+
+    const machine = (raw.machine ?? {}) as Record<string, unknown>;
+    const hardware = (raw.hardware ?? {}) as Record<string, unknown>;
+
+    const events = this.parseEventMap(raw.events);
+    events.forEach(e => this.eventNames.add(e.name));
+
+    const states = this.parseStateMap(machine.states);
+    this.indexStateNames(states);
+
+    const actionCatalogue = this.parseActionCatalogue(raw.actions);
+    actionCatalogue.forEach((_, name) => this.actionNames.add(name));
+
+    const transitions = this.parseTransitionList(machine.transitions, actionCatalogue);
+
+    const resources = this.parseBusMap(hardware.buses);
+    const components = this.parseDeviceMap(hardware.devices);
+    const parameters = this.parseParameterMap(raw.parameters);
+    const libraries = this.parseLibraries(this.asList(raw.libraries, 'library'));
+
+    this.assertUniqueNames(events, 'event');
+    this.assertUniqueNames(components, 'component');
+    this.assertUniqueNames(resources, 'resource');
+    this.assertUniqueNames(parameters, 'parameter');
+    this.assertUniqueNames(libraries, 'library');
+
+    this.assertLibraryRefs(resources, libraries);
+    this.assertBusRefs(components, resources);
+
+    // Buses and devices generate macros from the same name, so a collision
+    // between the two would silently produce one set of defines.
+    const busNames = new Set((resources || []).map(r => r.name));
+    for (const device of components || []) {
+      if (busNames.has(device.name)) {
+        throw new ParseError(
+          `"${device.name}" is declared as both a bus and a device. ` +
+          'Names are shared between them, so pick one.'
+        );
+      }
+    }
+
+    return {
+      name: (raw.name as string) || ((raw.project as Record<string, unknown>)?.name as string) || 'unnamed',
+      description: machine.description as string | undefined,
+      events,
+      states,
+      transitions,
+      components,
+      resources,
+      parameters,
+      libraries,
+    };
+  }
+
+  /** Accept `{ name: {...} }` and turn it into `[{ name, ... }]`. */
+  private mapEntries(raw: unknown, section: string): Array<[string, Record<string, unknown>]> {
+    if (raw === undefined || raw === null) return [];
+
+    if (Array.isArray(raw)) {
+      throw new ParseError(
+        `"${section}" is a list, but this schema keys it by name:\n` +
+        `  ${section}:\n    my_${section.replace(/s$/, '')}:\n      ...`
+      );
+    }
+    if (typeof raw !== 'object') {
+      throw new ParseError(`"${section}" must be a mapping of name to definition`);
+    }
+
+    return Object.entries(raw as Record<string, unknown>).map(([name, value]) => {
+      if (!name.trim()) throw new ParseError(`"${section}" has an entry with an empty name`);
+      // `my_state:` with nothing under it is a valid, empty definition.
+      if (value === null || value === undefined) return [name, {}];
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        throw new ParseError(`"${section}.${name}" must be a mapping`);
+      }
+      return [name, value as Record<string, unknown>];
+    });
+  }
+
+  private asList(raw: unknown, section: string): Record<string, unknown>[] | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (!Array.isArray(raw)) throw new ParseError(`"${section}" must be a list`);
+    return raw as Record<string, unknown>[];
+  }
+
+  private parseEventMap(raw: unknown): Event[] {
+    return this.mapEntries(raw, 'events').map(([name, def]) => ({
+      name,
+      source: ((def.source as string) || 'external') as any,
+      description: def.description as string | undefined,
+      payload: def.payload as Record<string, unknown> | undefined,
+    }));
+  }
+
+  private parseParameterMap(raw: unknown): Parameter[] | undefined {
+    const entries = this.mapEntries(raw, 'parameters');
+    if (entries.length === 0) return undefined;
+
+    return entries.map(([name, def]) => {
+      // `range: [10, 90]` reads better than separate min/max keys.
+      const range = def.range as [number, number] | undefined;
+      if (range !== undefined && (!Array.isArray(range) || range.length !== 2)) {
+        throw new ParseError(`Parameter "${name}" has a "range" that is not [min, max]`);
+      }
+
+      return {
+        name,
+        type: (def.type as string) as any,
+        default: def.default,
+        min: range ? range[0] : (def.min as number | undefined),
+        max: range ? range[1] : (def.max as number | undefined),
+        unit: def.unit as string | undefined,
+        description: def.description as string | undefined,
+      };
+    });
+  }
+
+  /**
+   * States nest by containment, so a composite is just a state that has
+   * `states:` under it. The type is inferred from that; declaring it is
+   * optional and only useful for future kinds.
+   */
+  private parseStateMap(raw: unknown): State[] {
+    return this.mapEntries(raw, 'states').map(([name, def]) => {
+      const children = this.parseStateMap(def.states);
+      const declared = def.type as string | undefined;
+
+      if (children.length === 0) {
+        if (def.initial !== undefined) {
+          throw new ParseError(`State "${name}" declares "initial" but has no nested states`);
+        }
+        return { name, type: (declared || 'simple') as any, description: def.description as string | undefined };
+      }
+
+      const initial = (def.initial as StateRef | undefined) ?? children[0].name;
+      if (!children.some(c => c.name === initial)) {
+        throw new ParseError(
+          `State "${name}" declares initial "${initial}", which is not one of its ` +
+          `states (${children.map(c => c.name).join(', ')})`
+        );
+      }
+
+      return {
+        name,
+        type: (declared || 'composite') as any,
+        description: def.description as string | undefined,
+        initial,
+        regions: [{ initial, states: children }],
+      };
+    });
+  }
+
+  /** Catalogue of named actions, so a transition's `do:` can carry params. */
+  private parseActionCatalogue(raw: unknown): Map<string, Action> {
+    const catalogue = new Map<string, Action>();
+
+    for (const [name, def] of this.mapEntries(raw, 'actions')) {
+      catalogue.set(name, {
+        name,
+        type: ((def.type as string) || 'driver') as any,
+        driver: (def.driver as string) || name,
+        params: def.params as Record<string, unknown> | undefined,
+      });
+    }
+
+    return catalogue;
+  }
+
+  private parseTransitionList(raw: unknown, catalogue: Map<string, Action>): Transition[] {
+    const list = this.asList(raw, 'machine.transitions');
+    if (!list) return [];
+
+    return list.map((entry, index) => {
+      const from = entry.from as StateRef;
+      const on = entry.on as string;
+      const to = entry.to as StateRef;
+
+      for (const [key, value] of [['from', from], ['on', on], ['to', to]] as const) {
+        if (typeof value !== 'string' || !value.trim()) {
+          throw new ParseError(`Transition ${index + 1} is missing "${key}"`);
+        }
+      }
+
+      if (on !== '*' && !this.eventNames.has(on)) {
+        throw new ParseError(`Transition ${index + 1} reacts to unknown event "${on}"`);
+      }
+      if (from !== '*' && !this.hasState(from)) {
+        throw new ParseError(`Transition "from" state "${from}" ${this.describeBadRef(from)}`);
+      }
+      if (to === '*') {
+        throw new ParseError('Transition "to" cannot be the wildcard "*"');
+      }
+      if (!this.hasState(to)) {
+        throw new ParseError(`Transition "to" state "${to}" ${this.describeBadRef(to)}`);
+      }
+
+      return {
+        source: from,
+        target: to,
+        event: on,
+        guard: entry.guard !== undefined && entry.guard !== null
+          ? this.parseGuard(entry.guard)
+          : undefined,
+        actions: this.resolveActions(entry.do, catalogue, index),
+        description: entry.description as string | undefined,
+      };
+    });
+  }
+
+  /**
+   * `do:` takes one name or a list of them. When an `actions:` catalogue
+   * exists it is authoritative, so a typo is an error rather than a silently
+   * generated stub for a function nobody will implement.
+   */
+  private resolveActions(
+    raw: unknown,
+    catalogue: Map<string, Action>,
+    index: number
+  ): Action[] | undefined {
+    if (raw === undefined || raw === null) return undefined;
+
+    const names = Array.isArray(raw) ? raw : [raw];
+    const strict = catalogue.size > 0;
+
+    return names.map(entry => {
+      if (typeof entry !== 'string' || !entry.trim()) {
+        throw new ParseError(`Transition ${index + 1} has a "do" entry that is not an action name`);
+      }
+
+      const declared = catalogue.get(entry);
+      if (declared) return { ...declared };
+
+      if (strict) {
+        throw new ParseError(
+          `Transition ${index + 1} does "${entry}", which is not in the actions catalogue. ` +
+          `Declared: ${[...catalogue.keys()].join(', ') || 'none'}.`
+        );
+      }
+      return { name: entry, type: 'driver' as any, driver: entry };
+    });
+  }
+
+  private parseBusMap(raw: unknown): Resource[] | undefined {
+    const entries = this.mapEntries(raw, 'buses');
+    if (entries.length === 0) return undefined;
+
+    return entries.map(([name, def]) => {
+      const iface = def.interface as string;
+      if (!iface) throw new ParseError(`Bus "${name}" has no "interface"`);
+      this.assertKnownInterface(name, iface);
+
+      // Settings sit directly on the bus rather than under a `binding` key -
+      // there is nothing else on a bus for them to be confused with.
+      const { interface: _i, description, library, ...binding } = def;
+
+      return {
+        name,
+        interface: iface as any,
+        binding: Object.keys(binding).length > 0 ? binding : undefined,
+        library: library as string | undefined,
+        description: description as string | undefined,
+      };
+    });
+  }
+
+  private parseDeviceMap(raw: unknown): Component[] | undefined {
+    const entries = this.mapEntries(raw, 'devices');
+    if (entries.length === 0) return undefined;
+
+    return entries.map(([name, def]) => {
+      const type = def.type as string;
+      if (!type) {
+        throw new ParseError(`Device "${name}" has no "type"`);
+      }
+
+      const builtin = BUILTIN_DEVICE_TYPES[type];
+      const declaredClass = def.class as string | undefined;
+
+      if (!builtin && !declaredClass) {
+        throw new ParseError(
+          `Device "${name}" has type "${type}", which is not built in, so it needs an ` +
+          `explicit "class" (sensor, actuator or service). Guessing would risk ` +
+          `publishing an actuator as if it were a reading.\n` +
+          `Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(', ')}.`
+        );
+      }
+
+      const { type: _t, class: _c, bus, description, ...config } = def;
+
+      return {
+        name,
+        class: (declaredClass || builtin.class) as any,
+        driver: (def.driver as string) || builtin?.driver || type,
+        type,
+        bus: bus as string | undefined,
+        config: Object.keys(config).length > 0 ? config : undefined,
+        description: description as string | undefined,
+      };
+    });
+  }
+
+  private assertKnownInterface(name: string, iface: string): void {
+    const known = [
+      'gpio', 'pwm', 'adc', 'uart', 'i2c', 'spi',
+      'can', 'onewire', 'wifi', 'ethernet', 'ble', 'mqtt', 'custom',
+    ];
+    if (!known.includes(iface)) {
+      throw new ParseError(
+        `"${name}" has unknown interface "${iface}". Expected one of: ${known.join(', ')}.`
+      );
+    }
+  }
+
+  private assertLibraryRefs(resources: Resource[] | undefined, libraries: Library[] | undefined): void {
+    const names = new Set((libraries || []).map(l => l.name));
+    for (const resource of resources || []) {
+      if (resource.library && !names.has(resource.library)) {
+        throw new ParseError(
+          `"${resource.name}" needs library "${resource.library}", which is not declared`
+        );
+      }
+    }
+  }
+
+  private assertBusRefs(components: Component[] | undefined, resources: Resource[] | undefined): void {
+    const names = new Set((resources || []).map(r => r.name));
+    for (const component of components || []) {
+      if (component.bus && !names.has(component.bus)) {
+        throw new ParseError(
+          `Device "${component.name}" sits on bus "${component.bus}", which is not declared. ` +
+          `Declared buses: ${[...names].join(', ') || 'none'}.`
+        );
+      }
+    }
+  }
+
+  private resetValidationState(): void {
     this.eventNames.clear();
     this.stateNames.clear();
     this.actionNames.clear();
     this.statePaths.clear();
     this.statesByLeafName.clear();
+  }
+
+  private parseSystem(raw: Record<string, unknown>): PulseSystem {
+    this.resetValidationState();
 
     // Parse events first (referenced by transitions)
     const events = this.parseEvents(raw.events as Record<string, unknown>[]);
@@ -520,11 +992,13 @@ export class Parser {
       if (typeof a === 'string') {
         // Simple action reference: "start_pump" → { type: 'driver', driver: 'start_pump' }
         return {
+          name: a,
           type: 'driver' as any,
           driver: a,
         };
       }
       return {
+        name: (a.name as string) || (a.driver as string),
         type: ((a.type as string) || 'driver') as any,
         driver: a.driver as string,
         params: a.params as Record<string, unknown> | undefined,

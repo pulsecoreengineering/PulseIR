@@ -61,6 +61,35 @@ interface GuardBinding {
 /** Name of the synthetic superstate that owns wildcard ("*") transitions. */
 const ROOT_PATH = '__root';
 
+/**
+ * Primitive device types that own a pin outright, and the interface that
+ * initialises them. A `digital_output` needs its `pinMode`, and declaring the
+ * device should be enough to get it - requiring a separate `gpio` bus for that
+ * is the boilerplate this project exists to remove.
+ *
+ * Part types like ds18b20 or bme280 are absent on purpose: they sit on a bus,
+ * and the bus owns the initialisation.
+ */
+const DEVICE_INTERFACE: Record<string, { interface: string; mode?: string }> = {
+  digital_output: { interface: 'gpio', mode: 'OUTPUT' },
+  digital_input:  { interface: 'gpio', mode: 'INPUT' },
+  pwm_output:     { interface: 'pwm' },
+  analog_input:   { interface: 'adc' },
+};
+
+export interface GeneratedFile {
+  /** Path relative to the output directory. */
+  path: string;
+  contents: string;
+}
+
+export interface GeneratedProject {
+  /** Rewritten on every run. Never edit these. */
+  generated: GeneratedFile[];
+  /** Written only if absent, so your implementations survive regeneration. */
+  scaffolds: GeneratedFile[];
+}
+
 export class Codegen {
   private project!: PulseProject;
   private states: FlatState[] = [];
@@ -116,6 +145,123 @@ export class Codegen {
     ].join('\n\n') + '\n';
   }
 
+  /**
+   * Generate the project as separate files, so regenerating never touches code
+   * you wrote.
+   *
+   * Everything derived from the model is rewritten every time. Guard and action
+   * bodies are *scaffolds*: emitted once if absent, and never again. That split
+   * is the whole point - with a single self-contained sketch, regenerating
+   * silently destroys every implementation you filled in.
+   */
+  generateFiles(project: PulseProject): GeneratedProject {
+    this.reset();
+    this.project = project;
+    this.indexStates();
+    this.indexGuards();
+    this.indexActions();
+    this.indexTransitions();
+    this.indexInterfaces();
+
+    const base = this.sanitize(project.name);
+    const headerName = `${base}_generated.h`;
+    const guardName = 'src/guards.cpp';
+    const actionName = 'src/actions.cpp';
+
+    return {
+      generated: [
+        { path: headerName, contents: this.composeHeader(headerName) },
+        { path: `${base}.ino`, contents: this.composeSketch(headerName) },
+      ],
+      scaffolds: [
+        { path: guardName, contents: this.composeGuardFile(headerName) },
+        { path: actionName, contents: this.composeActionFile(headerName) },
+      ],
+    };
+  }
+
+  /** Declarations: types, macros and prototypes that every file shares. */
+  private composeHeader(headerName: string): string {
+    const guard = `PULSEIR_${this.sanitizeUpper(this.project.name)}_GENERATED_H`;
+
+    return [
+      this.generateHeader(),
+      `#ifndef ${guard}\n#define ${guard}`,
+      this.generateIncludes(),
+      this.declInterfaces(),
+      this.declEventEnum(),
+      this.declParameterStruct(),
+      this.declSensorStruct(),
+      this.declContextStruct(),
+      this.machineGlobals(true),
+      `// Instances the sketch defines.
+extern SystemParameters systemParameters;
+extern SystemSensors systemSensors;
+extern SystemContext systemContext;
+
+// The Arduino IDE auto-prototypes these for .ino files, but a .cpp in src/
+// needs them declared.
+void setup();
+void loop();
+void setupInterfaces();${this.declInterfaceGlobals()}`,
+      this.generateGuardDeclarations(),
+      this.generateActionDeclarations(),
+      `#endif  // ${guard}`,
+    ].join('\n\n') + '\n';
+  }
+
+  /** Definitions the model owns. Rewritten on every generate. */
+  private composeSketch(headerName: string): string {
+    // The sizing macros must precede PulseHSM.h, and the header does that -
+    // so the sketch includes the header first and nothing else.
+    return [
+      `/**\n * PulseHSM Generated Code - DO NOT EDIT.\n *\n * Regenerated from the model every time. Your guards and actions live in\n * src/, which this file never overwrites.\n */\n\n#include "${headerName}"`,
+      this.defEventNames(),
+      this.defParameterInstance(),
+      'SystemSensors systemSensors = {};',
+      'SystemContext systemContext;',
+      this.machineGlobals(false).replace(/^\/\/ =+\n\/\/ STATE MACHINE\n\/\/ =+\n\n/m, ''),
+      this.defInterfaces().trimStart(),
+      this.generateEventHandlers(),
+      this.generateSetupFunction(),
+      this.generateLoopFunction(),
+    ].join('\n\n') + '\n';
+  }
+
+  private composeGuardFile(headerName: string): string {
+    return `/**
+ * Guards - YOUR CODE. Safe to edit; regenerating never overwrites this file.
+ *
+ * A guard is a pure check: return true to allow the transition, false to block
+ * it. Blocking does not consume the event, so an enclosing state still gets a
+ * chance to handle it.
+ *
+ * Delete this file and regenerate to get fresh stubs.
+ */
+
+#include "${headerName}"
+
+${this.generateGuardImplementations()}
+`;
+  }
+
+  private composeActionFile(headerName: string): string {
+    return `/**
+ * Actions - YOUR CODE. Safe to edit; regenerating never overwrites this file.
+ *
+ * Actions run before the state changes, so ctx->currentState is still the state
+ * being left. Everything you need is on ctx: parameters, sensor readings, the
+ * current and previous state, and the event payload.
+ *
+ * Delete this file and regenerate to get fresh stubs.
+ */
+
+#include "${headerName}"
+
+${this.generateActionImplementations()}
+`;
+  }
+
   private reset(): void {
     this.states = [];
     this.byPath = new Map();
@@ -136,17 +282,39 @@ export class Codegen {
    */
   private indexInterfaces(): void {
     for (const resource of this.project.system.resources || []) {
-      const emission = this.interfaces.emit(resource, this.sanitizeUpper(resource.name));
-      this.emissions.set(resource.name, emission);
+      this.addEmission(resource.name, this.interfaces.emit(resource, this.sanitizeUpper(resource.name)));
+    }
 
-      for (const library of emission.libraries) {
-        if (!this.libraries.has(library.name)) this.libraries.set(library.name, library);
-      }
+    // A device that owns its pin initialises itself, so `pump: {type:
+    // digital_output, pin: GPIO25}` produces its pinMode with no bus declared.
+    for (const device of this.project.system.components || []) {
+      const mapping = DEVICE_INTERFACE[device.type || ''];
+      if (!mapping) continue;
+
+      const binding = { ...(device.config || {}) };
+      if (mapping.mode && binding.mode === undefined) binding.mode = mapping.mode;
+
+      this.addEmission(device.name, this.interfaces.emit(
+        {
+          name: device.name,
+          interface: mapping.interface as never,
+          binding,
+          description: device.description,
+        },
+        this.sanitizeUpper(device.name)
+      ));
     }
 
     // Declared libraries win, so a model can pin a version or override a header.
     for (const library of this.interfaces.declared(this.project.system.libraries)) {
       this.libraries.set(library.name, library);
+    }
+  }
+
+  private addEmission(name: string, emission: InterfaceEmission): void {
+    this.emissions.set(name, emission);
+    for (const library of emission.libraries) {
+      if (!this.libraries.has(library.name)) this.libraries.set(library.name, library);
     }
   }
 
@@ -233,20 +401,39 @@ ${includes}`;
   // =========================================================================
 
   private generateInterfaces(): string {
-    const resources = this.project.system.resources || [];
+    return `${this.declInterfaces()}
+${this.defInterfaces()}`;
+  }
+
+  /** Pin and setting macros. Drivers reference these, so they go in the header. */
+  /** Buses first, then self-initialising devices - the order they set up in. */
+  private initialisedResources(): { name: string; interface: string; description?: string }[] {
+    const buses = (this.project.system.resources || []).map(r => ({
+      name: r.name,
+      interface: String(r.interface),
+      description: r.description,
+    }));
+    const devices = (this.project.system.components || [])
+      .filter(d => DEVICE_INTERFACE[d.type || ''])
+      .map(d => ({
+        name: d.name,
+        interface: DEVICE_INTERFACE[d.type!].interface,
+        description: d.description,
+      }));
+    return [...buses, ...devices];
+  }
+
+  private declInterfaces(): string {
+    const resources = this.initialisedResources();
     if (resources.length === 0) {
       return `// ============================================================================
 // INTERFACES
 // ============================================================================
 
-// No resources declared.
-
-void setupInterfaces() {}`;
+// No resources declared.`;
     }
 
     const blocks: string[] = [];
-    const globals: string[] = [];
-    const body: string[] = [];
     const todos: string[] = [];
 
     for (const resource of resources) {
@@ -260,15 +447,6 @@ void setupInterfaces() {}`;
         blocks.push([heading, ...emission.defines].join('\n'));
       } else {
         blocks.push(heading);
-      }
-
-      globals.push(...emission.globals);
-
-      if (emission.init.length > 0) {
-        body.push(`  // ${resource.name}`);
-        // Preprocessor directives must start at column zero.
-        body.push(...emission.init.map(line => (line.startsWith('#') ? line : `  ${line}`)));
-        body.push('');
       }
 
       todos.push(...emission.todos);
@@ -285,11 +463,55 @@ void setupInterfaces() {}`;
 // Pin arguments to begin() require an ESP32/ESP8266/RP2040 core; the fallbacks
 // below cover cores without them. Adjust setupInterfaces() for other boards.
 ${todoBlock}
-${blocks.join('\n\n')}
-${globals.length > 0 ? `\n${globals.join('\n')}\n` : ''}
+${blocks.join('\n\n')}`;
+  }
+
+  /** Client objects and the init sequence: definitions the sketch owns. */
+  private defInterfaces(): string {
+    const resources = this.initialisedResources();
+    if (resources.length === 0) return '\nvoid setupInterfaces() {}';
+
+    const globals: string[] = [];
+    const body: string[] = [];
+
+    for (const resource of resources) {
+      const emission = this.emissions.get(resource.name);
+      if (!emission) continue;
+
+      globals.push(...emission.globals);
+
+      if (emission.init.length > 0) {
+        body.push(`  // ${resource.name}`);
+        // Preprocessor directives must start at column zero.
+        body.push(...emission.init.map(line => (line.startsWith('#') ? line : `  ${line}`)));
+        body.push('');
+      }
+    }
+
+    return `${globals.length > 0 ? `\n${globals.join('\n')}\n` : ''}
 void setupInterfaces() {
 ${body.length > 0 ? body.join('\n').replace(/\n+$/, '') : '  // Nothing to initialise'}
 }`;
+  }
+
+  /**
+   * `extern` forms of the interface objects, so a driver in src/ can reach the
+   * OneWire bus or MQTT client that the sketch defines.
+   */
+  private declInterfaceGlobals(): string {
+    const externs: string[] = [];
+
+    for (const emission of this.emissions.values()) {
+      for (const line of emission.globals) {
+        if (line.trimStart().startsWith('//')) continue;
+        // `PubSubClient broker(transport);` -> `extern PubSubClient broker;`
+        const match = /^([A-Za-z_][\w:<>]*)\s+([A-Za-z_]\w*)\s*(?:\([^)]*\))?;$/.exec(line.trim());
+        if (match) externs.push(`extern ${match[1]} ${match[2]};`);
+      }
+    }
+
+    if (externs.length === 0) return '';
+    return `\n// Objects the sketch defines, available to your drivers.\n${externs.join('\n')}`;
   }
 
   // =========================================================================
@@ -322,11 +544,28 @@ ${eventNames.map(name => `  "${name}"`).join(',\n')}
 };`;
   }
 
+  /** The enum alone, plus an extern for the names array the sketch defines. */
+  private declEventEnum(): string {
+    const [enumPart] = this.generateEventEnum().split('\nconst char* eventNames');
+    return `${enumPart}\nextern const char* eventNames[];`;
+  }
+
+  private defEventNames(): string {
+    const names = this.project.system.events.map(e => this.sanitizeUpper(e.name));
+    return `const char* eventNames[] = {\n${names.map(n => `  "${n}"`).join(',\n')}\n};`;
+  }
+
   // =========================================================================
   // SYSTEM PARAMETERS (from YAML)
   // =========================================================================
 
   private generateParameterStruct(): string {
+    return `${this.declParameterStruct()}
+
+${this.defParameterInstance()}`;
+  }
+
+  private declParameterStruct(): string {
     const parameters = this.project.system.parameters || [];
 
     if (parameters.length === 0) {
@@ -335,9 +574,7 @@ ${eventNames.map(name => `  "${name}"`).join(',\n')}
 // ============================================================================
 
 // No parameters defined in the model.
-struct SystemParameters {};
-
-SystemParameters systemParameters = {};`;
+struct SystemParameters {};`;
     }
 
     const fields = parameters
@@ -361,9 +598,22 @@ SystemParameters systemParameters = {};`;
 // Generated from the model's "parameters" section.
 struct SystemParameters {
 ${fields}
-};
+};`;
+  }
 
-// Initialized with the defaults declared in the model.
+  /** The instance, with defaults from the model. Belongs to one translation unit. */
+  private defParameterInstance(): string {
+    const parameters = this.project.system.parameters || [];
+    if (parameters.length === 0) return 'SystemParameters systemParameters = {};';
+
+    const inits = parameters
+      .map((p, idx) => {
+        const comma = idx < parameters.length - 1 ? ',' : '';
+        return `  ${this.cLiteral(p)}${comma}   // ${this.sanitize(p.name)}`;
+      })
+      .join('\n');
+
+    return `// Initialized with the defaults declared in the model.
 SystemParameters systemParameters = {
 ${inits}
 };`;
@@ -374,6 +624,12 @@ ${inits}
   // =========================================================================
 
   private generateSensorStruct(): string {
+    return `${this.declSensorStruct()}
+
+SystemSensors systemSensors = {};`;
+  }
+
+  private declSensorStruct(): string {
     const sensors = (this.project.system.components || []).filter(
       c => String(c.class) === 'sensor'
     );
@@ -392,9 +648,7 @@ ${inits}
 // hardware reads in loop() - the generator never reads hardware for you.
 struct SystemSensors {
 ${fields}
-};
-
-SystemSensors systemSensors = {};`;
+};`;
   }
 
   // =========================================================================
@@ -402,6 +656,12 @@ SystemSensors systemSensors = {};`;
   // =========================================================================
 
   private generateContextStruct(): string {
+    return `${this.declContextStruct()}
+
+SystemContext systemContext;`;
+  }
+
+  private declContextStruct(): string {
     return `// ============================================================================
 // SYSTEM CONTEXT (see FUNCTION_CONTRACT.md)
 // ============================================================================
@@ -412,9 +672,7 @@ struct SystemContext {
   int32_t eventData;                   // Payload of the event being dispatched
   const SystemParameters* parameters;  // Read-only system parameters
   const SystemSensors* sensors;        // Current sensor readings
-};
-
-SystemContext systemContext;`;
+};`;
   }
 
   // =========================================================================
@@ -422,17 +680,30 @@ SystemContext systemContext;`;
   // =========================================================================
 
   private generateMachineDeclarations(): string {
+    return this.machineGlobals(false);
+  }
+
+  /**
+   * `extern` when the header declares them for user code to reference;
+   * definitions when the sketch owns them.
+   */
+  private machineGlobals(asExtern: boolean): string {
     // PulseHSM hands back an index from addState(); it must live in a global,
     // because handlers reference it long after setup() returns.
     const indices = this.states
-      .map(s => `int ${s.symbol} = -1;${s.path === ROOT_PATH ? '  // synthetic root for wildcard transitions' : `  // ${s.path}`}`)
+      .map(s => {
+        const note = s.path === ROOT_PATH
+          ? '  // synthetic root for wildcard transitions'
+          : `  // ${s.path}`;
+        return asExtern ? `extern int ${s.symbol};${note}` : `int ${s.symbol} = -1;${note}`;
+      })
       .join('\n');
 
     return `// ============================================================================
 // STATE MACHINE
 // ============================================================================
 
-PulseHSM fsm;
+${asExtern ? 'extern PulseHSM fsm;' : 'PulseHSM fsm;'}
 
 // State indices returned by addState(). Globals, per the PulseHSM contract.
 ${indices}`;
@@ -560,7 +831,7 @@ ${handlers.join('\n\n')}`;
         const guard = this.guards.get(idx);
         const target = this.states[this.resolveEntry(this.resolveRef(t.target, 'target'))];
         const calls = (t.actions || [])
-          .map(a => `        action_${this.sanitize(a.driver)}(&systemContext);`)
+          .map(a => `        action_${this.sanitize(a.name)}(&systemContext);`)
           .join('\n');
 
         const fire = [
@@ -680,8 +951,6 @@ void setup() {
   // Buses and peripherals declared as resources
   setupInterfaces();
 
-  // Initialize components
-${initCode || '  // Initialize pins and peripherals here'}
 
   // Wire up the context handed to every guard and action
   systemContext.parameters = &systemParameters;
@@ -778,7 +1047,7 @@ ${implementations}`;
     const implementations = Array.from(this.actionNames).map(name => {
       const action = this.project.system.transitions
         .flatMap(t => t.actions || [])
-        .find(a => a.driver === name);
+        .find(a => a.name === name);
 
       const paramDoc = action?.params
         ? Object.entries(action.params)
@@ -948,10 +1217,10 @@ ${implementations.join('\n\n')}`;
   private indexActions(): void {
     this.project.system.transitions.forEach((t, idx) => {
       for (const a of t.actions || []) {
-        if (!a.driver) {
+        if (!a.name) {
           throw new CodegenError(`Transition ${idx} has an action without a name`);
         }
-        this.actionNames.add(a.driver);
+        this.actionNames.add(a.name);
       }
     });
   }

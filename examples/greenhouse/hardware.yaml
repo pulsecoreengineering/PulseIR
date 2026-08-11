@@ -1,93 +1,71 @@
-# Buses, libraries and devices. Interfaces declare how the board is wired;
-# the backend turns them into begin() calls for its platform.
+# Buses, devices and third-party libraries.
+#
+# Only libraries the platform does not imply need declaring: Wire, SPI and
+# WiFi come with the interfaces below.
 
-system:
-  libraries:
-    # Only third-party libraries need declaring. Wire, SPI and WiFi are
-    # implied by the interfaces below and get added automatically.
-    - name: Adafruit_BME280
-      include: Adafruit_BME280.h
-      version: "^2.2"
-      source: registry
-      description: Temperature, humidity and pressure over I2C
+libraries:
+  - name: Adafruit_BME280
+    include: Adafruit_BME280.h
+    version: "^2.2"
+    source: registry
+    description: Temperature, humidity and pressure over I2C
 
-  resources:
-    - name: sensor_bus
+hardware:
+  buses:
+    sensor_bus:
       interface: i2c
+      sda: GPIO21
+      scl: GPIO22
+      frequency: 400000
       library: Adafruit_BME280
-      binding:
-        sda: GPIO21
-        scl: GPIO22
-        frequency: 400000
       description: Shared I2C bus for climate sensors
 
-    - name: card_slot
+    card_slot:
       interface: spi
-      binding:
-        sck: GPIO18
-        miso: GPIO19
-        mosi: GPIO23
-        cs: GPIO5
+      sck: GPIO18
+      miso: GPIO19
+      mosi: GPIO23
+      cs: GPIO5
       description: SD card for offline logging
 
-    - name: gps
+    gps:
       interface: uart
-      binding:
-        port: 2
-        baud: 9600
-        rx: GPIO16
-        tx: GPIO17
-      description: NMEA receiver
+      port: 2
+      baud: 9600
+      rx: GPIO16
+      tx: GPIO17
 
-    - name: vent_drive
-      interface: pwm
-      binding:
-        pin: GPIO25
-        channel: 0
-        frequency: 5000
-        resolution: 8
-      description: Vent motor speed
-
-    - name: uplink
+    uplink:
       interface: wifi
-      binding:
-        ssid: greenhouse-ap
-        hostname: greenhouse-01
-      description: Site Wi-Fi
+      ssid: greenhouse-ap
+      hostname: greenhouse-01
 
-    - name: broker
+    broker:
       interface: mqtt
-      binding:
-        host: mqtt.example.local
-        port: 8883
-        tls: true
-      description: Dashboard uplink
+      host: mqtt.example.local
+      port: 8883
+      tls: true
 
-  components:
-    - name: air_temp
-      class: sensor
-      driver: bme280
-      config:
-        interface: i2c
-        address: 0x76
-        unit: degC
+  devices:
+    air_temp:
+      type: bme280
+      bus: sensor_bus
+      address: 0x76
+      unit: degC
 
-    - name: humidity
-      class: sensor
-      driver: bme280
-      config:
-        interface: i2c
-        address: 0x76
-        unit: percent
+    humidity:
+      type: bme280
+      bus: sensor_bus
+      address: 0x76
+      unit: percent
 
-    - name: vent
-      class: actuator
-      driver: pwm_control
-      config:
-        pin: GPIO25
+    vent:
+      type: pwm_output
+      pin: GPIO25
+      channel: 0
+      frequency: 5000
+      resolution: 8
 
-    - name: pump
-      class: actuator
-      driver: gpio_control
-      config:
-        pin: GPIO26
+    pump:
+      type: digital_output
+      pin: GPIO26

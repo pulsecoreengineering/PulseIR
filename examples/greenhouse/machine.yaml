@@ -1,0 +1,90 @@
+events:
+  START:
+    source: external
+    description: Local start button
+  STOP:
+    source: external
+  SAMPLE_DUE:
+    source: timer
+  TOO_HOT:
+    source: sensor
+  RECOVERED:
+    source: sensor
+  SENSOR_FAULT:
+    source: internal
+  # Declaring the source as mqtt is what makes this remotely triggerable.
+  REMOTE_START:
+    source: mqtt
+    description: Start requested from the dashboard
+
+actions:
+  open_log:
+    driver: sd_log
+  start_sampling:
+    driver: scheduler
+  stop_all:
+    driver: gpio_control
+    params: {devices: [vent, pump], value: LOW}
+  read_climate:
+    driver: bme280
+  publish_climate:
+    driver: mqtt_publish
+  open_vent:
+    driver: pwm_control
+    params: {device: vent, duty: 100}
+  close_vent:
+    driver: pwm_control
+    params: {device: vent, duty: 0}
+  raise_alarm:
+    driver: mqtt_publish
+
+machine:
+  states:
+    idle:
+      description: Powered but not regulating
+    running:
+      initial: sampling
+      states:
+        sampling:
+        venting:
+    fault:
+
+  transitions:
+    - from: idle
+      on: START
+      to: running
+      do: [open_log, start_sampling]
+
+    - from: idle
+      on: REMOTE_START
+      to: running
+      do: [open_log, start_sampling]
+
+    - from: running
+      on: STOP
+      to: idle
+      do: stop_all
+
+    - from: running/sampling
+      on: SAMPLE_DUE
+      to: running/sampling
+      do: [read_climate, publish_climate]
+
+    - from: running/sampling
+      on: TOO_HOT
+      guard:
+        name: above_temp_setpoint
+        description: air temperature is above the setpoint plus hysteresis
+      to: running/venting
+      do: open_vent
+
+    - from: running/venting
+      on: RECOVERED
+      guard: back_within_band
+      to: running/sampling
+      do: close_vent
+
+    - from: "*"
+      on: SENSOR_FAULT
+      to: fault
+      do: [stop_all, raise_alarm]

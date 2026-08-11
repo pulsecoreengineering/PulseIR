@@ -37,11 +37,11 @@ function assert(condition: boolean, message: string): void {
 }
 
 function manifestFor(yamlPath: string, namespace?: string): TopicManifest {
-  const project = new Parser().parse(fs.readFileSync(yamlPath, 'utf8'));
+  const project = new Parser().parseFrom(yamlPath, new FileResolver());
   return new TopicEmitter().emit(project, namespace);
 }
 
-const boiler = () => manifestFor(path.join(repoRoot, 'examples/boiler.yaml'));
+const boiler = () => manifestFor(path.join(repoRoot, 'examples/boiler/pulse.yaml'));
 
 // ============================================================================
 
@@ -53,10 +53,11 @@ test('every sensor component becomes a publish topic', () => {
 
   assert(sensors.length === 1, `expected 1 sensor topic, got ${sensors.length}`);
   assert(
-    sensors[0].topic === 'boiler_control/{device}/temperature_sensor',
+    sensors[0].topic === 'boiler_control/{device}/water_temp',
     `unexpected sensor topic: ${sensors[0].topic}`
   );
   assert(sensors[0].driver === 'ds18b20', 'sensor driver was not carried through');
+  assert(sensors[0].unit === 'degC', 'declared unit was not carried through');
 
   // Actuators are not readings and must not be published as data.
   assert(
@@ -98,11 +99,28 @@ test('parameters become setpoints carrying the metadata a dashboard needs', () =
   assert(setpoint!.min === 10.0, `min missing, got ${setpoint!.min}`);
   assert(setpoint!.max === 90.0, `max missing, got ${setpoint!.max}`);
 
-  // A parameter with no declared range must not invent one.
-  const hysteresis = m.subscribe.find(t => t.parameter === 'hysteresis');
-  assert(hysteresis !== undefined, 'hysteresis produced no topic');
-  assert(hysteresis!.min === undefined && hysteresis!.max === undefined,
-    'a range was fabricated for a parameter that declares none');
+});
+
+test('a parameter with no declared range does not get one invented', () => {
+  // Checked on its own model: every boiler parameter declares a range, and a
+  // test should not depend on an example happening to omit one.
+  const project = new Parser().parse(`
+project: {name: unbounded, version: "1.0"}
+events: {GO: {source: external}}
+machine:
+  states: {idle: {}}
+  transitions: []
+parameters:
+  gain: {type: float, default: 1.0, unit: ratio}
+`);
+  const topic = new TopicEmitter().emit(project).subscribe.find(t => t.parameter === 'gain');
+
+  assert(topic !== undefined, 'gain produced no topic');
+  assert(topic!.unit === 'ratio', 'unit was dropped');
+  assert(
+    topic!.min === undefined && topic!.max === undefined,
+    `a range was fabricated: ${JSON.stringify(topic)}`
+  );
 });
 
 test('only events marked source: mqtt are remotely triggerable', () => {
@@ -114,16 +132,13 @@ test('only events marked source: mqtt are remotely triggerable', () => {
 
   const yaml = `
 project: {name: remote, version: "1.0"}
-system:
-  name: remote
-  events:
-    - {name: LOCAL_BUTTON, source: external}
-    - {name: REMOTE_START, source: mqtt, description: start from the dashboard}
-  states:
-    - {name: idle, type: simple}
-    - {name: running, type: simple}
+events:
+  LOCAL_BUTTON: {source: external}
+  REMOTE_START: {source: mqtt, description: start from the dashboard}
+machine:
+  states: {idle: {}, running: {}}
   transitions:
-    - {source: idle, event: REMOTE_START, target: running}
+    - {from: idle, on: REMOTE_START, to: running}
 `;
   const project = new Parser().parse(yaml);
   const commands = new TopicEmitter().emit(project).subscribe.filter(t => t.kind === 'command');
@@ -134,7 +149,7 @@ system:
 });
 
 test('namespace is overridable to match an existing deployment', () => {
-  const m = manifestFor(path.join(repoRoot, 'examples/boiler.yaml'), 'pulsecompiler');
+  const m = manifestFor(path.join(repoRoot, 'examples/boiler/pulse.yaml'), 'pulsecompiler');
 
   assert(m.prefix === 'pulsecompiler/{device}', `unexpected prefix: ${m.prefix}`);
   assert(
@@ -148,17 +163,16 @@ test('no topic segment can break the MQTT topic tree', () => {
   // them would silently reshape the tree rather than fail.
   const yaml = `
 project: {name: "odd name/v2", version: "1.0"}
-system:
-  name: odd
-  events:
-    - {name: GO, source: external}
-  states:
-    - {name: idle, type: simple}
+events:
+  GO: {source: external}
+machine:
+  states: {idle: {}}
   transitions: []
-  components:
-    - {name: "temp +sensor#1", class: sensor, driver: ds18b20}
-  parameters:
-    - {name: "set/point", type: float, default: 1.0}
+hardware:
+  devices:
+    "temp +sensor#1": {type: ds18b20}
+parameters:
+  "set/point": {type: float, default: 1.0}
 `;
   const project = new Parser().parse(yaml);
   const m = new TopicEmitter().emit(project);
@@ -180,7 +194,7 @@ system:
 
 test('manifest round-trips as JSON', () => {
   const json = new TopicEmitter().toJSON(
-    new Parser().parse(fs.readFileSync(path.join(repoRoot, 'examples/boiler.yaml'), 'utf8'))
+    new Parser().parseFrom(path.join(repoRoot, 'examples/boiler/pulse.yaml'), new FileResolver())
   );
   const parsed = JSON.parse(json) as TopicManifest;
 

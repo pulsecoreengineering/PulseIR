@@ -10,22 +10,29 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { Parser } from './parser/index.js';
 import { FileResolver } from './parser/fs-resolver.js';
 import { Codegen } from './codegen/index.js';
+import type { GeneratedProject } from './codegen/index.js';
 import { TopicEmitter } from './emit/topics.js';
 import { LibraryEmitter } from './emit/libraries.js';
 
 const USAGE = `Usage: pulse-ir <input.yaml> [options]
 
 Options:
-  --output <file>      Write the generated Arduino sketch
+  --outdir <dir>       Write a ready-to-build sketch folder (recommended)
+  --output <file>      Write a single self-contained sketch
   --topics <file>      Write the MQTT topic manifest (JSON)
   --libraries <file>   Write the library manifest (JSON)
   --namespace <name>   Topic namespace (defaults to the project name)
 
 A model may "include" other files; paths are resolved relative to the file
 that lists them.
+
+--outdir keeps generated code and your code apart: the sketch and header are
+rewritten every run, while src/guards.cpp and src/actions.cpp are written only
+if missing, so your implementations survive regeneration.
 
 With no output flag at all, the sketch is printed to stdout.`;
 
@@ -46,6 +53,7 @@ async function main() {
   };
 
   const outputFile = flag('--output');
+  const outDir = flag('--outdir');
   const topicsFile = flag('--topics');
   const librariesFile = flag('--libraries');
   const namespace = flag('--namespace');
@@ -58,8 +66,13 @@ async function main() {
   try {
     // Parse. parseFrom() reads the entry file and follows any includes.
     console.log(`📖 Reading ${inputFile}...`);
-    const project = new Parser().parseFrom(inputFile, new FileResolver());
+    const parser = new Parser();
+    const project = parser.parseFrom(inputFile, new FileResolver());
     console.log(`✓ Parsed project: ${project.name}`);
+
+    for (const warning of parser.warnings) {
+      console.warn(`⚠️  ${warning}`);
+    }
 
     // Validate
     console.log('✓ Validated');
@@ -81,8 +94,13 @@ async function main() {
       console.log(`✓ Written to ${librariesPath}`);
     }
 
+    if (outDir) {
+      console.log('🔨 Generating sketch folder...');
+      writeProject(path.resolve(outDir), new Codegen().generateFiles(project));
+    }
+
     // Generate the sketch unless the run only asked for manifests
-    if (outputFile || !(topicsFile || librariesFile)) {
+    if (outputFile || !(outDir || topicsFile || librariesFile)) {
       console.log('🔨 Generating C++ code...');
       const codegen = new Codegen();
       const cppCode = codegen.generate(project);
@@ -108,6 +126,49 @@ async function main() {
     }
     process.exit(1);
   }
+}
+
+/**
+ * Write a sketch folder.
+ *
+ * Generated files are overwritten; scaffolds are written only when absent, so
+ * regenerating never destroys an implementation someone filled in. The runtime
+ * is vendored alongside so the folder opens and builds in the Arduino IDE with
+ * nothing else to install.
+ */
+function writeProject(dir: string, project: GeneratedProject): void {
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+
+  for (const file of project.generated) {
+    const target = path.join(dir, file.path);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, file.contents);
+    console.log(`  ✓ ${file.path}`);
+  }
+
+  for (const file of project.scaffolds) {
+    const target = path.join(dir, file.path);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+
+    if (fs.existsSync(target)) {
+      console.log(`  · ${file.path} (kept - your code)`);
+      continue;
+    }
+    fs.writeFileSync(target, file.contents);
+    console.log(`  ✓ ${file.path} (yours to fill in)`);
+  }
+
+  // Vendored rather than assumed installed: the sketch folder owns its runtime,
+  // so a library update elsewhere cannot change how this firmware behaves.
+  const deps = path.resolve(fileURLToPath(import.meta.url), '../../../deps');
+  for (const name of ['PulseHSM.h', 'PulseHSM.cpp']) {
+    const from = path.join(deps, name);
+    if (!fs.existsSync(from)) continue;
+    fs.copyFileSync(from, path.join(dir, name));
+    console.log(`  ✓ ${name} (runtime)`);
+  }
+
+  console.log(`✓ Sketch folder ready at ${dir}`);
 }
 
 main();

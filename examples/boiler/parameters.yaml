@@ -1,0 +1,24 @@
+# Configuration contract. These become a C struct, and the dashboard reads
+# their unit and range straight from here.
+
+parameters:
+  setpoint:
+    type: float
+    default: 60.0
+    range: [10.0, 90.0]
+    unit: degC
+    description: Target temperature
+
+  max_safe_temp:
+    type: float
+    default: 75.0
+    range: [50.0, 95.0]
+    unit: degC
+    description: Emergency shutdown temperature
+
+  hysteresis:
+    type: float
+    default: 2.0
+    range: [0.1, 10.0]
+    unit: degC
+    description: Temperature tolerance band
