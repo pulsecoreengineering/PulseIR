@@ -225,7 +225,10 @@ node dist/src/cli.js examples/boiler.yaml --output boiler.ino
 # Generate the MQTT topic manifest for PulseDash
 node dist/src/cli.js examples/boiler.yaml --topics topics.json --namespace pulsecompiler
 
-# Web editor (or just open web/index.html)
+# Web editor: serve the committed bundle (or just open web/index.html)
+npm run serve
+
+# Rebuild the bundle first, then serve (needs esbuild)
 npm run web
 
 # View generated code
@@ -291,6 +294,7 @@ pulse-ir/
 │
 ├── scripts/
 │   ├── build-examples.mjs           (Bakes models into the editor)
+│   ├── build-web.mjs                (Bundles the editor)
 │   └── serve.mjs                    (Static server)
 │
 ├── test/
