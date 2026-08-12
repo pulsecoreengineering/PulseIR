@@ -105,6 +105,23 @@ function sizingFrom(sketch: string): string {
   return `#ifndef PULSEHSM_CONFIG_H\n#define PULSEHSM_CONFIG_H\n${defines.join('\n')}\n#endif\n`;
 }
 
+/**
+ * Make every action stub announce itself.
+ *
+ * The generator only emits a trace print when the model declares a console -
+ * writing to a serial port nobody asked for is exactly the thing it must not
+ * do. A test that wants to watch actions therefore adds the observation
+ * itself, which is where it belongs.
+ */
+function withActionTrace(sketch: string): string {
+  const traced = sketch.replace(
+    /^void (action_\w+)\(SystemContext\* ctx\) \{$/gm,
+    (line, fn) => `${line}\n  Serial.println("  -> Action: ${String(fn).slice('action_'.length)}");`
+  );
+  if (traced === sketch) throw new Error('no action stubs found to instrument');
+  return traced;
+}
+
 function assert(condition: boolean, message: string): void {
   if (!condition) {
     throw new Error(message);
@@ -215,7 +232,7 @@ int main() {
 });
 
 test('hierarchy fixture honours nesting, specificity and guards', () => {
-  const sketch = generate(path.join(repoRoot, 'test/fixtures/hierarchy.yaml'));
+  const sketch = withActionTrace(generate(path.join(repoRoot, 'test/fixtures/hierarchy.yaml')));
 
   const driver = `${DRIVER_PRELUDE}
 int main() {
@@ -520,7 +537,7 @@ test('generated sketch drives the PulseHSM runtime correctly', () => {
 // ============================================================================
 
 test('gate: traffic light — self-transitions, a pedestrian latch and a night mode', () => {
-  const sketch = generate(path.join(repoRoot, 'examples/traffic_light.yaml'));
+  const sketch = withActionTrace(generate(path.join(repoRoot, 'examples/traffic_light.yaml')));
 
   const driver = `${DRIVER_PRELUDE}
 int main() {
@@ -829,14 +846,33 @@ int main() {
   assert(!output.includes('REFUSED'), `the runtime refused a state:\n${output}`);
 
   // Belt and braces: if the config header is ever lost, moved, or stale, the
-  // sketch has to say so rather than run a machine missing two states.
+  // sketch should say so rather than run a machine missing two states. That
+  // needs somewhere to say it, and this model declares no console - so here it
+  // has to be a comment that names the symptom instead.
   const sketch = files.generated.find(f => f.path.endsWith('.ino'))!.contents;
   assert(
-    sketch.includes('FATAL: PulseHSM refused a state'),
-    'setup() does not check that every state was actually registered'
+    /No console is declared, so this cannot be reported/.test(sketch),
+    'setup() neither checks the registration nor explains why it cannot'
+  );
+
+  // With a console, it is a real runtime check.
+  const talkative = new Codegen().generate(new Parser().parse(`
+project: {name: talkative, version: "1.0"}
+hardware:
+  buses:
+    console: {interface: uart, port: 0, baud: 115200}
+events: {GO: {source: external}}
+machine:
+  states: {idle:, busy:}
+  transitions:
+    - {from: idle, on: GO, to: busy}
+`));
+  assert(
+    talkative.includes('FATAL: PulseHSM refused a state'),
+    'a model with a console does not check that every state was registered'
   );
   assert(
-    sketch.includes('S_FAULTED < 0'),
+    talkative.includes('S_BUSY < 0'),
     'the registration check does not cover the last state, which is the first to be dropped'
   );
 
@@ -924,12 +960,19 @@ int main() {
 // ============================================================================
 
 test('a blink is a task, and generates no state machine at all', () => {
-  const sketch = generate(path.join(repoRoot, 'examples/blink.yaml'));
+  const plain = generate(path.join(repoRoot, 'examples/blink.yaml'));
 
   for (const trace of ['PulseHSM', 'fsm.', 'SystemEvent', 'addState']) {
-    assert(!sketch.includes(trace), `a machine-less sketch still mentions "${trace}"`);
+    assert(!plain.includes(trace), `a machine-less sketch still mentions "${trace}"`);
   }
-  assert(sketch.includes('void action_toggle_led(SystemContext* ctx)'), 'no stub for the task action');
+
+  // The model declares no console, so the sketch must not touch one. This is
+  // the whole declarative contract in one assertion: nothing appears in the
+  // output that the model did not ask for.
+  assert(!plain.includes('Serial'), 'a model that declares no console still produced Serial calls');
+
+  const sketch = withActionTrace(plain);
+  assert(plain.includes('void action_toggle_led(SystemContext* ctx)'), 'no stub for the task action');
 
   const driver = `
 int main() {
@@ -1168,6 +1211,99 @@ test('a project with no machine gets no runtime vendored beside it', () => {
   assert(
     withMachine.generated.some(f => f.path === 'PulseHSM_config.h'),
     'a project with a machine lost its sizing header'
+  );
+});
+
+test('nothing appears in the output that the model did not ask for', () => {
+  // The declarative contract, checked against every shipped model: every
+  // serial port the sketch touches must be one the model declared. It used to
+  // emit Serial.begin(115200), a boot banner, an "initial state" line and a
+  // FATAL diagnostic regardless - and writing to a Serial that was never begun
+  // is not merely untidy: on an AVR it fills the TX buffer and blocks forever.
+  const models = [
+    'examples/blink.yaml',
+    'examples/traffic_light.yaml',
+    'examples/motor_controller.yaml',
+    'examples/pump_tank.yaml',
+    'examples/boiler/pulse.yaml',
+    'examples/greenhouse/greenhouse.yaml',
+    'examples/sensor_gateway/pulse.yaml',
+    'examples/serial_console.yaml',
+    'test/fixtures/combined.yaml',
+  ];
+
+  for (const model of models) {
+    const project = new Parser().parseFrom(path.join(repoRoot, model), new FileResolver());
+    const sketch = new Codegen().generate(project);
+
+    // Which ports the model actually declared. Port defaults to 1 in the
+    // backend, matching the interface emitter.
+    const declared = new Set(
+      (project.system.resources || [])
+        .filter(r => String(r.interface) === 'uart')
+        .map(r => Number(r.binding?.port ?? 1))
+    );
+
+    // Which ports the sketch touches. `Serial` is port 0.
+    const used = new Set(
+      [...sketch.matchAll(/\bSerial(\d?)\.\w+\(/g)].map(m => Number(m[1] || 0))
+    );
+
+    for (const port of used) {
+      assert(
+        declared.has(port),
+        `${model} touches Serial${port === 0 ? '' : port}, which the model never declared`
+      );
+    }
+
+    // And a declared console must actually be reachable, or declaring it did
+    // nothing - the case that started this.
+    if (declared.has(0)) {
+      assert(used.has(0), `${model} declares a console the generated sketch never uses`);
+    }
+  }
+});
+
+test('commands need a console, and say how to declare one', () => {
+  // Rather than quietly reading from a Serial the model never mentioned.
+  const project = new Parser().parse(`
+project: {name: nope, version: "1.0"}
+commands:
+  map:
+    ping: pong
+`);
+
+  let raised: Error | undefined;
+  try {
+    new Codegen().generate(project);
+  } catch (error) {
+    raised = error as Error;
+  }
+
+  assert(!!raised, 'commands with no console were accepted');
+  assert(/needs a console/.test(raised!.message), `unhelpful message: ${raised!.message}`);
+  assert(
+    /interface: uart, port: 0/.test(raised!.message),
+    'the error does not show what to add'
+  );
+});
+
+test('an action stub says where its data comes from', () => {
+  // "My action needs a sensor reading - where does it come from?" The answer
+  // is ctx, and the stub names every field rather than leaving it to be found
+  // in a header.
+  const sketch = generate(path.join(repoRoot, 'examples/serial_console.yaml'));
+  const stub = /void action_report\(SystemContext\* ctx\) \{[\s\S]*?\n\}/.exec(sketch)?.[0] ?? '';
+
+  assert(stub.length > 0, 'no stub found for action_report');
+  assert(stub.includes('ctx->sensors->temp'), 'the stub does not name the declared sensor');
+  assert(stub.includes('degC'), 'the sensor unit from the model is not shown');
+  assert(stub.includes('ctx->parameters->report_ms'), 'the stub does not name the declared parameters');
+
+  // And the sensor really is a field on the struct, not just a comment.
+  assert(
+    /struct SystemSensors \{[^}]*float temp;/.test(sketch),
+    'the declared sensor has no field on SystemSensors'
   );
 });
 
