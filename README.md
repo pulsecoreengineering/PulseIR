@@ -301,7 +301,13 @@ tab to rename, and × to delete. Everything persists across a reload.
 ```bash
 npm run serve        # serve the committed bundle on :8080
 npm run web          # rebuild the bundle first, then serve
+npm run serve -- --port 9000
 ```
+
+If 8080 is busy — usually an earlier `npm run serve` still running in another
+terminal — it steps to the next free port and says so. That earlier server
+reads from disk on every request, so it is already serving whatever you just
+rebuilt; reloading the page is enough.
 
 `web/app.js` is committed, so `npm run serve` needs nothing but Node — and you
 can skip that too and open `web/index.html` straight from disk. Everything runs
