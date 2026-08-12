@@ -15,3 +15,5 @@ HardwareSerialShim Serial2;
 TwoWire Wire;
 SPIClass SPI;
 WiFiClass WiFi;
+
+unsigned long pulseTestClockMs = 0;

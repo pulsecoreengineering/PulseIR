@@ -200,10 +200,10 @@ it stands.
 | Project | Files | States | Shape it exercises |
 |---|---|---|---|
 | `boiler` | 4 | 4 | Hierarchy, guards, wildcard fault |
-| `traffic_light` | 1 | 6 | Self-transitions, a parent-level mode switch |
-| `motor_controller` | 1 | 6 | Phases with the arithmetic left in C, wildcard trip |
-| `pump_tank` | 1 | 7 | Hysteresis, two guards on one event across two levels |
-| `sensor_gateway` | 3 | 10 | Four buses, MQTT + TLS, degraded operation |
+| `traffic_light` | 1 | 6 | Timed phases, a parent-level mode switch |
+| `motor_controller` | 1 | 8 | Phases with the arithmetic left in C, wildcard trip |
+| `pump_tank` | 1 | 7 | Hysteresis, two timers on one state, a composite timer |
+| `sensor_gateway` | 3 | 11 | Four buses, MQTT + TLS, a retry loop, degraded operation |
 
 Passing is not the interesting part. Three things came out of it.
 
@@ -239,7 +239,46 @@ This is the clearest evidence so far for the project's own argument: a
 hand-written version of this firmware would have had the same bug, with nothing
 to catch it.
 
-#### Finding 2 — A state cannot say how long it lasts
+#### Finding 2 — A state cannot say how long it lasts ✅ FIXED
+
+Implemented as `after:` on a **transition**, not on a state. The first sketch
+put `after: { ms, to }` on the state itself and it did not survive contact with
+the traffic light: a timed transition needs `do:` (turn the lamps over) and a
+guard (is a pedestrian waiting?), and a state-level field has nowhere to put
+either. As a trigger it costs nothing — swap `on:` for `after:` and every other
+part of a transition keeps working.
+
+```yaml
+- from: operating/go
+  after: green_ms
+  to: operating/prepare_stop
+  do: [all_lamps_off, show_amber]
+```
+
+The four examples now declare their timing. `TIMER_EXPIRED` is gone from all of
+them, along with every hand-written `millis()` comparison.
+
+**It is generated rather than passed to `addState()`**, which was not the plan.
+Reading the runtime closely killed that idea four times over:
+
+1. `timeoutNext` is a state index needed *at registration time*, and states
+   register parents-first in declaration order. The traffic light's cycle —
+   go → prepare_stop → stop → go — refers forward to an index still `-1`.
+2. `update()` only checks `states[currentState].timeoutMs`, and `currentState`
+   is always a leaf. A timeout on a composite would never fire, which rules out
+   pump/tank's "the whole fill must not exceed max_fill_ms".
+3. One timeout per state cannot carry a guard, actions, or a second candidate.
+   The traffic light's `stop` phase needs all three.
+4. `timeoutMs` is captured once at registration, so a parameter changed at
+   runtime would be ignored until reboot.
+
+Instead the generator owns each timed state's `entry` and `update` callbacks:
+entry stamps a clock, update checks it. Entry only fires when a state is really
+entered, so a composite's clock survives its children changing — which is
+exactly the semantics point 2 needs, and it is pinned by a test.
+
+<details>
+<summary>The original finding, kept for the record</summary>
 
 Every one of the four new projects hit this, and it is the single biggest gap:
 
@@ -262,6 +301,26 @@ logic, so pushing it into C is pushing declarative content into the escape
 hatch. **Recommendation: `after: { ms, to }` on a state, in Phase 1.** It is a
 two-field addition that maps onto arguments already being emitted, and it
 removes hand-written timing from four of five projects.
+
+</details>
+
+#### Finding 2b — A state cannot repeat on a timer
+
+Surfaced while implementing `after:`, and left unsolved deliberately.
+
+`from: X, after: 500, to: X` is rejected. The clock is stamped on entry, and a
+self-transition never leaves the state, so it would fire on *every* pass rather
+than every 500 ms — a busy loop wearing a timer's clothes. Rejecting it beats
+generating it and being subtly wrong.
+
+The workaround is to alternate between two states, which `sensor_gateway` does
+for its retry backoff and which reads acceptably. But a genuinely periodic
+thing — the traffic light's night-mode amber flash, a heartbeat, a poll — has
+to stay in C for now.
+
+**Recommendation: `every:` alongside `after:`, but not yet.** It wants its own
+clock semantics (no transition, just a repeated action) and that overlaps with
+`telemetry:` in Phase 2. Better designed once, with both in view.
 
 #### Finding 3 — There are no internal transitions
 

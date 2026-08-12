@@ -30,7 +30,6 @@ events:
   LEVEL_HIGH:    { source: sensor, description: High float closed }
   NO_FLOW:       { source: sensor, description: Flow sensor saw nothing while pumping }
   FAULT_RESET:   { source: external }
-  TIMER_EXPIRED: { source: timer }
 
 actions:
   start_pump:  { driver: gpio_control, params: {device: pump, value: HIGH} }
@@ -62,19 +61,25 @@ machine:
       to: filling
       do: [open_inlet, start_pump]
 
-    # GATE FINDING: "if no flow within dry_run_ms, trip" is a timeout on the
-    # priming state. Written as an event the C code has to raise itself.
     - from: filling/priming
       on: NO_FLOW
       to: fault/dry_run
       do: [stop_pump, close_inlet, raise_alarm]
 
+    # Two timers on one state, in order. For the first settle_ms nothing can
+    # fire; between settle_ms and dry_run_ms the guarded one gets its chance
+    # each pass; if flow never appears, the unguarded one trips at dry_run_ms.
     - from: filling/priming
-      on: TIMER_EXPIRED
+      after: settle_ms
       guard:
         name: flow_established
-        description: the flow sensor has been pulsing for settle_ms
+        description: the flow sensor has been pulsing steadily
       to: filling/pumping
+
+    - from: filling/priming
+      after: dry_run_ms
+      to: fault/dry_run
+      do: [stop_pump, close_inlet, raise_alarm]
 
     - from: filling
       on: LEVEL_HIGH
@@ -83,11 +88,11 @@ machine:
 
     # Overfill: the high float should have stopped us. If we are still filling
     # past max_fill_ms, something is stuck.
+    #
+    # The timer is on the *composite*, so it measures the whole fill and is not
+    # restarted by moving from priming to pumping.
     - from: filling
-      on: TIMER_EXPIRED
-      guard:
-        name: fill_ran_too_long
-        description: filling has continued past max_fill_ms
+      after: max_fill_ms
       to: fault/overfill
       do: [stop_pump, close_inlet, raise_alarm]
 

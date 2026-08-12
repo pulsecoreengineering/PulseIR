@@ -3428,6 +3428,7 @@ ${lines.join("\n")}${hint}`;
       this.assertUniqueNames(libraries, "library");
       this.assertLibraryRefs(resources, libraries);
       this.assertBusRefs(components, resources);
+      this.assertTimedTransitions(transitions, parameters || []);
       const busNames = new Set((resources || []).map((r) => r.name));
       for (const device of components || []) {
         if (busNames.has(device.name)) {
@@ -3554,12 +3555,20 @@ ${lines.join("\n")}${hint}`;
         const from = entry.from;
         const on = entry.on;
         const to = entry.to;
-        for (const [key, value] of [["from", from], ["on", on], ["to", to]]) {
+        const after = this.parseAfter(entry.after, index);
+        if (on !== void 0 && after !== void 0) {
+          throw new ParseError(`Transition ${index + 1} has both "on" and "after". A transition fires either when an event arrives or when a duration elapses, not both.`);
+        }
+        if (on === void 0 && after === void 0) {
+          throw new ParseError(`Transition ${index + 1} has neither "on" nor "after", so nothing would ever make it fire. Use "on: SOME_EVENT" or "after: 5000".`);
+        }
+        const trigger = on !== void 0 ? [["from", from], ["on", on], ["to", to]] : [["from", from], ["to", to]];
+        for (const [key, value] of trigger) {
           if (typeof value !== "string" || !value.trim()) {
             throw new ParseError(`Transition ${index + 1} is missing "${key}"`);
           }
         }
-        if (on !== "*" && !this.eventNames.has(on)) {
+        if (on !== void 0 && on !== "*" && !this.eventNames.has(on)) {
           throw new ParseError(`Transition ${index + 1} reacts to unknown event "${on}"`);
         }
         if (from !== "*" && !this.hasState(from)) {
@@ -3571,15 +3580,43 @@ ${lines.join("\n")}${hint}`;
         if (!this.hasState(to)) {
           throw new ParseError(`Transition "to" state "${to}" ${this.describeBadRef(to)}`);
         }
+        if (after !== void 0 && from === "*") {
+          throw new ParseError(`Transition ${index + 1} uses "after" from "*". A duration is measured from entering one state, so a timed transition needs a real "from".`);
+        }
+        if (after !== void 0 && from === to) {
+          throw new ParseError(`Transition ${index + 1} uses "after" to re-enter "${to}". A timer starts when a state is entered, and this never leaves it, so the timer would not restart and the transition would fire on every pass.
+For a repeating cycle, alternate between two states.`);
+        }
         return {
           source: from,
           target: to,
           event: on,
+          after,
           guard: entry.guard !== void 0 && entry.guard !== null ? this.parseGuard(entry.guard) : void 0,
           actions: this.resolveActions(entry.do, catalogue, index),
           description: entry.description
         };
       });
+    }
+    /**
+     * `after: 5000` or `after: green_ms`.
+     *
+     * Naming a parameter keeps the duration tunable at runtime; the generated
+     * code reads it every tick rather than capturing it at boot. The parameter
+     * itself is checked once they have all been parsed.
+     */
+    parseAfter(raw, index) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      if (typeof raw === "number") {
+        if (!Number.isInteger(raw) || raw <= 0) {
+          throw new ParseError(`Transition ${index + 1} has after: ${raw}. It must be a positive whole number of milliseconds, or the name of an int parameter.`);
+        }
+        return raw;
+      }
+      if (typeof raw === "string" && raw.trim())
+        return raw.trim();
+      throw new ParseError(`Transition ${index + 1} has an "after" of type ${typeof raw}. Use a number of milliseconds, or the name of an int parameter.`);
     }
     /**
      * `do:` takes one name or a list of them. When an `actions:` catalogue
@@ -3973,6 +4010,29 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
       });
     }
     /**
+     * Check every `after:` that names a parameter, once they have all been read.
+     *
+     * It has to name a real parameter of an integer type, or the generated code
+     * would not compile - and it would fail inside generated code the student
+     * did not write, which is the worst possible place to find out.
+     */
+    assertTimedTransitions(transitions, parameters) {
+      const byName = new Map(parameters.map((p) => [p.name, p]));
+      transitions.forEach((transition, index) => {
+        if (typeof transition.after !== "string")
+          return;
+        const where = `Transition ${index + 1} (${transition.source} \u2192 ${transition.target})`;
+        const parameter = byName.get(transition.after);
+        if (!parameter) {
+          const known = [...byName.keys()];
+          throw new ParseError(`${where} waits for "${transition.after}", which is not a declared parameter. ` + (known.length ? `Known parameters: ${known.join(", ")}.` : "No parameters are declared.") + ' Use a number of milliseconds, or declare it under "parameters".');
+        }
+        if (parameter.type !== "int") {
+          throw new ParseError(`${where} waits for "${transition.after}", which is declared as ${parameter.type}. A duration in milliseconds must be an int.`);
+        }
+      });
+    }
+    /**
      * Check if a state exists. Accepts a full path ("running/heating") or a bare
      * leaf name ("heating") when that name is unique across the hierarchy.
      */
@@ -4248,6 +4308,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
       this.guardStubs = /* @__PURE__ */ new Map();
       this.actionNames = /* @__PURE__ */ new Set();
       this.transitionsBySource = /* @__PURE__ */ new Map();
+      this.timedBySource = /* @__PURE__ */ new Map();
       this.interfaces = new InterfaceBackend();
       this.emissions = /* @__PURE__ */ new Map();
       this.libraries = /* @__PURE__ */ new Map();
@@ -4275,6 +4336,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         this.generateGuardDeclarations(),
         this.generateActionDeclarations(),
         this.generateEventHandlers(),
+        this.generateTimeouts(),
         this.generateSetupFunction(),
         this.generateLoopFunction(),
         this.generateGuardImplementations(),
@@ -4361,6 +4423,7 @@ void setupInterfaces();${this.declInterfaceGlobals()}`,
         this.machineGlobals(false).replace(/^\/\/ =+\n\/\/ STATE MACHINE\n\/\/ =+\n\n/m, ""),
         this.defInterfaces().trimStart(),
         this.generateEventHandlers(),
+        this.generateTimeouts(),
         this.generateSetupFunction(),
         this.generateLoopFunction()
       ].join("\n\n") + "\n";
@@ -4406,6 +4469,7 @@ ${this.generateActionImplementations()}
       this.guardStubs = /* @__PURE__ */ new Map();
       this.actionNames = /* @__PURE__ */ new Set();
       this.transitionsBySource = /* @__PURE__ */ new Map();
+      this.timedBySource = /* @__PURE__ */ new Map();
       this.emissions = /* @__PURE__ */ new Map();
       this.libraries = /* @__PURE__ */ new Map();
     }
@@ -4961,12 +5025,13 @@ ${cases.join("\n")}
       const registrations = this.states.map((flat) => {
         const handler = this.transitionsBySource.get(flat.index)?.length ? this.handlerName(flat) : "nullptr";
         const parent = flat.parent === -1 ? "-1" : this.states[flat.parent].symbol;
+        const timed = this.timedBySource.get(flat.index)?.length ? this.timerNames(flat) : null;
         return `  ${flat.symbol} = fsm.addState(
       "${flat.path}",
-      nullptr,   // update
-      nullptr,   // entry
+      ${timed ? `${timed.tick},   // update - checks the "after" timers` : "nullptr,   // update"}
+      ${timed ? `${timed.mark},  // entry - starts the "after" clock` : "nullptr,   // entry"}
       nullptr,   // exit
-      0,         // timeoutMs
+      0,         // timeoutMs - unused; see generateTimeouts()
       -1,        // timeoutNext
       ${handler},  // onEvent
       ${parent});`;
@@ -5002,6 +5067,92 @@ ${this.registrationCheck()}
   Serial.print("Initial state: ");
   Serial.println(fsm.getCurrentName());
 }`;
+    }
+    /** The two C names a state with timed transitions needs. */
+    timerNames(flat) {
+      const base = this.sanitize(flat.path);
+      return { since: `enteredAt_${base}`, mark: `enter_${base}`, tick: `tick_${base}` };
+    }
+    /**
+     * `after:` on a transition - it fires when a duration elapses instead of when
+     * an event arrives. Everything else about it is a normal transition: guards,
+     * `do:`, ordering and fall-through all behave identically.
+     *
+     * PulseHSM has timeoutMs/timeoutNext on addState(), and this deliberately
+     * does not use them, for four reasons:
+     *
+     *  1. timeoutNext is a state index needed *at registration time*, and states
+     *     register parents-first in declaration order. Any cycle - go leads to
+     *     prepare_stop leads to stop leads back to go - refers forward to a state
+     *     whose index is still -1.
+     *  2. The runtime only checks the timeout of `currentState`, which is always
+     *     a leaf, so a timeout on a composite would never fire. "Filling must not
+     *     run past max_fill_ms, whichever phase it is in" needs the composite.
+     *  3. One timeout per state cannot carry a guard, actions, or a second
+     *     candidate - and the traffic light needs all three on `stop`.
+     *  4. timeoutMs is captured once. Reading the parameter every tick means
+     *     retuning green_ms at runtime takes effect immediately, instead of
+     *     silently keeping whatever the value was at boot.
+     *
+     * The entry callback stamps the clock and the update callback checks it -
+     * both slots the generator owns. Entry only fires when the state is really
+     * entered, so moving between two children does not restart their parent's
+     * clock, which is exactly the semantics a composite timeout needs.
+     */
+    generateTimeouts() {
+      if (this.timedBySource.size === 0)
+        return "";
+      const transitions = this.project.system.transitions;
+      const blocks = [];
+      for (const flat of this.states) {
+        const owned = this.timedBySource.get(flat.index);
+        if (!owned || owned.length === 0)
+          continue;
+        const { since, mark, tick } = this.timerNames(flat);
+        const body = [];
+        for (const idx of owned) {
+          const t = transitions[idx];
+          const guard = this.guards.get(idx);
+          const target = this.states[this.resolveEntry(this.resolveRef(t.target, "target"))];
+          const duration = typeof t.after === "string" ? `(unsigned long)systemParameters.${this.sanitize(t.after)}` : `${t.after}UL`;
+          const source2 = typeof t.after === "string" ? `${t.after} (parameter)` : `${t.after} ms`;
+          const calls = (t.actions || []).map((a) => `    action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
+          const fire = [
+            calls,
+            `    fsm.transitionTo(${target.symbol});`,
+            "    return;"
+          ].filter(Boolean).join("\n");
+          const condition = guard ? `elapsed >= ${duration} && ${guard.fnName}(&systemContext)` : `elapsed >= ${duration}`;
+          body.push(`  // after ${source2} -> ${t.target}${guard ? ", if the guard allows" : ""}
+  if (${condition}) {
+${fire}
+  }`);
+        }
+        blocks.push(`// Timers for "${flat.path}".
+static unsigned long ${since} = 0;
+
+static void ${mark}() {
+  ${since} = millis();
+}
+
+static void ${tick}() {
+  syncContext();
+  const unsigned long elapsed = millis() - ${since};
+
+${body.join("\n\n")}
+}`);
+      }
+      return `// ============================================================================
+// TIMED TRANSITIONS
+// ============================================================================
+//
+// Generated from "after:" in the model. Ancestors tick before their active
+// child, so when both a state and its parent time out on the same pass the
+// inner one wins - the same precedence event handling already has.
+//
+// Subtraction on unsigned long is correct across the millis() rollover.
+
+${blocks.join("\n\n")}`;
     }
     /**
      * Catch a runtime compiled against a smaller state table than this model
@@ -5231,9 +5382,10 @@ ${implementations.join("\n\n")}`;
           sourceIdx = this.resolveRef(t.source, "source");
         }
         this.resolveEntry(this.resolveRef(t.target, "target"));
-        const list = this.transitionsBySource.get(sourceIdx) || [];
+        const bucket = t.after !== void 0 ? this.timedBySource : this.transitionsBySource;
+        const list = bucket.get(sourceIdx) || [];
         list.push(idx);
-        this.transitionsBySource.set(sourceIdx, list);
+        bucket.set(sourceIdx, list);
       });
     }
     // =========================================================================
@@ -5565,6 +5717,218 @@ ${implementations.join("\n\n")}`;
     return entry.version ? `${entry.name}@${entry.version}` : entry.name;
   }
 
+  // dist/web/highlight.js
+  var BOOLEANS = /* @__PURE__ */ new Set(["true", "false", "yes", "no", "on", "off"]);
+  var NULLS = /* @__PURE__ */ new Set(["null", "~"]);
+  var FLOW_DELIMITERS = /* @__PURE__ */ new Set([",", "{", "}", "[", "]"]);
+  function escapeHtml(text) {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  var Emitter = class {
+    constructor() {
+      this.out = [];
+    }
+    push(kind, text) {
+      if (!text)
+        return;
+      this.out.push(kind === "plain" ? escapeHtml(text) : `<span class="y-${kind}">${escapeHtml(text)}</span>`);
+    }
+    toString() {
+      return this.out.join("");
+    }
+  };
+  function classifyScalar(text) {
+    const lower2 = text.toLowerCase();
+    if (NULLS.has(lower2))
+      return "null";
+    if (BOOLEANS.has(lower2))
+      return "boolean";
+    if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text))
+      return "number";
+    if (/^0x[0-9a-fA-F]+$/.test(text))
+      return "number";
+    return "plain";
+  }
+  function readQuoted(line, i) {
+    const quote = line[i];
+    let j = i + 1;
+    while (j < line.length) {
+      if (quote === '"' && line[j] === "\\") {
+        j += 2;
+        continue;
+      }
+      if (line[j] === quote) {
+        if (quote === "'" && line[j + 1] === "'") {
+          j += 2;
+          continue;
+        }
+        return j + 1;
+      }
+      j++;
+    }
+    return line.length;
+  }
+  function findKeyColon(line, i, inFlow) {
+    let j = i;
+    while (j < line.length) {
+      const ch = line[j];
+      if (ch === '"' || ch === "'") {
+        j = readQuoted(line, j);
+        continue;
+      }
+      if (ch === "#" && j > i && /\s/.test(line[j - 1]))
+        return -1;
+      if (inFlow && FLOW_DELIMITERS.has(ch))
+        return -1;
+      if (ch === ":") {
+        const next = line[j + 1];
+        if (next === void 0 || /\s/.test(next) || inFlow && FLOW_DELIMITERS.has(next))
+          return j;
+      }
+      j++;
+    }
+    return -1;
+  }
+  function emitValue(out, line, from, flowDepth) {
+    let i = from;
+    let depth = flowDepth;
+    while (i < line.length) {
+      const ch = line[i];
+      if (/\s/.test(ch)) {
+        const start2 = i;
+        while (i < line.length && /\s/.test(line[i]))
+          i++;
+        out.push("plain", line.slice(start2, i));
+        continue;
+      }
+      if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) {
+        out.push("comment", line.slice(i));
+        return;
+      }
+      if (ch === '"' || ch === "'") {
+        const end = readQuoted(line, i);
+        out.push("string", line.slice(i, end));
+        i = end;
+        continue;
+      }
+      if (ch === "{" || ch === "[") {
+        out.push("punct", ch);
+        depth++;
+        i++;
+        continue;
+      }
+      if (ch === "}" || ch === "]") {
+        out.push("punct", ch);
+        depth = Math.max(0, depth - 1);
+        i++;
+        continue;
+      }
+      if (ch === ",") {
+        out.push("punct", ch);
+        i++;
+        continue;
+      }
+      if (ch === "&" || ch === "*") {
+        const start2 = i++;
+        while (i < line.length && !/[\s,{}[\]]/.test(line[i]))
+          i++;
+        out.push("anchor", line.slice(start2, i));
+        continue;
+      }
+      if (ch === "!") {
+        const start2 = i++;
+        while (i < line.length && !/[\s,{}[\]]/.test(line[i]))
+          i++;
+        out.push("tag", line.slice(start2, i));
+        continue;
+      }
+      if (depth > 0) {
+        const colon = findKeyColon(line, i, true);
+        if (colon !== -1) {
+          out.push("key", line.slice(i, colon));
+          out.push("punct", ":");
+          i = colon + 1;
+          continue;
+        }
+      }
+      const start = i;
+      while (i < line.length) {
+        const c = line[i];
+        if (depth > 0 && (FLOW_DELIMITERS.has(c) || /\s/.test(c)))
+          break;
+        if (c === "#" && /\s/.test(line[i - 1] ?? " "))
+          break;
+        i++;
+      }
+      const text = line.slice(start, i);
+      out.push(depth > 0 ? classifyScalar(text) : classifyScalar(text.trimEnd()), text);
+    }
+  }
+  function highlight(source2) {
+    const lines = source2.split("\n");
+    const rendered = [];
+    let blockIndent = -1;
+    for (const line of lines) {
+      const out = new Emitter();
+      const indentLength = line.length - line.trimStart().length;
+      if (blockIndent !== -1) {
+        if (line.trim() === "" || indentLength > blockIndent) {
+          out.push("string", line);
+          rendered.push(out.toString());
+          continue;
+        }
+        blockIndent = -1;
+      }
+      if (line.trim() === "") {
+        rendered.push(escapeHtml(line));
+        continue;
+      }
+      const indent = line.slice(0, indentLength);
+      out.push("plain", indent);
+      let i = indentLength;
+      if (line.slice(i) === "---" || line.slice(i) === "...") {
+        out.push("punct", line.slice(i));
+        rendered.push(out.toString());
+        continue;
+      }
+      if (line[i] === "#") {
+        out.push("comment", line.slice(i));
+        rendered.push(out.toString());
+        continue;
+      }
+      while (line[i] === "-" && (line[i + 1] === " " || line[i + 1] === void 0)) {
+        out.push("punct", "-");
+        i++;
+        const start = i;
+        while (i < line.length && line[i] === " ")
+          i++;
+        out.push("plain", line.slice(start, i));
+      }
+      const colon = findKeyColon(line, i, false);
+      if (colon !== -1) {
+        const rawKey = line.slice(i, colon);
+        out.push(/^["']/.test(rawKey.trim()) ? "string" : "key", rawKey);
+        out.push("punct", ":");
+        i = colon + 1;
+      }
+      const rest = line.slice(i);
+      const block = /^(\s*)([|>][+-]?\d*)(\s*)(#.*)?$/.exec(rest);
+      if (block) {
+        out.push("plain", block[1]);
+        out.push("punct", block[2]);
+        out.push("plain", block[3]);
+        if (block[4])
+          out.push("comment", block[4]);
+        blockIndent = indentLength;
+        rendered.push(out.toString());
+        continue;
+      }
+      emitValue(out, line, i, 0);
+      rendered.push(out.toString());
+    }
+    return rendered.join("\n");
+  }
+
   // dist/web/examples.js
   var EXAMPLES = {
     "starter \u2014 a two-state blinker": {
@@ -5600,26 +5964,26 @@ ${implementations.join("\n\n")}`;
     "traffic light \u2014 phases, a pedestrian request and a night mode": {
       entry: "traffic_light.yaml",
       files: {
-        "traffic_light.yaml": '# Traffic light with a pedestrian request.\n#\n# Single file: at this size, splitting would cost more than it saves.\n#\n# NOTE (gate finding): every transition here is driven by TIMER_EXPIRED, and\n# the model has nowhere to say how long a state lasts. The durations live in\n# `parameters` and the C code has to compare them against\n# fsm.getStateElapsed() itself. PulseHSM already supports this natively via\n# addState()\'s timeoutMs/timeoutNext - the IR simply has no field for it.\n\nproject:\n  name: traffic_light\n  version: "1.0"\n  description: Signalised crossing with a pedestrian phase\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    lamp_red:    { type: digital_output, pin: GPIO25 }\n    lamp_amber:  { type: digital_output, pin: GPIO26 }\n    lamp_green:  { type: digital_output, pin: GPIO27 }\n    walk_lamp:   { type: digital_output, pin: GPIO12 }\n    walk_button: { type: digital_input,  pin: GPIO14, mode: INPUT_PULLUP }\n\nparameters:\n  green_ms:  { type: int, default: 20000, range: [5000, 120000], unit: ms }\n  amber_ms:  { type: int, default: 3000,  range: [2000, 6000],   unit: ms }\n  red_ms:    { type: int, default: 15000, range: [5000, 120000], unit: ms }\n  walk_ms:   { type: int, default: 12000, range: [5000, 60000],  unit: ms }\n\nevents:\n  TIMER_EXPIRED: { source: timer, description: The current phase has run its time }\n  WALK_REQUEST:  { source: external, description: Pedestrian pressed the button }\n  GO_NIGHT:      { source: external }\n  GO_DAY:        { source: external }\n\nactions:\n  show_green:  { driver: gpio_control, params: {device: lamp_green, value: HIGH} }\n  show_amber:  { driver: gpio_control, params: {device: lamp_amber, value: HIGH} }\n  show_red:    { driver: gpio_control, params: {device: lamp_red,   value: HIGH} }\n  show_walk:   { driver: gpio_control, params: {device: walk_lamp,  value: HIGH} }\n  clear_walk:  { driver: gpio_control, params: {device: walk_lamp,  value: LOW} }\n  all_lamps_off: { driver: gpio_control, params: {devices: [lamp_red, lamp_amber, lamp_green], value: LOW} }\n  latch_request: { driver: request_latch }\n  flash_amber:   { driver: gpio_control, params: {device: lamp_amber, value: TOGGLE} }\n\nmachine:\n  states:\n    operating:\n      initial: go\n      states:\n        go:\n        prepare_stop:\n        stop:\n        walk:\n    night:\n\n  transitions:\n    # GATE FINDING: this wants to be an *internal* transition - handle the\n    # event, run the action, stay put. The model has no way to say that, so it\n    # is written as a self-transition. Harmless today because states have no\n    # entry/exit actions, but wrong the moment they do.\n    - from: operating/go\n      on: WALK_REQUEST\n      to: operating/go\n      do: latch_request\n\n    - from: operating/go\n      on: TIMER_EXPIRED\n      to: operating/prepare_stop\n      do: [all_lamps_off, show_amber]\n\n    - from: operating/prepare_stop\n      on: TIMER_EXPIRED\n      to: operating/stop\n      do: [all_lamps_off, show_red]\n\n    - from: operating/stop\n      on: TIMER_EXPIRED\n      guard:\n        name: walk_requested\n        description: a pedestrian pressed the button during this cycle\n      to: operating/walk\n      do: show_walk\n\n    - from: operating/stop\n      on: TIMER_EXPIRED\n      to: operating/go\n      do: [all_lamps_off, show_green]\n\n    - from: operating/walk\n      on: TIMER_EXPIRED\n      to: operating/go\n      do: [clear_walk, all_lamps_off, show_green]\n\n    - from: operating\n      on: GO_NIGHT\n      to: night\n      do: all_lamps_off\n\n    - from: night\n      on: TIMER_EXPIRED\n      to: night\n      do: flash_amber\n\n    - from: night\n      on: GO_DAY\n      to: operating\n      do: [all_lamps_off, show_green]\n'
+        "traffic_light.yaml": '# Traffic light with a pedestrian request.\n#\n# Single file: at this size, splitting would cost more than it saves.\n#\n# Every phase change here is driven by time, and `after:` says so directly:\n# the generated code owns the clock, so there is no TIMER_EXPIRED event to\n# raise and nothing to compare against millis() by hand.\n\nproject:\n  name: traffic_light\n  version: "1.0"\n  description: Signalised crossing with a pedestrian phase\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    lamp_red:    { type: digital_output, pin: GPIO25 }\n    lamp_amber:  { type: digital_output, pin: GPIO26 }\n    lamp_green:  { type: digital_output, pin: GPIO27 }\n    walk_lamp:   { type: digital_output, pin: GPIO12 }\n    walk_button: { type: digital_input,  pin: GPIO14, mode: INPUT_PULLUP }\n\nparameters:\n  green_ms:  { type: int, default: 20000, range: [5000, 120000], unit: ms }\n  amber_ms:  { type: int, default: 3000,  range: [2000, 6000],   unit: ms }\n  flash_ms:  { type: int, default: 1000,  range: [200, 5000],    unit: ms }\n  red_ms:    { type: int, default: 15000, range: [5000, 120000], unit: ms }\n  walk_ms:   { type: int, default: 12000, range: [5000, 60000],  unit: ms }\n\nevents:\n  WALK_REQUEST:  { source: external, description: Pedestrian pressed the button }\n  GO_NIGHT:      { source: external }\n  GO_DAY:        { source: external }\n\nactions:\n  show_green:  { driver: gpio_control, params: {device: lamp_green, value: HIGH} }\n  show_amber:  { driver: gpio_control, params: {device: lamp_amber, value: HIGH} }\n  show_red:    { driver: gpio_control, params: {device: lamp_red,   value: HIGH} }\n  show_walk:   { driver: gpio_control, params: {device: walk_lamp,  value: HIGH} }\n  clear_walk:  { driver: gpio_control, params: {device: walk_lamp,  value: LOW} }\n  all_lamps_off: { driver: gpio_control, params: {devices: [lamp_red, lamp_amber, lamp_green], value: LOW} }\n  latch_request: { driver: request_latch }\n  flash_amber:   { driver: gpio_control, params: {device: lamp_amber, value: TOGGLE} }\n  # `night` flashes by toggling from its own update code rather than a timed\n  # self-transition: `after` may not point at its own state, because that would\n  # restart the clock forever and the state could never be left.\n\nmachine:\n  states:\n    operating:\n      initial: go\n      states:\n        go:\n        prepare_stop:\n        stop:\n        walk:\n    night:\n\n  transitions:\n    # GATE FINDING: this wants to be an *internal* transition - handle the\n    # event, run the action, stay put. The model has no way to say that, so it\n    # is written as a self-transition. Harmless today because states have no\n    # entry/exit actions, but wrong the moment they do.\n    - from: operating/go\n      on: WALK_REQUEST\n      to: operating/go\n      do: latch_request\n\n    - from: operating/go\n      after: green_ms\n      to: operating/prepare_stop\n      do: [all_lamps_off, show_amber]\n\n    - from: operating/prepare_stop\n      after: amber_ms\n      to: operating/stop\n      do: [all_lamps_off, show_red]\n\n    # Two candidates on the same timer, in order: a waiting pedestrian gets the\n    # crossing, otherwise traffic goes. Exactly how two transitions on one event\n    # behave - a blocked guard falls through to the next.\n    - from: operating/stop\n      after: red_ms\n      guard:\n        name: walk_requested\n        description: a pedestrian pressed the button during this cycle\n      to: operating/walk\n      do: show_walk\n\n    - from: operating/stop\n      after: red_ms\n      to: operating/go\n      do: [all_lamps_off, show_green]\n\n    - from: operating/walk\n      after: walk_ms\n      to: operating/go\n      do: [clear_walk, all_lamps_off, show_green]\n\n    - from: operating\n      on: GO_NIGHT\n      to: night\n      do: all_lamps_off\n\n    - from: night\n      on: GO_DAY\n      to: operating\n      do: [all_lamps_off, show_green]\n'
       }
     },
     "motor controller \u2014 speed phases and an overcurrent trip": {
       entry: "motor_controller.yaml",
       files: {
-        "motor_controller.yaml": '# Brushed DC motor with direction, speed ramp and overcurrent trip.\n#\n# GATE FINDING: the ramp itself (accelerate at N rpm/s) is arithmetic over\n# time, so it belongs in C - the model only says *which phase* the motor is\n# in. That is the escape hatch working exactly as intended.\n\nproject:\n  name: motor_controller\n  version: "1.0"\n  description: Speed-controlled DC motor with overcurrent protection\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    drive_pwm:   { type: pwm_output,    pin: GPIO25, channel: 0, frequency: 20000, resolution: 10 }\n    dir_forward: { type: digital_output, pin: GPIO26 }\n    dir_reverse: { type: digital_output, pin: GPIO27 }\n    # GPIO34/35 are input-only on this part, which suits a sense input.\n    current_sense: { type: analog_input, pin: GPIO34, unit: A }\n    estop:         { type: digital_input, pin: GPIO35 }\n\nparameters:\n  target_rpm:     { type: int,   default: 1200, range: [0, 3000],   unit: rpm }\n  ramp_rate:      { type: int,   default: 300,  range: [10, 2000],  unit: rpm_per_s }\n  trip_current:   { type: float, default: 4.5,  range: [0.5, 20.0], unit: A }\n  restart_delay:  { type: int,   default: 5000, range: [0, 60000],  unit: ms }\n\nevents:\n  START:       { source: external }\n  STOP:        { source: external }\n  REVERSE:     { source: external }\n  AT_SPEED:    { source: internal, description: Ramp reached the target }\n  OVERCURRENT: { source: sensor }\n  ESTOP:       { source: external }\n  RESET:       { source: external }\n  TIMER_EXPIRED: { source: timer }\n\nactions:\n  engage_forward: { driver: gpio_control, params: {device: dir_forward, value: HIGH} }\n  engage_reverse: { driver: gpio_control, params: {device: dir_reverse, value: HIGH} }\n  release_drive:  { driver: pwm_control,  params: {device: drive_pwm, duty: 0} }\n  begin_ramp:     { driver: ramp }\n  hold_speed:     { driver: pwm_control }\n  begin_coast:    { driver: ramp, params: {to: 0} }\n  latch_fault:    { driver: fault_latch }\n  clear_fault:    { driver: fault_latch, params: {clear: true} }\n\nmachine:\n  states:\n    stopped:\n    running:\n      initial: accelerating\n      states:\n        accelerating:\n        cruising:\n        decelerating:\n    tripped:\n\n  transitions:\n    - from: stopped\n      on: START\n      to: running\n      do: [engage_forward, begin_ramp]\n\n    - from: running/accelerating\n      on: AT_SPEED\n      to: running/cruising\n      do: hold_speed\n\n    - from: running\n      on: STOP\n      to: running/decelerating\n      do: begin_coast\n\n    - from: running/decelerating\n      on: AT_SPEED\n      to: stopped\n      do: release_drive\n\n    - from: running/cruising\n      on: REVERSE\n      to: running/decelerating\n      do: begin_coast\n\n    # Overcurrent and e-stop must work from any phase of running, and from\n    # stopped too - a shorted output can trip with the drive released.\n    - from: "*"\n      on: OVERCURRENT\n      guard:\n        name: over_trip_current\n        description: sensed current exceeded trip_current for the debounce window\n      to: tripped\n      do: [release_drive, latch_fault]\n\n    - from: "*"\n      on: ESTOP\n      to: tripped\n      do: [release_drive, latch_fault]\n\n    # GATE FINDING: this should be "wait restart_delay, then allow reset".\n    # With no timeout in the model, restart_delay is a parameter the C code\n    # has to enforce inside the guard.\n    - from: tripped\n      on: RESET\n      guard:\n        name: restart_delay_elapsed\n        description: restart_delay has passed since the trip\n      to: stopped\n      do: clear_fault\n'
+        "motor_controller.yaml": '# Brushed DC motor with direction, speed ramp and overcurrent trip.\n#\n# GATE FINDING: the ramp itself (accelerate at N rpm/s) is arithmetic over\n# time, so it belongs in C - the model only says *which phase* the motor is\n# in. That is the escape hatch working exactly as intended.\n\nproject:\n  name: motor_controller\n  version: "1.0"\n  description: Speed-controlled DC motor with overcurrent protection\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    drive_pwm:   { type: pwm_output,    pin: GPIO25, channel: 0, frequency: 20000, resolution: 10 }\n    dir_forward: { type: digital_output, pin: GPIO26 }\n    dir_reverse: { type: digital_output, pin: GPIO27 }\n    # GPIO34/35 are input-only on this part, which suits a sense input.\n    current_sense: { type: analog_input, pin: GPIO34, unit: A }\n    estop:         { type: digital_input, pin: GPIO35 }\n\nparameters:\n  target_rpm:     { type: int,   default: 1200, range: [0, 3000],   unit: rpm }\n  ramp_rate:      { type: int,   default: 300,  range: [10, 2000],  unit: rpm_per_s }\n  trip_current:   { type: float, default: 4.5,  range: [0.5, 20.0], unit: A }\n  restart_delay:  { type: int,   default: 5000, range: [0, 60000],  unit: ms }\n\nevents:\n  START:       { source: external }\n  STOP:        { source: external }\n  REVERSE:     { source: external }\n  AT_SPEED:    { source: internal, description: Ramp reached the target }\n  OVERCURRENT: { source: sensor }\n  ESTOP:       { source: external }\n  RESET:       { source: external }\n\nactions:\n  engage_forward: { driver: gpio_control, params: {device: dir_forward, value: HIGH} }\n  engage_reverse: { driver: gpio_control, params: {device: dir_reverse, value: HIGH} }\n  release_drive:  { driver: pwm_control,  params: {device: drive_pwm, duty: 0} }\n  begin_ramp:     { driver: ramp }\n  hold_speed:     { driver: pwm_control }\n  begin_coast:    { driver: ramp, params: {to: 0} }\n  latch_fault:    { driver: fault_latch }\n  clear_fault:    { driver: fault_latch, params: {clear: true} }\n\nmachine:\n  states:\n    stopped:\n    running:\n      initial: accelerating\n      states:\n        accelerating:\n        cruising:\n        decelerating:\n    tripped:\n      initial: locked\n      states:\n        # The restart delay is a state you have to sit through, not a clock the\n        # C code keeps. RESET is simply not wired up until the delay is over.\n        locked:\n        resettable:\n\n  transitions:\n    - from: stopped\n      on: START\n      to: running\n      do: [engage_forward, begin_ramp]\n\n    - from: running/accelerating\n      on: AT_SPEED\n      to: running/cruising\n      do: hold_speed\n\n    - from: running\n      on: STOP\n      to: running/decelerating\n      do: begin_coast\n\n    - from: running/decelerating\n      on: AT_SPEED\n      to: stopped\n      do: release_drive\n\n    - from: running/cruising\n      on: REVERSE\n      to: running/decelerating\n      do: begin_coast\n\n    # Overcurrent and e-stop must work from any phase of running, and from\n    # stopped too - a shorted output can trip with the drive released.\n    - from: "*"\n      on: OVERCURRENT\n      guard:\n        name: over_trip_current\n        description: sensed current exceeded trip_current for the debounce window\n      to: tripped\n      do: [release_drive, latch_fault]\n\n    - from: "*"\n      on: ESTOP\n      to: tripped\n      do: [release_drive, latch_fault]\n\n    - from: tripped/locked\n      after: restart_delay\n      to: tripped/resettable\n\n    - from: tripped/resettable\n      on: RESET\n      to: stopped\n      do: clear_fault\n'
       }
     },
     "pump & tank \u2014 float switches, dry-run and overfill": {
       entry: "pump_tank.yaml",
       files: {
-        "pump_tank.yaml": '# Tank level control with dry-run protection.\n#\n# Float switches are the classic hysteresis case: fill until the high float\n# closes, then wait for the low float to open before filling again.\n\nproject:\n  name: pump_tank\n  version: "1.0"\n  description: Tank fill control with dry-run and overflow protection\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    pump:        { type: digital_output, pin: GPIO25 }\n    inlet_valve: { type: digital_output, pin: GPIO26 }\n    alarm:       { type: digital_output, pin: GPIO27 }\n    float_low:   { type: digital_input,  pin: GPIO34, mode: INPUT }\n    float_high:  { type: digital_input,  pin: GPIO35, mode: INPUT }\n    flow_sense:  { type: digital_input,  pin: GPIO14, mode: INPUT_PULLUP }\n\nparameters:\n  dry_run_ms:    { type: int, default: 8000,  range: [1000, 60000], unit: ms }\n  settle_ms:     { type: int, default: 2000,  range: [200, 30000],  unit: ms }\n  max_fill_ms:   { type: int, default: 600000, range: [10000, 3600000], unit: ms }\n\nevents:\n  LEVEL_LOW:     { source: sensor, description: Low float opened }\n  LEVEL_HIGH:    { source: sensor, description: High float closed }\n  NO_FLOW:       { source: sensor, description: Flow sensor saw nothing while pumping }\n  FAULT_RESET:   { source: external }\n  TIMER_EXPIRED: { source: timer }\n\nactions:\n  start_pump:  { driver: gpio_control, params: {device: pump, value: HIGH} }\n  stop_pump:   { driver: gpio_control, params: {device: pump, value: LOW} }\n  open_inlet:  { driver: gpio_control, params: {device: inlet_valve, value: HIGH} }\n  close_inlet: { driver: gpio_control, params: {device: inlet_valve, value: LOW} }\n  raise_alarm: { driver: gpio_control, params: {device: alarm, value: HIGH} }\n  clear_alarm: { driver: gpio_control, params: {device: alarm, value: LOW} }\n\nmachine:\n  states:\n    idle:\n      description: Level is fine; waiting for the low float\n    filling:\n      initial: priming\n      states:\n        priming:\n          description: Pump on, waiting to see flow before trusting it\n        pumping:\n    fault:\n      initial: dry_run\n      states:\n        dry_run:\n        overfill:\n\n  transitions:\n    - from: idle\n      on: LEVEL_LOW\n      to: filling\n      do: [open_inlet, start_pump]\n\n    # GATE FINDING: "if no flow within dry_run_ms, trip" is a timeout on the\n    # priming state. Written as an event the C code has to raise itself.\n    - from: filling/priming\n      on: NO_FLOW\n      to: fault/dry_run\n      do: [stop_pump, close_inlet, raise_alarm]\n\n    - from: filling/priming\n      on: TIMER_EXPIRED\n      guard:\n        name: flow_established\n        description: the flow sensor has been pulsing for settle_ms\n      to: filling/pumping\n\n    - from: filling\n      on: LEVEL_HIGH\n      to: idle\n      do: [stop_pump, close_inlet]\n\n    # Overfill: the high float should have stopped us. If we are still filling\n    # past max_fill_ms, something is stuck.\n    - from: filling\n      on: TIMER_EXPIRED\n      guard:\n        name: fill_ran_too_long\n        description: filling has continued past max_fill_ms\n      to: fault/overfill\n      do: [stop_pump, close_inlet, raise_alarm]\n\n    - from: fault\n      on: FAULT_RESET\n      to: idle\n      do: clear_alarm\n'
+        "pump_tank.yaml": '# Tank level control with dry-run protection.\n#\n# Float switches are the classic hysteresis case: fill until the high float\n# closes, then wait for the low float to open before filling again.\n\nproject:\n  name: pump_tank\n  version: "1.0"\n  description: Tank fill control with dry-run and overflow protection\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    pump:        { type: digital_output, pin: GPIO25 }\n    inlet_valve: { type: digital_output, pin: GPIO26 }\n    alarm:       { type: digital_output, pin: GPIO27 }\n    float_low:   { type: digital_input,  pin: GPIO34, mode: INPUT }\n    float_high:  { type: digital_input,  pin: GPIO35, mode: INPUT }\n    flow_sense:  { type: digital_input,  pin: GPIO14, mode: INPUT_PULLUP }\n\nparameters:\n  dry_run_ms:    { type: int, default: 8000,  range: [1000, 60000], unit: ms }\n  settle_ms:     { type: int, default: 2000,  range: [200, 30000],  unit: ms }\n  max_fill_ms:   { type: int, default: 600000, range: [10000, 3600000], unit: ms }\n\nevents:\n  LEVEL_LOW:     { source: sensor, description: Low float opened }\n  LEVEL_HIGH:    { source: sensor, description: High float closed }\n  NO_FLOW:       { source: sensor, description: Flow sensor saw nothing while pumping }\n  FAULT_RESET:   { source: external }\n\nactions:\n  start_pump:  { driver: gpio_control, params: {device: pump, value: HIGH} }\n  stop_pump:   { driver: gpio_control, params: {device: pump, value: LOW} }\n  open_inlet:  { driver: gpio_control, params: {device: inlet_valve, value: HIGH} }\n  close_inlet: { driver: gpio_control, params: {device: inlet_valve, value: LOW} }\n  raise_alarm: { driver: gpio_control, params: {device: alarm, value: HIGH} }\n  clear_alarm: { driver: gpio_control, params: {device: alarm, value: LOW} }\n\nmachine:\n  states:\n    idle:\n      description: Level is fine; waiting for the low float\n    filling:\n      initial: priming\n      states:\n        priming:\n          description: Pump on, waiting to see flow before trusting it\n        pumping:\n    fault:\n      initial: dry_run\n      states:\n        dry_run:\n        overfill:\n\n  transitions:\n    - from: idle\n      on: LEVEL_LOW\n      to: filling\n      do: [open_inlet, start_pump]\n\n    - from: filling/priming\n      on: NO_FLOW\n      to: fault/dry_run\n      do: [stop_pump, close_inlet, raise_alarm]\n\n    # Two timers on one state, in order. For the first settle_ms nothing can\n    # fire; between settle_ms and dry_run_ms the guarded one gets its chance\n    # each pass; if flow never appears, the unguarded one trips at dry_run_ms.\n    - from: filling/priming\n      after: settle_ms\n      guard:\n        name: flow_established\n        description: the flow sensor has been pulsing steadily\n      to: filling/pumping\n\n    - from: filling/priming\n      after: dry_run_ms\n      to: fault/dry_run\n      do: [stop_pump, close_inlet, raise_alarm]\n\n    - from: filling\n      on: LEVEL_HIGH\n      to: idle\n      do: [stop_pump, close_inlet]\n\n    # Overfill: the high float should have stopped us. If we are still filling\n    # past max_fill_ms, something is stuck.\n    #\n    # The timer is on the *composite*, so it measures the whole fill and is not\n    # restarted by moving from priming to pumping.\n    - from: filling\n      after: max_fill_ms\n      to: fault/overfill\n      do: [stop_pump, close_inlet, raise_alarm]\n\n    - from: fault\n      on: FAULT_RESET\n      to: idle\n      do: clear_alarm\n'
       }
     },
     "sensor gateway \u2014 a field bus, an uplink and degraded operation": {
       entry: "pulse.yaml",
       files: {
         "hardware.yaml": 'libraries:\n  - name: ModbusMaster\n    include: ModbusMaster.h\n    version: "^2.0"\n    source: registry\n    description: Modbus RTU over RS-485\n\nhardware:\n  buses:\n    field_bus:\n      interface: uart\n      port: 2\n      baud: 19200\n      rx: GPIO16\n      tx: GPIO17\n      library: ModbusMaster\n      description: RS-485 to the field devices\n\n    local_bus:\n      interface: i2c\n      sda: GPIO21\n      scl: GPIO22\n      frequency: 100000\n\n    uplink:\n      interface: wifi\n      ssid: plant-scada\n      hostname: gateway-01\n\n    broker:\n      interface: mqtt\n      host: mqtt.plant.local\n      port: 8883\n      tls: true\n\n  devices:\n    cabinet_temp: { type: bme280, bus: local_bus, address: 0x76, unit: degC }\n    cabinet_rh:   { type: bme280, bus: local_bus, address: 0x76, unit: percent }\n    # Field readings arrive over Modbus, so they have no pin of their own.\n    line_pressure: { type: modbus_input, class: sensor, bus: field_bus, register: 30001, unit: bar }\n    line_flow:     { type: modbus_input, class: sensor, bus: field_bus, register: 30003, unit: lpm }\n    status_led:    { type: digital_output, pin: GPIO2 }\n    fault_relay:   { type: digital_output, pin: GPIO26 }\n',
-        "machine.yaml": 'parameters:\n  poll_interval:  { type: int, default: 2000,  range: [200, 60000],  unit: ms }\n  publish_every:  { type: int, default: 5000,  range: [1000, 300000], unit: ms }\n  retry_backoff:  { type: int, default: 5000,  range: [1000, 120000], unit: ms }\n  max_retries:    { type: int, default: 5,     range: [1, 100] }\n\nevents:\n  LINK_UP:       { source: internal }\n  LINK_DOWN:     { source: internal }\n  BROKER_UP:     { source: internal }\n  BROKER_DOWN:   { source: internal }\n  POLL_DUE:      { source: timer }\n  PUBLISH_DUE:   { source: timer }\n  FIELD_TIMEOUT: { source: internal, description: A field device stopped answering }\n  RESET:         { source: mqtt, description: Remote reset from the dashboard }\n  TIMER_EXPIRED: { source: timer }\n\nactions:\n  begin_wifi:      { driver: wifi_connect }\n  begin_broker:    { driver: mqtt_connect }\n  poll_field:      { driver: modbus_poll }\n  publish_batch:   { driver: mqtt_publish }\n  buffer_batch:    { driver: ring_buffer, params: {on_full: drop_oldest} }\n  drain_buffer:    { driver: ring_buffer, params: {drain: true} }\n  show_ok:         { driver: gpio_control, params: {device: status_led, value: HIGH} }\n  show_degraded:   { driver: gpio_control, params: {device: status_led, value: TOGGLE} }\n  trip_fault:      { driver: gpio_control, params: {device: fault_relay, value: HIGH} }\n  clear_fault:     { driver: gpio_control, params: {device: fault_relay, value: LOW} }\n\nmachine:\n  states:\n    starting:\n    connecting:\n      initial: joining_wifi\n      states:\n        joining_wifi:\n        joining_broker:\n    online:\n      initial: polling\n      states:\n        polling:\n        publishing:\n    # Keep sampling with no uplink: the point of a gateway is not to lose data.\n    degraded:\n    faulted:\n\n  transitions:\n    - from: starting\n      on: TIMER_EXPIRED\n      to: connecting\n      do: begin_wifi\n\n    - from: connecting/joining_wifi\n      on: LINK_UP\n      to: connecting/joining_broker\n      do: begin_broker\n\n    - from: connecting/joining_broker\n      on: BROKER_UP\n      to: online\n      do: [show_ok, drain_buffer]\n\n    # GATE FINDING: retry_backoff wants to be a timeout on connecting. With no\n    # timeout in the model the C code owns the retry clock and raises the event.\n    - from: connecting\n      on: TIMER_EXPIRED\n      guard:\n        name: backoff_elapsed\n        description: retry_backoff has passed since the last attempt\n      to: connecting\n      do: begin_wifi\n\n    - from: online/polling\n      on: POLL_DUE\n      to: online/polling\n      do: poll_field\n\n    - from: online\n      on: PUBLISH_DUE\n      to: online/publishing\n      do: publish_batch\n\n    - from: online/publishing\n      on: POLL_DUE\n      to: online/polling\n      do: poll_field\n\n    - from: online\n      on: BROKER_DOWN\n      to: degraded\n      do: show_degraded\n\n    - from: online\n      on: LINK_DOWN\n      to: degraded\n      do: show_degraded\n\n    # Degraded still samples; readings queue until the uplink returns.\n    - from: degraded\n      on: POLL_DUE\n      to: degraded\n      do: [poll_field, buffer_batch]\n\n    - from: degraded\n      on: TIMER_EXPIRED\n      guard:\n        name: backoff_elapsed\n        description: retry_backoff has passed since the last attempt\n      to: connecting\n      do: begin_wifi\n\n    - from: "*"\n      on: FIELD_TIMEOUT\n      guard:\n        name: retries_exhausted\n        description: a field device missed max_retries consecutive polls\n      to: faulted\n      do: trip_fault\n\n    - from: "*"\n      on: RESET\n      to: starting\n      do: clear_fault\n',
+        "machine.yaml": 'parameters:\n  poll_interval:  { type: int, default: 2000,  range: [200, 60000],  unit: ms }\n  publish_every:  { type: int, default: 5000,  range: [1000, 300000], unit: ms }\n  retry_backoff:  { type: int, default: 5000,  range: [1000, 120000], unit: ms }\n  max_retries:    { type: int, default: 5,     range: [1, 100] }\n\nevents:\n  LINK_UP:       { source: internal }\n  LINK_DOWN:     { source: internal }\n  BROKER_UP:     { source: internal }\n  BROKER_DOWN:   { source: internal }\n  POLL_DUE:      { source: timer }\n  PUBLISH_DUE:   { source: timer }\n  FIELD_TIMEOUT: { source: internal, description: A field device stopped answering }\n  RESET:         { source: mqtt, description: Remote reset from the dashboard }\n\nactions:\n  begin_wifi:      { driver: wifi_connect }\n  begin_broker:    { driver: mqtt_connect }\n  poll_field:      { driver: modbus_poll }\n  publish_batch:   { driver: mqtt_publish }\n  buffer_batch:    { driver: ring_buffer, params: {on_full: drop_oldest} }\n  drain_buffer:    { driver: ring_buffer, params: {drain: true} }\n  show_ok:         { driver: gpio_control, params: {device: status_led, value: HIGH} }\n  show_degraded:   { driver: gpio_control, params: {device: status_led, value: TOGGLE} }\n  trip_fault:      { driver: gpio_control, params: {device: fault_relay, value: HIGH} }\n  clear_fault:     { driver: gpio_control, params: {device: fault_relay, value: LOW} }\n\nmachine:\n  states:\n    starting:\n    connecting:\n      initial: joining_wifi\n      states:\n        joining_wifi:\n        joining_broker:\n        # An attempt that has timed out waits here before the next one. Two\n        # states, because a timer restarts on entry and so a state cannot\n        # usefully time out into itself.\n        backoff:\n    online:\n      initial: polling\n      states:\n        polling:\n        publishing:\n    # Keep sampling with no uplink: the point of a gateway is not to lose data.\n    degraded:\n    faulted:\n\n  transitions:\n    - from: starting\n      after: 250\n      to: connecting\n      do: begin_wifi\n\n    - from: connecting/joining_wifi\n      on: LINK_UP\n      to: connecting/joining_broker\n      do: begin_broker\n\n    - from: connecting/joining_broker\n      on: BROKER_UP\n      to: online\n      do: [show_ok, drain_buffer]\n\n    # Retry loop: an attempt that has not succeeded within retry_backoff drops\n    # into backoff, which starts the next one.\n    - from: connecting/joining_wifi\n      after: retry_backoff\n      to: connecting/backoff\n\n    - from: connecting/joining_broker\n      after: retry_backoff\n      to: connecting/backoff\n\n    - from: connecting/backoff\n      after: 250\n      to: connecting/joining_wifi\n      do: begin_wifi\n\n    - from: online/polling\n      on: POLL_DUE\n      to: online/polling\n      do: poll_field\n\n    - from: online\n      on: PUBLISH_DUE\n      to: online/publishing\n      do: publish_batch\n\n    - from: online/publishing\n      on: POLL_DUE\n      to: online/polling\n      do: poll_field\n\n    - from: online\n      on: BROKER_DOWN\n      to: degraded\n      do: show_degraded\n\n    - from: online\n      on: LINK_DOWN\n      to: degraded\n      do: show_degraded\n\n    # Degraded still samples; readings queue until the uplink returns.\n    - from: degraded\n      on: POLL_DUE\n      to: degraded\n      do: [poll_field, buffer_batch]\n\n    - from: degraded\n      after: retry_backoff\n      to: connecting\n      do: begin_wifi\n\n    - from: "*"\n      on: FIELD_TIMEOUT\n      guard:\n        name: retries_exhausted\n        description: a field device missed max_retries consecutive polls\n      to: faulted\n      do: trip_fault\n\n    - from: "*"\n      on: RESET\n      to: starting\n      do: clear_fault\n',
         "pulse.yaml": '# Industrial sensor gateway: read a field bus, publish upstream.\n#\n# Multi-file, because unlike the other three this one has enough hardware and\n# enough behaviour that one file would be hard to review.\n\nproject:\n  name: sensor_gateway\n  version: "1.0"\n  description: Reads field sensors and republishes them to a dashboard\n\ntarget:\n  board: esp32\n\nimports:\n  - hardware.yaml\n  - machine.yaml\n'
       }
     }
@@ -5633,6 +5997,7 @@ ${implementations.join("\n\n")}`;
     return el;
   };
   var source = $("source");
+  var highlightLayer = $("highlight");
   var status = $("status");
   var fileBar = $("file-bar");
   var panes = {
@@ -5688,7 +6053,32 @@ ${implementations.join("\n\n")}`;
   function persist() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
   }
-  function escapeHtml(text) {
+  var HIGHLIGHT_LIMIT = 2e5;
+  var highlightingOn = true;
+  function paint() {
+    const text = source.value;
+    if (text.length > HIGHLIGHT_LIMIT) {
+      if (highlightingOn) {
+        highlightingOn = false;
+        source.style.color = "var(--text)";
+        highlightLayer.hidden = true;
+      }
+      return;
+    }
+    if (!highlightingOn) {
+      highlightingOn = true;
+      source.style.color = "";
+      highlightLayer.hidden = false;
+    }
+    highlightLayer.innerHTML = `<code>${highlight(text)}
+</code>`;
+    syncScroll();
+  }
+  function syncScroll() {
+    highlightLayer.scrollTop = source.scrollTop;
+    highlightLayer.scrollLeft = source.scrollLeft;
+  }
+  function escapeHtml2(text) {
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
   function setStale(stale) {
@@ -5698,7 +6088,7 @@ ${implementations.join("\n\n")}`;
   }
   function setStatus(kind, title, detail = "") {
     status.className = `status ${kind}`;
-    status.innerHTML = `<strong>${escapeHtml(title)}</strong>${detail ? `<span>${escapeHtml(detail)}</span>` : ""}`;
+    status.innerHTML = `<strong>${escapeHtml2(title)}</strong>${detail ? `<span>${escapeHtml2(detail)}</span>` : ""}`;
   }
   function renderFileBar() {
     const names = fileNames();
@@ -5706,9 +6096,9 @@ ${implementations.join("\n\n")}`;
       const isEntry = name === workspace.entry;
       const isActive = name === workspace.active;
       const badge = isEntry ? '<span class="entry-badge" title="entry file">\u25B6</span>' : "";
-      const close = !isEntry ? `<span class="close" data-close="${escapeHtml(name)}" title="Delete ${escapeHtml(name)}">\xD7</span>` : "";
-      return `<button class="filetab${isActive ? " active" : ""}" data-file="${escapeHtml(name)}"
-      title="${escapeHtml(name)} (double-click to rename)">${badge}${escapeHtml(name)}${close}</button>`;
+      const close = !isEntry ? `<span class="close" data-close="${escapeHtml2(name)}" title="Delete ${escapeHtml2(name)}">\xD7</span>` : "";
+      return `<button class="filetab${isActive ? " active" : ""}" data-file="${escapeHtml2(name)}"
+      title="${escapeHtml2(name)} (double-click to rename)">${badge}${escapeHtml2(name)}${close}</button>`;
     }).join("");
     for (const tab of fileBar.querySelectorAll(".filetab")) {
       const name = tab.dataset.file;
@@ -5732,22 +6122,23 @@ ${implementations.join("\n\n")}`;
       const targetPath = resolvePath(states, t.target);
       const leaf = targetPath ? resolveEntryLeaf(states, targetPath) : null;
       const descends = leaf && targetPath && leaf !== targetPath;
-      const target = descends ? `${escapeHtml(t.target)} <span class="arrow">\u21B3</span> <code>${escapeHtml(leaf)}</code>` : escapeHtml(t.target);
-      const guard = t.guard ? `<code>${escapeHtml(t.guard.name)}</code>` : '<span class="dim">\u2014</span>';
-      const actions = t.actions?.length ? t.actions.map((a) => `<code>${escapeHtml(a.name)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
-      const src = t.source === "*" ? '<span class="tag wild">any state</span>' : `<code>${escapeHtml(t.source)}</code>`;
+      const target = descends ? `${escapeHtml2(t.target)} <span class="arrow">\u21B3</span> <code>${escapeHtml2(leaf)}</code>` : escapeHtml2(t.target);
+      const guard = t.guard ? `<code>${escapeHtml2(t.guard.name)}</code>` : '<span class="dim">\u2014</span>';
+      const actions = t.actions?.length ? t.actions.map((a) => `<code>${escapeHtml2(a.name)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
+      const src = t.source === "*" ? '<span class="tag wild">any state</span>' : `<code>${escapeHtml2(t.source)}</code>`;
+      const trigger = t.event !== void 0 ? `<code>${escapeHtml2(t.event)}</code>` : `<span class="tag timer">after</span> <code>${escapeHtml2(String(t.after))}</code>`;
       return `<tr>
       <td>${src}</td>
-      <td><code>${escapeHtml(t.event)}</code></td>
+      <td>${trigger}</td>
       <td>${target}</td>
       <td>${guard}</td>
       <td>${actions}</td>
     </tr>`;
     }).join("");
     const resources = (project.system.resources || []).map((r) => `<tr>
-      <td><code>${escapeHtml(r.name)}</code></td>
-      <td><span class="tag">${escapeHtml(String(r.interface))}</span></td>
-      <td>${Object.entries(r.binding || {}).map(([k, v]) => `<code>${escapeHtml(k)}=${escapeHtml(String(v))}</code>`).join(" ") || '<span class="dim">\u2014</span>'}</td>
+      <td><code>${escapeHtml2(r.name)}</code></td>
+      <td><span class="tag">${escapeHtml2(String(r.interface))}</span></td>
+      <td>${Object.entries(r.binding || {}).map(([k, v]) => `<code>${escapeHtml2(k)}=${escapeHtml2(String(v))}</code>`).join(" ") || '<span class="dim">\u2014</span>'}</td>
     </tr>`).join("");
     return `
     <h3>State hierarchy</h3>
@@ -5759,7 +6150,7 @@ ${implementations.join("\n\n")}`;
     <p class="hint">A transition on an enclosing state also applies to its
     children, and an inner transition on the same event wins.</p>
     <table>
-      <thead><tr><th>From</th><th>On</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
+      <thead><tr><th>From</th><th>Trigger</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="dim">No transitions defined.</td></tr>'}</tbody>
     </table>
 
@@ -5772,7 +6163,7 @@ ${implementations.join("\n\n")}`;
   function renderStateNode(path, flat) {
     const node = flat.find((s) => s.path === path);
     const children = flat.filter((s) => s.parentPath === path);
-    const label = escapeHtml(node.state.name);
+    const label = escapeHtml2(node.state.name);
     const isInitial = flat.some((s) => s.initialChildPath === path);
     const marker = isInitial ? '<span class="initial" title="initial child">\u25B8</span>' : "";
     if (node.isLeaf) {
@@ -5811,9 +6202,9 @@ ${implementations.join("\n\n")}`;
       return;
     }
     setStale(false);
-    panes.sketch.innerHTML = `<pre><code>${escapeHtml(sketch)}</code></pre>`;
-    panes.topics.innerHTML = `<pre><code>${escapeHtml(topics)}</code></pre>`;
-    panes.libraries.innerHTML = `<pre><code>${escapeHtml(libraries)}</code></pre>`;
+    panes.sketch.innerHTML = `<pre><code>${escapeHtml2(sketch)}</code></pre>`;
+    panes.topics.innerHTML = `<pre><code>${escapeHtml2(topics)}</code></pre>`;
+    panes.libraries.innerHTML = `<pre><code>${escapeHtml2(libraries)}</code></pre>`;
     panes.structure.innerHTML = renderStructure(project);
     const fileCount = Object.keys(workspace.files).length;
     const counts = [
@@ -5836,6 +6227,7 @@ ${parser.warnings.join("\n")}`);
       return;
     workspace.active = name;
     source.value = workspace.files[name];
+    paint();
     renderFileBar();
     persist();
   }
@@ -5936,11 +6328,14 @@ system:
     restore();
     source.value = workspace.files[workspace.active] ?? "";
     renderFileBar();
+    paint();
     const rerender = debounce(render, 150);
     source.addEventListener("input", () => {
       workspace.files[workspace.active] = source.value;
+      paint();
       rerender();
     });
+    source.addEventListener("scroll", syncScroll, { passive: true });
     namespaceInput.addEventListener("input", rerender);
     exampleSelect.addEventListener("change", () => {
       const example = EXAMPLES[exampleSelect.value];
@@ -5954,6 +6349,7 @@ system:
       loadExample(exampleSelect.value);
       source.value = workspace.files[workspace.active];
       renderFileBar();
+      paint();
       render();
     });
     for (const button of document.querySelectorAll(".tab")) {
@@ -5984,6 +6380,7 @@ system:
       source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
       source.selectionStart = source.selectionEnd = selectionStart + 2;
       workspace.files[workspace.active] = source.value;
+      paint();
       rerender();
     });
     selectTab(localStorage.getItem("pulseir.tab") || "sketch");

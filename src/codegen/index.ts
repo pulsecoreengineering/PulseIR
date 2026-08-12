@@ -105,8 +105,10 @@ export class Codegen {
   private guardStubs: Map<string, GuardBinding> = new Map();
   /** every distinct action name referenced by a transition */
   private actionNames: Set<string> = new Set();
-  /** state index → transitions leaving that state, in model order */
+  /** state index → event-driven transitions leaving it, in model order */
   private transitionsBySource: Map<number, number[]> = new Map();
+  /** state index → timed ("after") transitions leaving it, in model order */
+  private timedBySource: Map<number, number[]> = new Map();
 
   private readonly interfaces = new InterfaceBackend();
   /** resource name → what its interface contributes to the sketch */
@@ -138,6 +140,7 @@ export class Codegen {
       this.generateGuardDeclarations(),
       this.generateActionDeclarations(),
       this.generateEventHandlers(),
+      this.generateTimeouts(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
       this.generateGuardImplementations(),
@@ -224,6 +227,7 @@ void setupInterfaces();${this.declInterfaceGlobals()}`,
       this.machineGlobals(false).replace(/^\/\/ =+\n\/\/ STATE MACHINE\n\/\/ =+\n\n/m, ''),
       this.defInterfaces().trimStart(),
       this.generateEventHandlers(),
+      this.generateTimeouts(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
     ].join('\n\n') + '\n';
@@ -272,6 +276,7 @@ ${this.generateActionImplementations()}
     this.guardStubs = new Map();
     this.actionNames = new Set();
     this.transitionsBySource = new Map();
+    this.timedBySource = new Map();
     this.emissions = new Map();
     this.libraries = new Map();
   }
@@ -854,7 +859,7 @@ ${handlers.join('\n\n')}`;
     // Group this state's transitions by event, preserving model order.
     const byEvent = new Map<string, number[]>();
     for (const idx of owned) {
-      const event = transitions[idx].event;
+      const event = transitions[idx].event!;
       const list = byEvent.get(event) || [];
       list.push(idx);
       byEvent.set(event, list);
@@ -967,12 +972,16 @@ ${cases.join('\n')}
           : 'nullptr';
         const parent = flat.parent === -1 ? '-1' : this.states[flat.parent].symbol;
 
+        const timed = this.timedBySource.get(flat.index)?.length
+          ? this.timerNames(flat)
+          : null;
+
         return `  ${flat.symbol} = fsm.addState(
       "${flat.path}",
-      nullptr,   // update
-      nullptr,   // entry
+      ${timed ? `${timed.tick},   // update - checks the "after" timers` : 'nullptr,   // update'}
+      ${timed ? `${timed.mark},  // entry - starts the "after" clock` : 'nullptr,   // entry'}
       nullptr,   // exit
-      0,         // timeoutMs
+      0,         // timeoutMs - unused; see generateTimeouts()
       -1,        // timeoutNext
       ${handler},  // onEvent
       ${parent});`;
@@ -1015,6 +1024,113 @@ ${this.registrationCheck()}
   Serial.print("Initial state: ");
   Serial.println(fsm.getCurrentName());
 }`;
+  }
+
+  /** The two C names a state with timed transitions needs. */
+  private timerNames(flat: FlatState): { since: string; mark: string; tick: string } {
+    const base = this.sanitize(flat.path);
+    return { since: `enteredAt_${base}`, mark: `enter_${base}`, tick: `tick_${base}` };
+  }
+
+  /**
+   * `after:` on a transition - it fires when a duration elapses instead of when
+   * an event arrives. Everything else about it is a normal transition: guards,
+   * `do:`, ordering and fall-through all behave identically.
+   *
+   * PulseHSM has timeoutMs/timeoutNext on addState(), and this deliberately
+   * does not use them, for four reasons:
+   *
+   *  1. timeoutNext is a state index needed *at registration time*, and states
+   *     register parents-first in declaration order. Any cycle - go leads to
+   *     prepare_stop leads to stop leads back to go - refers forward to a state
+   *     whose index is still -1.
+   *  2. The runtime only checks the timeout of `currentState`, which is always
+   *     a leaf, so a timeout on a composite would never fire. "Filling must not
+   *     run past max_fill_ms, whichever phase it is in" needs the composite.
+   *  3. One timeout per state cannot carry a guard, actions, or a second
+   *     candidate - and the traffic light needs all three on `stop`.
+   *  4. timeoutMs is captured once. Reading the parameter every tick means
+   *     retuning green_ms at runtime takes effect immediately, instead of
+   *     silently keeping whatever the value was at boot.
+   *
+   * The entry callback stamps the clock and the update callback checks it -
+   * both slots the generator owns. Entry only fires when the state is really
+   * entered, so moving between two children does not restart their parent's
+   * clock, which is exactly the semantics a composite timeout needs.
+   */
+  private generateTimeouts(): string {
+    if (this.timedBySource.size === 0) return '';
+
+    const transitions = this.project.system.transitions;
+    const blocks: string[] = [];
+
+    for (const flat of this.states) {
+      const owned = this.timedBySource.get(flat.index);
+      if (!owned || owned.length === 0) continue;
+
+      const { since, mark, tick } = this.timerNames(flat);
+      const body: string[] = [];
+
+      // Unlike an event handler, an earlier unguarded candidate does NOT
+      // shadow the ones after it: they are reached at different elapsed times.
+      // "after 8s, trip" listed before "after 2s, proceed" still lets the
+      // shorter one fire, because at 2s the longer test is simply false.
+      for (const idx of owned) {
+        const t = transitions[idx];
+        const guard = this.guards.get(idx);
+        const target = this.states[this.resolveEntry(this.resolveRef(t.target, 'target'))];
+        const duration = typeof t.after === 'string'
+          ? `(unsigned long)systemParameters.${this.sanitize(t.after)}`
+          : `${t.after}UL`;
+        const source = typeof t.after === 'string' ? `${t.after} (parameter)` : `${t.after} ms`;
+
+        const calls = (t.actions || [])
+          .map(a => `    action_${this.sanitize(a.name)}(&systemContext);`)
+          .join('\n');
+
+        const fire = [
+          calls,
+          `    fsm.transitionTo(${target.symbol});`,
+          '    return;',
+        ].filter(Boolean).join('\n');
+
+        // Guards see the live machine, same as in an event handler.
+        const condition = guard
+          ? `elapsed >= ${duration} && ${guard.fnName}(&systemContext)`
+          : `elapsed >= ${duration}`;
+
+        body.push(`  // after ${source} -> ${t.target}${guard ? ', if the guard allows' : ''}
+  if (${condition}) {
+${fire}
+  }`);
+      }
+
+      blocks.push(`// Timers for "${flat.path}".
+static unsigned long ${since} = 0;
+
+static void ${mark}() {
+  ${since} = millis();
+}
+
+static void ${tick}() {
+  syncContext();
+  const unsigned long elapsed = millis() - ${since};
+
+${body.join('\n\n')}
+}`);
+    }
+
+    return `// ============================================================================
+// TIMED TRANSITIONS
+// ============================================================================
+//
+// Generated from "after:" in the model. Ancestors tick before their active
+// child, so when both a state and its parent time out on the same pass the
+// inner one wins - the same precedence event handling already has.
+//
+// Subtraction on unsigned long is correct across the millis() rollover.
+
+${blocks.join('\n\n')}`;
   }
 
   /**
@@ -1313,9 +1429,12 @@ ${implementations.join('\n\n')}`;
       // Validate the target eagerly so errors point at the model, not at C++.
       this.resolveEntry(this.resolveRef(t.target, 'target'));
 
-      const list = this.transitionsBySource.get(sourceIdx) || [];
+      // Timed transitions never reach an onEvent handler - no event arrives -
+      // so they are collected separately and become the state's update tick.
+      const bucket = t.after !== undefined ? this.timedBySource : this.transitionsBySource;
+      const list = bucket.get(sourceIdx) || [];
       list.push(idx);
-      this.transitionsBySource.set(sourceIdx, list);
+      bucket.set(sourceIdx, list);
     });
   }
 

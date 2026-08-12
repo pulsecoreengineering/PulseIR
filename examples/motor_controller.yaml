@@ -35,7 +35,6 @@ events:
   OVERCURRENT: { source: sensor }
   ESTOP:       { source: external }
   RESET:       { source: external }
-  TIMER_EXPIRED: { source: timer }
 
 actions:
   engage_forward: { driver: gpio_control, params: {device: dir_forward, value: HIGH} }
@@ -57,6 +56,12 @@ machine:
         cruising:
         decelerating:
     tripped:
+      initial: locked
+      states:
+        # The restart delay is a state you have to sit through, not a clock the
+        # C code keeps. RESET is simply not wired up until the delay is over.
+        locked:
+        resettable:
 
   transitions:
     - from: stopped
@@ -99,13 +104,11 @@ machine:
       to: tripped
       do: [release_drive, latch_fault]
 
-    # GATE FINDING: this should be "wait restart_delay, then allow reset".
-    # With no timeout in the model, restart_delay is a parameter the C code
-    # has to enforce inside the guard.
-    - from: tripped
+    - from: tripped/locked
+      after: restart_delay
+      to: tripped/resettable
+
+    - from: tripped/resettable
       on: RESET
-      guard:
-        name: restart_delay_elapsed
-        description: restart_delay has passed since the trip
       to: stopped
       do: clear_fault

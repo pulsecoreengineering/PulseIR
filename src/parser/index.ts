@@ -442,6 +442,7 @@ export class Parser {
 
     this.assertLibraryRefs(resources, libraries);
     this.assertBusRefs(components, resources);
+    this.assertTimedTransitions(transitions, parameters || []);
 
     // Buses and devices generate macros from the same name, so a collision
     // between the two would silently produce one set of defines.
@@ -566,6 +567,7 @@ export class Parser {
     });
   }
 
+
   /** Catalogue of named actions, so a transition's `do:` can carry params. */
   private parseActionCatalogue(raw: unknown): Map<string, Action> {
     const catalogue = new Map<string, Action>();
@@ -588,16 +590,36 @@ export class Parser {
 
     return list.map((entry, index) => {
       const from = entry.from as StateRef;
-      const on = entry.on as string;
+      const on = entry.on as string | undefined;
       const to = entry.to as StateRef;
+      const after = this.parseAfter(entry.after, index);
 
-      for (const [key, value] of [['from', from], ['on', on], ['to', to]] as const) {
+      // A transition fires on an event or after a duration - never both, and
+      // never neither, or there is nothing to make it happen.
+      if (on !== undefined && after !== undefined) {
+        throw new ParseError(
+          `Transition ${index + 1} has both "on" and "after". A transition fires ` +
+          'either when an event arrives or when a duration elapses, not both.'
+        );
+      }
+      if (on === undefined && after === undefined) {
+        throw new ParseError(
+          `Transition ${index + 1} has neither "on" nor "after", so nothing would ` +
+          'ever make it fire. Use "on: SOME_EVENT" or "after: 5000".'
+        );
+      }
+
+      const trigger: Array<readonly [string, unknown]> = on !== undefined
+        ? [['from', from], ['on', on], ['to', to]]
+        : [['from', from], ['to', to]];
+
+      for (const [key, value] of trigger) {
         if (typeof value !== 'string' || !value.trim()) {
           throw new ParseError(`Transition ${index + 1} is missing "${key}"`);
         }
       }
 
-      if (on !== '*' && !this.eventNames.has(on)) {
+      if (on !== undefined && on !== '*' && !this.eventNames.has(on)) {
         throw new ParseError(`Transition ${index + 1} reacts to unknown event "${on}"`);
       }
       if (from !== '*' && !this.hasState(from)) {
@@ -610,10 +632,32 @@ export class Parser {
         throw new ParseError(`Transition "to" state "${to}" ${this.describeBadRef(to)}`);
       }
 
+      // A timed transition needs a state to have been entered before its clock
+      // means anything, and "*" is every state at once.
+      if (after !== undefined && from === '*') {
+        throw new ParseError(
+          `Transition ${index + 1} uses "after" from "*". A duration is measured from ` +
+          'entering one state, so a timed transition needs a real "from".'
+        );
+      }
+      // A timer is stamped on *entry*, and a self-transition never leaves the
+      // state, so the clock would not restart and the transition would fire on
+      // every pass from then on - a busy loop, not a repeat. Rejected rather
+      // than quietly misbehaving; a genuine repeat needs two states.
+      if (after !== undefined && from === to) {
+        throw new ParseError(
+          `Transition ${index + 1} uses "after" to re-enter "${to}". A timer starts when ` +
+          'a state is entered, and this never leaves it, so the timer would not restart ' +
+          'and the transition would fire on every pass.\n' +
+          'For a repeating cycle, alternate between two states.'
+        );
+      }
+
       return {
         source: from,
         target: to,
         event: on,
+        after,
         guard: entry.guard !== undefined && entry.guard !== null
           ? this.parseGuard(entry.guard)
           : undefined,
@@ -621,6 +665,34 @@ export class Parser {
         description: entry.description as string | undefined,
       };
     });
+  }
+
+  /**
+   * `after: 5000` or `after: green_ms`.
+   *
+   * Naming a parameter keeps the duration tunable at runtime; the generated
+   * code reads it every tick rather than capturing it at boot. The parameter
+   * itself is checked once they have all been parsed.
+   */
+  private parseAfter(raw: unknown, index: number): number | string | undefined {
+    if (raw === undefined || raw === null) return undefined;
+
+    if (typeof raw === 'number') {
+      if (!Number.isInteger(raw) || raw <= 0) {
+        throw new ParseError(
+          `Transition ${index + 1} has after: ${raw}. It must be a positive whole ` +
+          'number of milliseconds, or the name of an int parameter.'
+        );
+      }
+      return raw;
+    }
+
+    if (typeof raw === 'string' && raw.trim()) return raw.trim();
+
+    throw new ParseError(
+      `Transition ${index + 1} has an "after" of type ${typeof raw}. Use a number of ` +
+      'milliseconds, or the name of an int parameter.'
+    );
   }
 
   /**
@@ -1104,6 +1176,39 @@ export class Parser {
         state.regions.forEach(region => {
           this.indexStateNames(region.states, path);
         });
+      }
+    });
+  }
+
+  /**
+   * Check every `after:` that names a parameter, once they have all been read.
+   *
+   * It has to name a real parameter of an integer type, or the generated code
+   * would not compile - and it would fail inside generated code the student
+   * did not write, which is the worst possible place to find out.
+   */
+  private assertTimedTransitions(transitions: Transition[], parameters: Parameter[]): void {
+    const byName = new Map(parameters.map(p => [p.name, p]));
+
+    transitions.forEach((transition, index) => {
+      if (typeof transition.after !== 'string') return;
+
+      const where = `Transition ${index + 1} (${transition.source} → ${transition.target})`;
+      const parameter = byName.get(transition.after);
+
+      if (!parameter) {
+        const known = [...byName.keys()];
+        throw new ParseError(
+          `${where} waits for "${transition.after}", which is not a declared parameter. ` +
+          (known.length ? `Known parameters: ${known.join(', ')}.` : 'No parameters are declared.') +
+          ' Use a number of milliseconds, or declare it under "parameters".'
+        );
+      }
+      if (parameter.type !== 'int') {
+        throw new ParseError(
+          `${where} waits for "${transition.after}", which is declared as ` +
+          `${parameter.type}. A duration in milliseconds must be an int.`
+        );
       }
     });
   }

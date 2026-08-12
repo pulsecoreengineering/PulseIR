@@ -1,0 +1,55 @@
+# Fixture for timed transitions.
+#
+# Shaped to pin down the two things that are easy to get wrong:
+#
+#   1. A timer on a composite measures time in the *composite*. Moving between
+#      its children must not restart it.
+#   2. A duration that names a parameter is read every pass, so retuning it at
+#      runtime takes effect immediately instead of at the next reboot.
+
+project:
+  name: timers
+  version: "1.0"
+
+target:
+  board: esp32
+
+parameters:
+  hold_ms: { type: int, default: 1000, range: [1, 60000], unit: ms }
+
+events:
+  BEGIN: { source: external }
+  SWAP:  { source: external }
+
+machine:
+  states:
+    idle:
+    work:
+      initial: first
+      states:
+        first:
+        second:
+    done:
+    quick:
+
+  transitions:
+    - from: idle
+      on: BEGIN
+      to: work
+
+    # An ordinary event moves between the children, so a test controls exactly
+    # when it happens without depending on a guard stub.
+    - from: work/first
+      on: SWAP
+      to: work/second
+
+    # On the composite: the clock starts when "work" is entered and keeps
+    # running across the swap above.
+    - from: work
+      after: hold_ms
+      to: done
+
+    # A literal duration on a leaf, for the plain case.
+    - from: done
+      after: 250
+      to: quick

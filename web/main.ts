@@ -19,6 +19,7 @@ import { Codegen } from '../src/codegen/index.js';
 import { TopicEmitter } from '../src/emit/topics.js';
 import { LibraryEmitter } from '../src/emit/libraries.js';
 import { flattenStates, resolveEntryLeaf, resolvePath } from '../src/analysis/states.js';
+import { highlight } from './highlight.js';
 import type { PulseProject } from '../src/model/index.js';
 import { EXAMPLES } from './examples.js';
 
@@ -33,6 +34,7 @@ const $ = <T extends HTMLElement>(id: string): T => {
 };
 
 const source = $<HTMLTextAreaElement>('source');
+const highlightLayer = $<HTMLPreElement>('highlight');
 const status = $<HTMLDivElement>('status');
 const fileBar = $<HTMLDivElement>('file-bar');
 const panes = {
@@ -113,6 +115,59 @@ function restore(): void {
 
 function persist(): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
+}
+
+// ---------------------------------------------------------------------------
+// Syntax highlighting
+// ---------------------------------------------------------------------------
+
+/**
+ * Above this many characters, stop colouring and show the plain text instead.
+ *
+ * Re-highlighting on every keystroke is fine for a model - the largest here is
+ * a few kilobytes - but a pasted-in monster should degrade to a working editor
+ * rather than a laggy one.
+ */
+const HIGHLIGHT_LIMIT = 200_000;
+
+let highlightingOn = true;
+
+/**
+ * Redraw the colour layer under the textarea.
+ *
+ * Not debounced: the text you see *is* this layer, so any delay would show the
+ * caret moving over stale characters. It is a linear pass over a few kilobytes,
+ * which is far cheaper than the parse and codegen that follow it.
+ */
+function paint(): void {
+  const text = source.value;
+
+  if (text.length > HIGHLIGHT_LIMIT) {
+    if (highlightingOn) {
+      highlightingOn = false;
+      // Hand the text back to the textarea, or the editor would look empty.
+      source.style.color = 'var(--text)';
+      highlightLayer.hidden = true;
+    }
+    return;
+  }
+
+  if (!highlightingOn) {
+    highlightingOn = true;
+    source.style.color = '';
+    highlightLayer.hidden = false;
+  }
+
+  // A trailing newline needs a line to sit on, or the last line of a
+  // scrolled-to-the-bottom document has nothing beneath the caret.
+  highlightLayer.innerHTML = `<code>${highlight(text)}\n</code>`;
+  syncScroll();
+}
+
+/** Keep the colour layer under the same part of the document as the caret. */
+function syncScroll(): void {
+  highlightLayer.scrollTop = source.scrollTop;
+  highlightLayer.scrollLeft = source.scrollLeft;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,9 +263,15 @@ function renderStructure(project: PulseProject): string {
       ? '<span class="tag wild">any state</span>'
       : `<code>${escapeHtml(t.source)}</code>`;
 
+    // A timed transition has no event; show what it waits for instead, so the
+    // table stays a complete picture of what makes the machine move.
+    const trigger = t.event !== undefined
+      ? `<code>${escapeHtml(t.event)}</code>`
+      : `<span class="tag timer">after</span> <code>${escapeHtml(String(t.after))}</code>`;
+
     return `<tr>
       <td>${src}</td>
-      <td><code>${escapeHtml(t.event)}</code></td>
+      <td>${trigger}</td>
       <td>${target}</td>
       <td>${guard}</td>
       <td>${actions}</td>
@@ -235,7 +296,7 @@ function renderStructure(project: PulseProject): string {
     <p class="hint">A transition on an enclosing state also applies to its
     children, and an inner transition on the same event wins.</p>
     <table>
-      <thead><tr><th>From</th><th>On</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
+      <thead><tr><th>From</th><th>Trigger</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="dim">No transitions defined.</td></tr>'}</tbody>
     </table>
 
@@ -331,6 +392,7 @@ function selectFile(name: string): void {
   if (workspace.files[name] === undefined) return;
   workspace.active = name;
   source.value = workspace.files[name];
+  paint();
   renderFileBar();
   persist();
 }
@@ -439,13 +501,17 @@ function init(): void {
   restore();
   source.value = workspace.files[workspace.active] ?? '';
   renderFileBar();
+  paint();
 
   const rerender = debounce(render, 150);
 
   source.addEventListener('input', () => {
     workspace.files[workspace.active] = source.value;
+    paint();
     rerender();
   });
+
+  source.addEventListener('scroll', syncScroll, { passive: true });
   namespaceInput.addEventListener('input', rerender);
 
   exampleSelect.addEventListener('change', () => {
@@ -465,6 +531,7 @@ function init(): void {
     loadExample(exampleSelect.value);
     source.value = workspace.files[workspace.active];
     renderFileBar();
+    paint();
     render();
   });
 
@@ -496,6 +563,7 @@ function init(): void {
     source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
     source.selectionStart = source.selectionEnd = selectionStart + 2;
     workspace.files[workspace.active] = source.value;
+    paint();
     rerender();
   });
 

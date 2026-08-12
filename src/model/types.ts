@@ -158,11 +158,11 @@ export interface State {
   name: string;
   type: StateType;
   description?: string;
-  
+
   // For COMPOSITE states
   initial?: StateRef;         // Initial child state
   regions?: Region[];         // For COMPOSITE/ORTHOGONAL
-  
+
   metadata?: Metadata;
 }
 
@@ -182,7 +182,20 @@ export interface Region {
 export interface Transition {
   source: StateRef;
   target: StateRef;
-  event: EventRef;
+  /** What triggers it. Absent only on a timed transition, which has `after`. */
+  event?: EventRef;
+  /**
+   * Fire this long after entering `source`, with no event at all.
+   *
+   * Milliseconds: a literal, or the name of an int parameter. Exactly one of
+   * `event` and `after` is set.
+   *
+   * A duration is data, not logic, so it belongs in the model. Without it the
+   * only way to say "green lasts twenty seconds" is to declare a TIMER_EXPIRED
+   * event and hand-write the clock in C - pushing declarative content into the
+   * escape hatch, which is the wrong direction (PLAN.md §0).
+   */
+  after?: number | string;
   guard?: Guard;
   actions?: Action[];
   description?: string;
