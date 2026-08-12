@@ -948,10 +948,75 @@ int main() {
 
   const output = buildAndRunPlain('blink', sketch, driver);
   const runs = output.split('\n').filter(line => line.includes('Action: toggle_led')).length;
-  assert(runs === 3, `expected 3 toggles (2 before the retune, 1 after), got ${runs}\n${output}`);
+
+  // Three before the retune, one after. The deadline advances by whole
+  // intervals, so a loop that arrives 499ms at a time still keeps up with a
+  // 500ms period instead of slipping a beat every other cycle.
+  assert(runs === 4, `expected 4 toggles (3 before the retune, 1 after), got ${runs}\n${output}`);
   assert(
     output.indexOf('-- retuned') < output.lastIndexOf('Action: toggle_led'),
     'the retuned interval never fired'
+  );
+});
+
+test('a task keeps its average rate, and does not burst after a stall', () => {
+  // The first version restarted the deadline from millis() on every run, so
+  // each period picked up however long the loop took to come round, and the
+  // error accumulated. Advancing the deadline by whole intervals instead keeps
+  // the average exact.
+  const sketch = generate(path.join(repoRoot, 'examples/blink.yaml'));
+
+  // Stamp each run, so the output carries the timing rather than a count.
+  const instrumented = sketch.replace(
+    'void action_toggle_led(SystemContext* ctx) {',
+    'void action_toggle_led(SystemContext* ctx) {\n  Serial.print("AT "); Serial.println(millis());'
+  );
+  assert(instrumented !== sketch, 'could not instrument the action stub');
+
+  const driver = `
+int main() {
+  setup();
+
+  // A real loop does not come round on a tidy boundary. Stepping by 7ms means
+  // every 100ms deadline is missed by a few milliseconds.
+  for (int i = 0; i < 3000; i++) { pulseTestAdvance(7); loop(); }
+
+  Serial.println("STALL");
+  // A long blocking call, or a Wi-Fi reconnect: 50 periods go by at once.
+  pulseTestAdvance(5000);
+  for (int i = 0; i < 3; i++) { loop(); pulseTestAdvance(1); }
+  return 0;
+}`;
+
+  const output = buildAndRunPlain('blink_drift', instrumented, driver);
+  const [before, after] = output.split('STALL');
+  const stamps = (text: string) =>
+    [...text.matchAll(/AT (\d+)/g)].map(m => Number(m[1]));
+
+  const runs = stamps(before);
+  // 3000 x 7ms is 21000ms of virtual time, and blink_ms defaults to 500.
+  assert(runs.length >= 40 && runs.length <= 43, `expected ~42 runs over 21s at 500ms, got ${runs.length}`);
+
+  // The measure that matters. Restarting the deadline each time absorbed the
+  // few milliseconds the loop overshot by into every period, so the average
+  // crept above 500 and kept climbing.
+  const average = (runs[runs.length - 1] - runs[0]) / (runs.length - 1);
+  assert(
+    Math.abs(average - 500) < 0.5,
+    `average period drifted to ${average.toFixed(2)}ms; it should hold at 500ms`
+  );
+
+  // Individual periods still jitter by the loop step, but no further.
+  const gaps = runs.slice(1).map((t, i) => t - runs[i]);
+  assert(
+    Math.max(...gaps) <= 507 && Math.min(...gaps) >= 493,
+    `periods ranged ${Math.min(...gaps)}..${Math.max(...gaps)}ms; the loop only steps by 7`
+  );
+
+  // And a stall resyncs rather than firing once per missed period.
+  assert(
+    stamps(after).length === 1,
+    `a 5s stall should give one catch-up run, not one per missed period (got ${stamps(after).length})`
   );
 });
 

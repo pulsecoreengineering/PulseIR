@@ -5301,13 +5301,22 @@ ${banner}
         const calls = task.actions.map((a) => `  action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
         return `// Task "${task.name}" - ${source2}.${task.description ? `
 // ${task.description}` : ""}
-static unsigned long lastRun_${base} = 0;
+static unsigned long dueAt_${base} = 0;
 
 static void runTask_${base}() {
-  if (millis() - lastRun_${base} < ${interval}) return;
-  // Anchor to now rather than to the deadline: a late run must not queue up
-  // catch-up runs, which on a busy loop turns a blink into a stutter.
-  lastRun_${base} = millis();
+  const unsigned long interval = ${interval};
+  const unsigned long now = millis();
+  if (now - dueAt_${base} < interval) return;
+
+  // Advance the deadline by whole intervals rather than restarting from now.
+  // Restarting adds however long the loop took to come round to every period,
+  // and that error accumulates: a 100ms blink slowly becomes a 103ms blink.
+  dueAt_${base} += interval;
+
+  // Unless we are already a full interval behind - a long blocking call, or
+  // the interval was just shortened - in which case give up on catching up
+  // and resync, rather than firing repeatedly in a burst.
+  if (now - dueAt_${base} >= interval) dueAt_${base} = now;
 
 ${calls}
 }`;
@@ -6642,7 +6651,7 @@ ${implementations.join("\n\n")}`;
     "blink \u2014 no state machine at all, just a task": {
       entry: "blink.yaml",
       files: {
-        "blink.yaml": '# The smallest useful thing a board can do, with no state machine at all.\n#\n# PulseHSM is one tenant of this IR, not its foundation. A blink is scheduling,\n# not behaviour worth a state chart, so it is a `task:` - and the generated\n# sketch contains no PulseHSM, no fsm, and no event enum. It is plain Arduino.\n#\n# What the model still buys you: the pin is named, its pinMode is generated,\n# the interval is a declared parameter with a range, and `toggle_led` arrives\n# as a stub with the right signature.\n\nproject:\n  name: blink\n  version: "1.0"\n  description: One LED, one interval\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    led: { type: digital_output, pin: GPIO2 }\n\nparameters:\n  # Read on every pass, so changing it at runtime takes effect immediately.\n  blink_ms: { type: int, default: 500, range: [50, 10000], unit: ms }\n\ntasks:\n  blink:\n    every: blink_ms\n    do: toggle_led\n    description: Flip the LED over\n'
+        "blink.yaml": '# The smallest useful thing a board can do, with no state machine at all.\n#\n# PulseHSM is one tenant of this IR, not its foundation. A blink is scheduling,\n# not behaviour worth a state chart, so it is a `task:` - and the generated\n# sketch contains no PulseHSM, no fsm, and no event enum. It is plain Arduino.\n#\n# What the model still buys you: the pin is named, its pinMode is generated,\n# the interval is a declared parameter with a range, and `toggle_led` arrives\n# as a stub with the right signature.\n\nproject:\n  name: blink\n  version: "1.0"\n  description: One LED, one interval\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    led: { type: digital_output, pin: GPIO2 }\n\nparameters:\n  # Read on every pass, so changing it at runtime takes effect immediately.\n  blink_ms: { type: int, default: 500, range: [50, 10000], unit: ms }\n\ntasks:\n  blink:\n    every: blink_ms\n    do: toggle_led\n    description: Flip the LED over\n\n# Implementing toggle_led:\n#\n#   static bool lit = false;\n#   lit = !lit;\n#   digitalWrite(LED_PIN, lit ? HIGH : LOW);\n#\n# Hold the state; do not read the pin back with\n# `digitalWrite(LED_PIN, !digitalRead(LED_PIN))`. On an ESP32 `pinMode(OUTPUT)`\n# leaves the input buffer off, so digitalRead returns 0 whatever the pin is\n# driving - the LED goes on once and stays on. It happens to work on an AVR,\n# which is why the idiom is so common. Holding the state is also one register\n# write instead of a read and a write, and works on every board.\n'
       }
     },
     "serial console \u2014 commands over the serial monitor, no state machine": {

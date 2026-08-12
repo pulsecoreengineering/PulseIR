@@ -1179,13 +1179,22 @@ ${machineSetup}}`;
         .join('\n');
 
       return `// Task "${task.name}" - ${source}.${task.description ? `\n// ${task.description}` : ''}
-static unsigned long lastRun_${base} = 0;
+static unsigned long dueAt_${base} = 0;
 
 static void runTask_${base}() {
-  if (millis() - lastRun_${base} < ${interval}) return;
-  // Anchor to now rather than to the deadline: a late run must not queue up
-  // catch-up runs, which on a busy loop turns a blink into a stutter.
-  lastRun_${base} = millis();
+  const unsigned long interval = ${interval};
+  const unsigned long now = millis();
+  if (now - dueAt_${base} < interval) return;
+
+  // Advance the deadline by whole intervals rather than restarting from now.
+  // Restarting adds however long the loop took to come round to every period,
+  // and that error accumulates: a 100ms blink slowly becomes a 103ms blink.
+  dueAt_${base} += interval;
+
+  // Unless we are already a full interval behind - a long blocking call, or
+  // the interval was just shortened - in which case give up on catching up
+  // and resync, rather than firing repeatedly in a burst.
+  if (now - dueAt_${base} >= interval) dueAt_${base} = now;
 
 ${calls}
 }`;

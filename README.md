@@ -210,7 +210,13 @@ tasks:
 
 Scheduling is configuration, so it belongs in the model. The interval may be a
 literal or an int parameter, and a parameter is read every pass — retuning it at
-runtime takes effect immediately. A late run never queues up catch-up runs.
+runtime takes effect immediately.
+
+The generated scheduler advances its deadline by whole intervals rather than
+restarting from `millis()`, so the **average rate is exact**: restarting adds
+however long the loop took to come round to every period, and that error
+accumulates. If it falls a whole interval behind — a long blocking call, a
+reconnect — it resyncs instead of firing once per missed period.
 
 ### `commands:` — a line of text in, a named action out
 

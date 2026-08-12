@@ -29,3 +29,16 @@ tasks:
     every: blink_ms
     do: toggle_led
     description: Flip the LED over
+
+# Implementing toggle_led:
+#
+#   static bool lit = false;
+#   lit = !lit;
+#   digitalWrite(LED_PIN, lit ? HIGH : LOW);
+#
+# Hold the state; do not read the pin back with
+# `digitalWrite(LED_PIN, !digitalRead(LED_PIN))`. On an ESP32 `pinMode(OUTPUT)`
+# leaves the input buffer off, so digitalRead returns 0 whatever the pin is
+# driving - the LED goes on once and stays on. It happens to work on an AVR,
+# which is why the idiom is so common. Holding the state is also one register
+# write instead of a read and a write, and works on every board.
