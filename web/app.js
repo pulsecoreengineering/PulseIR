@@ -3417,6 +3417,8 @@ ${lines.join("\n")}${hint}`;
       const actionCatalogue = this.parseActionCatalogue(raw.actions);
       actionCatalogue.forEach((_, name) => this.actionNames.add(name));
       const transitions = this.parseTransitionList(machine.transitions, actionCatalogue);
+      const tasks = this.parseTaskMap(raw.tasks, actionCatalogue);
+      const commands = this.parseCommands(raw.commands, actionCatalogue);
       const resources = this.parseBusMap(hardware.buses);
       const components = this.parseDeviceMap(hardware.devices);
       const parameters = this.parseParameterMap(raw.parameters);
@@ -3429,6 +3431,8 @@ ${lines.join("\n")}${hint}`;
       this.assertLibraryRefs(resources, libraries);
       this.assertBusRefs(components, resources);
       this.assertTimedTransitions(transitions, parameters || []);
+      this.assertTaskIntervals(tasks, parameters || []);
+      this.assertUsable(states, tasks, commands);
       const busNames = new Set((resources || []).map((r) => r.name));
       for (const device of components || []) {
         if (busNames.has(device.name)) {
@@ -3441,6 +3445,8 @@ ${lines.join("\n")}${hint}`;
         events,
         states,
         transitions,
+        tasks,
+        commands,
         components,
         resources,
         parameters,
@@ -3597,6 +3603,93 @@ For a repeating cycle, alternate between two states.`);
           description: entry.description
         };
       });
+    }
+    /**
+     * `tasks:` - work that repeats on an interval.
+     *
+     *   tasks:
+     *     blink: { every: blink_ms, do: toggle_led }
+     *
+     * Not every board is a state machine. A blink or a heartbeat is scheduling,
+     * which is configuration, so it belongs in the model rather than being
+     * dressed up as a two-state HSM.
+     */
+    parseTaskMap(raw, catalogue) {
+      return this.mapEntries(raw, "tasks").map(([name, def], index) => {
+        if (def.every === void 0) {
+          throw new ParseError(`Task "${name}" has no "every". A task runs on an interval:
+  tasks:
+    ${name}: { every: 500, do: some_action }`);
+        }
+        const actions = this.resolveActions(def.do, catalogue, index);
+        if (!actions?.length) {
+          throw new ParseError(`Task "${name}" has no "do", so it would do nothing every ${def.every}ms`);
+        }
+        return {
+          name,
+          every: this.parseInterval(def.every, `Task "${name}"`),
+          actions,
+          description: def.description
+        };
+      });
+    }
+    /**
+     * `commands:` - a line of text in, a named action out.
+     *
+     *   commands:
+     *     source: console
+     *     map:
+     *       on:  led_on
+     *       off: led_off
+     *
+     * A dispatch table is data. Pulling arguments out of a command line is not,
+     * and stays in the action you write.
+     */
+    parseCommands(raw, catalogue) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      if (!isPlainObject(raw)) {
+        throw new ParseError("commands: must be a mapping:\n  commands:\n    source: console\n    map:\n      on: led_on");
+      }
+      if (!isPlainObject(raw.map)) {
+        throw new ParseError('commands: declares no "map", so no command would ever be recognised');
+      }
+      const seen = /* @__PURE__ */ new Set();
+      const commands = Object.entries(raw.map).map(([match, def], index) => {
+        const text = match.trim();
+        if (!text)
+          throw new ParseError("A command cannot be an empty string");
+        if (seen.has(text))
+          throw new ParseError(`Command "${text}" is declared twice`);
+        seen.add(text);
+        const long = isPlainObject(def) ? def : null;
+        const event = long?.event;
+        if (event !== void 0 && !this.eventNames.has(event)) {
+          throw new ParseError(`Command "${text}" raises unknown event "${event}"`);
+        }
+        const actions = this.resolveActions(long ? long.do : def, catalogue, index);
+        if (!actions?.length && event === void 0) {
+          throw new ParseError(`Command "${text}" has neither "do" nor "event", so receiving it would do nothing`);
+        }
+        return { match: text, actions, event, description: long?.description };
+      });
+      return {
+        source: raw.source,
+        commands,
+        reportUnknown: raw.report_unknown === void 0 ? true : Boolean(raw.report_unknown)
+      };
+    }
+    /** Milliseconds: a positive literal, or the name of an int parameter. */
+    parseInterval(raw, where) {
+      if (typeof raw === "number") {
+        if (!Number.isInteger(raw) || raw <= 0) {
+          throw new ParseError(`${where} has an interval of ${raw}. It must be a positive whole number of milliseconds, or the name of an int parameter.`);
+        }
+        return raw;
+      }
+      if (typeof raw === "string" && raw.trim())
+        return raw.trim();
+      throw new ParseError(`${where} has an interval of type ${typeof raw}. Use a number of milliseconds, or the name of an int parameter.`);
     }
     /**
      * `after: 5000` or `after: green_ms`.
@@ -4009,6 +4102,35 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         }
       });
     }
+    /** A task interval naming a parameter must name a real int one. */
+    assertTaskIntervals(tasks, parameters) {
+      const byName = new Map(parameters.map((p) => [p.name, p]));
+      for (const task of tasks) {
+        if (typeof task.every !== "string")
+          continue;
+        const parameter = byName.get(task.every);
+        if (!parameter) {
+          const known = [...byName.keys()];
+          throw new ParseError(`Task "${task.name}" runs every "${task.every}", which is not a declared parameter. ` + (known.length ? `Known parameters: ${known.join(", ")}.` : "No parameters are declared."));
+        }
+        if (parameter.type !== "int") {
+          throw new ParseError(`Task "${task.name}" runs every "${task.every}", which is declared as ${parameter.type}. An interval in milliseconds must be an int.`);
+        }
+      }
+    }
+    /**
+     * A model has to *do* something.
+     *
+     * A state machine is one way, but not the only one - PulseHSM is one tenant
+     * of this IR, so `tasks:` or `commands:` alone is a complete project. What is
+     * not allowed is a model with none of the three, which would generate a
+     * sketch that runs an empty loop forever.
+     */
+    assertUsable(states, tasks, commands) {
+      if (states.length > 0 || tasks.length > 0 || commands)
+        return;
+      throw new ParseError("The model does nothing. Give it at least one of:\n  machine:   states and transitions\n  tasks:     work that repeats on an interval\n  commands:  actions to run when a command arrives");
+    }
     /**
      * Check every `after:` that names a parameter, once they have all been read.
      *
@@ -4314,6 +4436,17 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
       this.libraries = /* @__PURE__ */ new Map();
     }
     /**
+     * True when the model declares a state machine.
+     *
+     * PulseHSM is one tenant of this IR, not its foundation: a blink, or a board
+     * that answers commands over the serial monitor, is a complete project with
+     * no states at all. When this is false nothing about the runtime is emitted -
+     * no include, no sizing header, no fsm - and the sketch is plain Arduino.
+     */
+    get hasMachine() {
+      return this.states.length > 0;
+    }
+    /**
      * Generate C++ code from a validated PulseModel
      */
     generate(project) {
@@ -4337,6 +4470,8 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         this.generateActionDeclarations(),
         this.generateEventHandlers(),
         this.generateTimeouts(),
+        this.generateTasks(),
+        this.generateCommands(),
         this.generateSetupFunction(),
         this.generateLoopFunction(),
         this.generateGuardImplementations(),
@@ -4424,6 +4559,8 @@ void setupInterfaces();${this.declInterfaceGlobals()}`,
         this.defInterfaces().trimStart(),
         this.generateEventHandlers(),
         this.generateTimeouts(),
+        this.generateTasks(),
+        this.generateCommands(),
         this.generateSetupFunction(),
         this.generateLoopFunction()
       ].join("\n\n") + "\n";
@@ -4559,6 +4696,24 @@ ${this.generateActionImplementations()}
     generateHeader() {
       const { name, version } = this.project;
       const date = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
+      const preamble = `/**
+ * PulseIR Generated Code
+ *
+ * Project: ${name}
+ * Version: ${version}
+ * Generated: ${date}
+ *
+ * This file was auto-generated from a PulseIR model.
+ * DO NOT EDIT MANUALLY - regenerate from source instead.
+ *
+ * Action signatures follow FUNCTION_CONTRACT.md:
+ *   void action_<name>(SystemContext* ctx)
+ */`;
+      if (!this.hasMachine) {
+        return `${preamble}
+
+#include <Arduino.h>`;
+      }
       const { maxStates, maxEvents, levels } = this.sizing();
       return `/**
  * PulseHSM Generated Code
@@ -4723,7 +4878,10 @@ ${externs.join("\n")}`;
     generateEventEnum() {
       const events = this.project.system.events;
       if (events.length === 0) {
-        throw new CodegenError("System defines no events; nothing to dispatch");
+        if (this.hasMachine) {
+          throw new CodegenError("System defines no events; nothing to dispatch");
+        }
+        return "";
       }
       if (events.length > 256) {
         throw new CodegenError("PulseHSM event IDs are uint8_t; at most 256 events are supported");
@@ -4850,7 +5008,7 @@ struct SystemContext {
     // MACHINE + STATE INDEX GLOBALS
     // =========================================================================
     generateMachineDeclarations() {
-      return this.machineGlobals(false);
+      return this.hasMachine ? this.machineGlobals(false) : "";
     }
     /**
      * `extern` when the header declares them for user code to reference;
@@ -4874,6 +5032,8 @@ ${indices}`;
     // GUARD / ACTION DECLARATIONS
     // =========================================================================
     generateGuardDeclarations() {
+      if (!this.hasMachine)
+        return "";
       if (this.guardStubs.size === 0) {
         return `// ============================================================================
 // GUARD DECLARATIONS
@@ -4914,7 +5074,7 @@ ${declarations}`;
           continue;
         handlers.push(this.generateHandler(flat, owned));
       }
-      const sync = `// Refresh the context handed to every guard and action.
+      const sync = this.hasMachine ? `// Refresh the context handed to every guard and action.
 // Called at the top of each handler so guards see the live machine state.
 static void syncContext() {
   systemContext.currentState = fsm.getCurrentState();
@@ -4922,8 +5082,18 @@ static void syncContext() {
   systemContext.eventData = fsm.getEventData();
   systemContext.parameters = &systemParameters;
   systemContext.sensors = &systemSensors;
+}` : `// Refresh the context handed to every action. This project has no state
+// machine, so the state fields stay at -1 and only the data is refreshed.
+static void syncContext() {
+  systemContext.currentState = -1;
+  systemContext.previousState = -1;
+  systemContext.eventData = 0;
+  systemContext.parameters = &systemParameters;
+  systemContext.sensors = &systemSensors;
 }`;
       if (handlers.length === 0) {
+        if (!this.hasMachine)
+          return sync;
         return `// ============================================================================
 // EVENT HANDLERS
 // ============================================================================
@@ -5009,9 +5179,6 @@ ${cases.join("\n")}
     // SETUP
     // =========================================================================
     generateSetupFunction() {
-      if (this.states.length === 0) {
-        throw new CodegenError("System defines no states; nothing to generate");
-      }
       const components = this.project.system.components || [];
       const gpioComponents = components.filter((c) => c.driver.includes("gpio"));
       const componentComments = components.length > 0 ? components.map((c) => {
@@ -5038,25 +5205,8 @@ ${cases.join("\n")}
       }).join("\n\n");
       const firstTopLevel = this.states.findIndex((s) => s.parent === -1 && s.path !== ROOT_PATH);
       const rootRelative = this.rootIndex !== -1 ? this.states.findIndex((s) => s.parent === this.rootIndex) : firstTopLevel;
-      const startIndex = this.resolveEntry(rootRelative === -1 ? 0 : rootRelative);
-      return `// ============================================================================
-// SETUP
-// ============================================================================
-
-${componentComments}
-
-void setup() {
-  Serial.begin(115200);
-  Serial.println("\\n\\n=== ${this.project.name} v${this.project.version} ===");
-
-  // Buses and peripherals declared as resources
-  setupInterfaces();
-
-
-  // Wire up the context handed to every guard and action
-  systemContext.parameters = &systemParameters;
-  systemContext.sensors = &systemSensors;
-
+      const startIndex = this.hasMachine ? this.resolveEntry(rootRelative === -1 ? 0 : rootRelative) : -1;
+      const machineSetup = !this.hasMachine ? "" : `
   // Register states. Parents are registered before their children.
 ${registrations}
 
@@ -5066,7 +5216,175 @@ ${this.registrationCheck()}
 
   Serial.print("Initial state: ");
   Serial.println(fsm.getCurrentName());
+`;
+      return `// ============================================================================
+// SETUP
+// ============================================================================
+
+${componentComments}
+
+void setup() {
+${this.consoleSetup()}
+  // Buses and peripherals declared as resources
+  setupInterfaces();
+
+  // Wire up the context handed to every action
+  systemContext.parameters = &systemParameters;
+  systemContext.sensors = &systemSensors;
+${machineSetup}}`;
+    }
+    // =========================================================================
+    // CONSOLE, TASKS AND COMMANDS
+    //
+    // None of this needs a state machine. A blink is scheduling and a command
+    // table is a lookup, so both are configuration, and both belong to projects
+    // that never declare a state at all.
+    // =========================================================================
+    /** The declared UART that owns the console, if the model declares one. */
+    consoleResource() {
+      const named = this.project.system.commands?.source;
+      const buses = this.project.system.resources || [];
+      if (named) {
+        const found = buses.find((r) => r.name === named);
+        if (!found) {
+          throw new CodegenError(`commands.source is "${named}", which is not a declared bus. Declare it under hardware.buses, or drop the line to use the default console.`);
+        }
+        return found;
+      }
+      return buses.find((r) => String(r.interface) === "uart" && Number(r.binding?.port ?? 1) === 0);
+    }
+    /** The C expression naming the console stream, e.g. `Serial`. */
+    consoleStream() {
+      const resource = this.consoleResource();
+      if (!resource)
+        return "Serial";
+      const port = Number(resource.binding?.port ?? 1);
+      return port === 0 ? "Serial" : `Serial${port}`;
+    }
+    /**
+     * Opening the console.
+     *
+     * A declared uart on port 0 already emits its own `Serial.begin(baud)` in
+     * setupInterfaces(), so opening it again here at a hardcoded 115200 would
+     * quietly override the baud rate the model asked for.
+     */
+    consoleSetup() {
+      const declared = this.consoleResource();
+      const banner = `  ${this.consoleStream()}.println("\\n\\n=== ${this.project.name} v${this.project.version} ===");`;
+      if (declared && Number(declared.binding?.port ?? 1) === 0) {
+        return `  // ${declared.name} opens the console; setupInterfaces() sets its baud rate.
+  setupInterfaces();
+${banner}
+`;
+      }
+      return `  Serial.begin(115200);
+${banner}
+`;
+    }
+    /** `enteredAt`-style globals and the loop body for `tasks:`. */
+    generateTasks() {
+      const tasks = this.project.system.tasks || [];
+      if (tasks.length === 0)
+        return "";
+      const blocks = tasks.map((task) => {
+        const base = this.sanitize(task.name);
+        const interval = typeof task.every === "string" ? `(unsigned long)systemParameters.${this.sanitize(task.every)}` : `${task.every}UL`;
+        const source2 = typeof task.every === "string" ? `${task.every} (parameter)` : `every ${task.every}ms`;
+        const calls = task.actions.map((a) => `  action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
+        return `// Task "${task.name}" - ${source2}.${task.description ? `
+// ${task.description}` : ""}
+static unsigned long lastRun_${base} = 0;
+
+static void runTask_${base}() {
+  if (millis() - lastRun_${base} < ${interval}) return;
+  // Anchor to now rather than to the deadline: a late run must not queue up
+  // catch-up runs, which on a busy loop turns a blink into a stutter.
+  lastRun_${base} = millis();
+
+${calls}
 }`;
+      });
+      return `// ============================================================================
+// TASKS
+// ============================================================================
+//
+// Each runs on its own interval, checked every pass of loop(). An interval
+// naming a parameter is read every time, so retuning it takes effect at once.
+// Subtraction on unsigned long is correct across the millis() rollover.
+
+${blocks.join("\n\n")}`;
+    }
+    /** The line reader and dispatch table for `commands:`. */
+    generateCommands() {
+      const set2 = this.project.system.commands;
+      if (!set2)
+        return "";
+      const stream = this.consoleStream();
+      const cases = set2.commands.map((command) => {
+        const calls = (command.actions || []).map((a) => `    action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
+        const raise = command.event ? `    fsm.sendEvent(EVENT_${this.sanitizeUpper(command.event)});` : "";
+        return `  if (strcmp(line, ${JSON.stringify(command.match)}) == 0) {${command.description ? `
+    // ${command.description}` : ""}
+${[calls, raise].filter(Boolean).join("\n")}
+    return;
+  }`;
+      });
+      const unknown = set2.reportUnknown === false ? "" : `
+  ${stream}.print("Unknown command: ");
+  ${stream}.println(line);`;
+      return `// ============================================================================
+// COMMANDS
+// ============================================================================
+//
+// One line of text in, one named action out. Reading the line is generated;
+// making sense of anything *inside* it is not - that belongs in your action,
+// where a parser can be written and debugged like ordinary C.
+
+// Most Arduino cores pull this in through Arduino.h, but not all of them, and
+// the dispatch table below is nothing but strcmp.
+#include <string.h>
+
+/** Longest command line accepted. Anything longer is reported and discarded. */
+#define COMMAND_BUFFER 64
+
+static char commandLine[COMMAND_BUFFER];
+static uint8_t commandLength = 0;
+static bool commandOverflow = false;
+
+static void dispatchCommand(const char* line) {
+${cases.join("\n")}${unknown}
+}
+
+/**
+ * Read whatever has arrived, a line at a time.
+ *
+ * Never blocks: it consumes only what is already buffered, so loop() keeps
+ * running whether or not anyone is typing.
+ */
+static void pollCommands() {
+  while (${stream}.available() > 0) {
+    const int next = ${stream}.read();
+
+    if (next == '\\n' || next == '\\r') {
+      if (commandOverflow) {
+        ${stream}.println("Command too long; ignored.");
+several_reset
+      } else if (commandLength > 0) {
+        commandLine[commandLength] = '\\0';
+        dispatchCommand(commandLine);
+several_reset
+      }
+      continue;
+    }
+
+    if (commandLength >= COMMAND_BUFFER - 1) {
+      // Truncating and dispatching would run the wrong command; refuse instead.
+      commandOverflow = true;
+      continue;
+    }
+    commandLine[commandLength++] = (char)next;
+  }
+}`.replace(/several_reset/g, "        commandLength = 0;\n        commandOverflow = false;");
     }
     /** The two C names a state with timed transitions needs. */
     timerNames(flat) {
@@ -5178,14 +5496,16 @@ ${blocks.join("\n\n")}`;
     // LOOP
     // =========================================================================
     generateLoopFunction() {
-      const example = this.project.system.events[0];
-      const exampleName = example ? `EVENT_${this.sanitizeUpper(example.name)}` : "EVENT_NONE";
-      return `// ============================================================================
-// MAIN LOOP
-// ============================================================================
-
-void loop() {
-  // TODO: Read sensors into systemSensors, then raise events.
+      const body = [];
+      if (this.project.system.commands)
+        body.push("  pollCommands();");
+      for (const task of this.project.system.tasks || []) {
+        body.push(`  runTask_${this.sanitize(task.name)}();`);
+      }
+      if (this.hasMachine) {
+        const example = this.project.system.events[0];
+        const exampleName = example ? `EVENT_${this.sanitizeUpper(example.name)}` : "EVENT_NONE";
+        body.push(`  // TODO: Read sensors into systemSensors, then raise events.
   // Example:
   //   systemSensors.temperature = readTemperature();
   //   if (systemSensors.temperature >= systemParameters.setpoint) {
@@ -5193,15 +5513,28 @@ void loop() {
   //   }
   //
   // sendEvent() is ISR-safe, so interrupts may call it directly.
-  // Never call delay() here - it starves fsm.update().
 
-  fsm.update();
+  fsm.update();`);
+      } else if (body.length === 0) {
+        body.push("  // Nothing declared to run. Add tasks: or commands: to the model.");
+      }
+      const sync = !this.hasMachine && (this.project.system.commands || (this.project.system.tasks || []).length) ? "  syncContext();\n" : "";
+      return `// ============================================================================
+// MAIN LOOP
+// ============================================================================
+//
+// Never call delay() here: it stops everything below it from running.
+
+void loop() {
+${sync}${body.join("\n")}
 }`;
     }
     // =========================================================================
     // GUARD IMPLEMENTATIONS
     // =========================================================================
     generateGuardImplementations() {
+      if (!this.hasMachine)
+        return "";
       if (this.guardStubs.size === 0) {
         return `// ============================================================================
 // GUARD IMPLEMENTATIONS
@@ -5361,14 +5694,20 @@ ${implementations.join("\n\n")}`;
       });
     }
     indexActions() {
-      this.project.system.transitions.forEach((t, idx) => {
-        for (const a of t.actions || []) {
-          if (!a.name) {
-            throw new CodegenError(`Transition ${idx} has an action without a name`);
-          }
-          this.actionNames.add(a.name);
+      const collect = (actions, where) => {
+        for (const action of actions || []) {
+          if (!action.name)
+            throw new CodegenError(`${where} has an action without a name`);
+          this.actionNames.add(action.name);
         }
-      });
+      };
+      this.project.system.transitions.forEach((t, idx) => collect(t.actions, `Transition ${idx}`));
+      for (const task of this.project.system.tasks || []) {
+        collect(task.actions, `Task "${task.name}"`);
+      }
+      for (const command of this.project.system.commands?.commands || []) {
+        collect(command.actions, `Command "${command.match}"`);
+      }
     }
     indexTransitions() {
       this.project.system.transitions.forEach((t, idx) => {
@@ -6290,6 +6629,18 @@ ${implementations.join("\n\n")}`;
       entry: "blinker.yaml",
       files: {
         "blinker.yaml": '# A minimal model. Edit anything and the panes update as you type.\nproject:\n  name: blinker\n  version: "1.0"\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    led:\n      type: digital_output\n      pin: GPIO2\n\nparameters:\n  blink_ms:\n    type: int\n    default: 500\n    range: [50, 5000]\n    unit: ms\n\nevents:\n  PRESS:\n    source: external\n\nmachine:\n  states:\n    off:\n    on:\n\n  transitions:\n    - from: off\n      on: PRESS\n      to: on\n      do: led_on\n\n    - from: on\n      on: PRESS\n      to: off\n      do: led_off\n'
+      }
+    },
+    "blink \u2014 no state machine at all, just a task": {
+      entry: "blink.yaml",
+      files: {
+        "blink.yaml": '# The smallest useful thing a board can do, with no state machine at all.\n#\n# PulseHSM is one tenant of this IR, not its foundation. A blink is scheduling,\n# not behaviour worth a state chart, so it is a `task:` - and the generated\n# sketch contains no PulseHSM, no fsm, and no event enum. It is plain Arduino.\n#\n# What the model still buys you: the pin is named, its pinMode is generated,\n# the interval is a declared parameter with a range, and `toggle_led` arrives\n# as a stub with the right signature.\n\nproject:\n  name: blink\n  version: "1.0"\n  description: One LED, one interval\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    led: { type: digital_output, pin: GPIO2 }\n\nparameters:\n  # Read on every pass, so changing it at runtime takes effect immediately.\n  blink_ms: { type: int, default: 500, range: [50, 10000], unit: ms }\n\ntasks:\n  blink:\n    every: blink_ms\n    do: toggle_led\n    description: Flip the LED over\n'
+      }
+    },
+    "serial console \u2014 commands over the serial monitor, no state machine": {
+      entry: "serial_console.yaml",
+      files: {
+        "serial_console.yaml": '# A board you talk to over the serial monitor. Still no state machine.\n#\n# Two things the model owns here that are usually hand-written boilerplate:\n#\n#   1. The console\'s baud rate. `console` is a declared bus like any other, so\n#      the sketch opens it at the rate the model asks for - there is no\n#      hardcoded Serial.begin(115200) anywhere in the output.\n#   2. The command table. Reading a line without blocking, reassembling one\n#      split across loop() passes, and refusing one too long to fit are all\n#      generated. What a command *means* is your action, in C.\n\nproject:\n  name: serial_console\n  version: "1.0"\n  description: Answers commands typed into the serial monitor\n\ntarget:\n  board: esp32\n\nhardware:\n  buses:\n    # Port 0 is the USB serial monitor. Naming it as a bus is what lets the\n    # model set the baud rate.\n    console: { interface: uart, port: 0, baud: 9600 }\n\n  devices:\n    led:  { type: digital_output, pin: GPIO2 }\n    fan:  { type: pwm_output, pin: GPIO27, channel: 0, frequency: 25000 }\n    temp: { type: analog_input, pin: GPIO34, unit: degC }\n\nparameters:\n  report_ms: { type: int, default: 2000, range: [200, 60000], unit: ms }\n  fan_duty:  { type: int, default: 128,  range: [0, 255] }\n\nactions:\n  led_on:    { driver: gpio_control, params: { device: led, value: HIGH } }\n  led_off:   { driver: gpio_control, params: { device: led, value: LOW } }\n  fan_start: { driver: pwm_control,  params: { device: fan, duty: fan_duty } }\n  fan_stop:  { driver: pwm_control,  params: { device: fan, duty: 0 } }\n  report:    { driver: console_report }\n  show_help: { driver: console_help }\n\ncommands:\n  source: console\n  map:\n    on:     led_on\n    off:    led_off\n    fan:    fan_start\n    stop:   fan_stop\n    # A command may run several actions, in order.\n    status: [report, show_help]\n    help:   show_help\n\ntasks:\n  # The board reports on its own too, not only when asked.\n  heartbeat:\n    every: report_ms\n    do: report\n    description: Print a reading even when nobody types anything\n'
       }
     },
     "boiler \u2014 multi-file, hierarchical states, guards": {

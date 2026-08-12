@@ -1,0 +1,59 @@
+# A board you talk to over the serial monitor. Still no state machine.
+#
+# Two things the model owns here that are usually hand-written boilerplate:
+#
+#   1. The console's baud rate. `console` is a declared bus like any other, so
+#      the sketch opens it at the rate the model asks for - there is no
+#      hardcoded Serial.begin(115200) anywhere in the output.
+#   2. The command table. Reading a line without blocking, reassembling one
+#      split across loop() passes, and refusing one too long to fit are all
+#      generated. What a command *means* is your action, in C.
+
+project:
+  name: serial_console
+  version: "1.0"
+  description: Answers commands typed into the serial monitor
+
+target:
+  board: esp32
+
+hardware:
+  buses:
+    # Port 0 is the USB serial monitor. Naming it as a bus is what lets the
+    # model set the baud rate.
+    console: { interface: uart, port: 0, baud: 9600 }
+
+  devices:
+    led:  { type: digital_output, pin: GPIO2 }
+    fan:  { type: pwm_output, pin: GPIO27, channel: 0, frequency: 25000 }
+    temp: { type: analog_input, pin: GPIO34, unit: degC }
+
+parameters:
+  report_ms: { type: int, default: 2000, range: [200, 60000], unit: ms }
+  fan_duty:  { type: int, default: 128,  range: [0, 255] }
+
+actions:
+  led_on:    { driver: gpio_control, params: { device: led, value: HIGH } }
+  led_off:   { driver: gpio_control, params: { device: led, value: LOW } }
+  fan_start: { driver: pwm_control,  params: { device: fan, duty: fan_duty } }
+  fan_stop:  { driver: pwm_control,  params: { device: fan, duty: 0 } }
+  report:    { driver: console_report }
+  show_help: { driver: console_help }
+
+commands:
+  source: console
+  map:
+    on:     led_on
+    off:    led_off
+    fan:    fan_start
+    stop:   fan_stop
+    # A command may run several actions, in order.
+    status: [report, show_help]
+    help:   show_help
+
+tasks:
+  # The board reports on its own too, not only when asked.
+  heartbeat:
+    every: report_ms
+    do: report
+    description: Print a reading even when nobody types anything

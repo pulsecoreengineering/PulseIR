@@ -1,0 +1,31 @@
+# The smallest useful thing a board can do, with no state machine at all.
+#
+# PulseHSM is one tenant of this IR, not its foundation. A blink is scheduling,
+# not behaviour worth a state chart, so it is a `task:` - and the generated
+# sketch contains no PulseHSM, no fsm, and no event enum. It is plain Arduino.
+#
+# What the model still buys you: the pin is named, its pinMode is generated,
+# the interval is a declared parameter with a range, and `toggle_led` arrives
+# as a stub with the right signature.
+
+project:
+  name: blink
+  version: "1.0"
+  description: One LED, one interval
+
+target:
+  board: esp32
+
+hardware:
+  devices:
+    led: { type: digital_output, pin: GPIO2 }
+
+parameters:
+  # Read on every pass, so changing it at runtime takes effect immediately.
+  blink_ms: { type: int, default: 500, range: [50, 10000], unit: ms }
+
+tasks:
+  blink:
+    every: blink_ms
+    do: toggle_led
+    description: Flip the LED over

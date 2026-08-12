@@ -277,22 +277,69 @@ export interface Library {
 // SYSTEM - The main model
 // ============================================================================
 
+/**
+ * Work that repeats on a fixed interval.
+ *
+ * A blink, a heartbeat, a sensor poll. Not everything a board does is a state
+ * machine, and expressing "toggle this every 500ms" as a two-state HSM is the
+ * kind of ceremony this project exists to remove.
+ */
+export interface Task {
+  name: string;
+  /** Milliseconds between runs: a literal, or the name of an int parameter. */
+  every: number | string;
+  actions: Action[];
+  description?: string;
+  metadata?: Metadata;
+}
+
+/** What a received command does: run actions, raise an event, or both. */
+export interface Command {
+  /** The text to match, exactly, once the line is trimmed. */
+  match: string;
+  actions?: Action[];
+  /** Only meaningful when the project has a state machine. */
+  event?: EventRef;
+  description?: string;
+}
+
+/**
+ * A line-oriented command interface, typically the serial monitor.
+ *
+ * The model holds a dispatch table - text in, named action out - which is data,
+ * not logic. Parsing arguments out of a command line is not: that stays in the
+ * action you write.
+ */
+export interface CommandSet {
+  /** Name of the declared interface to read from. Defaults to the console. */
+  source?: string;
+  commands: Command[];
+  /** Print an "unknown command" line when nothing matches. Defaults to true. */
+  reportUnknown?: boolean;
+}
+
 export interface PulseSystem {
   name: string;
   version?: string;
   description?: string;
-  
-  // HSM core
+
+  // HSM core. All three are empty for a project that has no state machine -
+  // PulseHSM is one tenant of this IR, not its foundation.
   events: Event[];
   states: State[];
   transitions: Transition[];
-  
+
+  /** Periodic work, with or without a state machine. */
+  tasks?: Task[];
+  /** Line-oriented command dispatch, with or without a state machine. */
+  commands?: CommandSet;
+
   // System components and resources
   components?: Component[];
   resources?: Resource[];
   parameters?: Parameter[];
   libraries?: Library[];
-  
+
   metadata?: Metadata;
 }
 

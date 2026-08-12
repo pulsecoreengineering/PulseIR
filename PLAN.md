@@ -304,6 +304,33 @@ removes hand-written timing from four of five projects.
 
 </details>
 
+#### Finding 2c — Not everything is a state machine ✅ ADDRESSED
+
+The gate projects were all control systems, so all five wanted a state chart.
+That hid the fact that the IR *required* one: a blink, or a board that answers
+commands over the serial monitor, could not be expressed at all.
+
+`machine:` is now optional, and two sections cover what replaces it:
+
+- **`tasks:`** — `{ every: blink_ms, do: toggle_led }`. Scheduling is
+  configuration. This is also the `every:` that finding 2b deferred, arriving
+  for a reason that had nothing to do with timers on states.
+- **`commands:`** — a text-to-action dispatch table, read from a declared UART.
+
+A machine-less project emits no PulseHSM include, no `fsm`, no event enum and
+no sizing header. The two new examples are built by the test suite *without*
+linking `PulseHSM.cpp`, so a leftover reference to the runtime fails the build
+rather than merely being untidy.
+
+Two things this shook out:
+
+- `setup()` hardcoded `Serial.begin(115200)`, which silently overrode the baud
+  rate of a declared uart on port 0. Declaring the console as a bus now owns it,
+  and a test asserts the console is opened exactly once.
+- The generated command table is nothing but `strcmp`, and did not include
+  `<string.h>`. Most Arduino cores pull it in through `Arduino.h`; the host
+  compiler does not, and neither will every core.
+
 #### Finding 2b — A state cannot repeat on a timer
 
 Surfaced while implementing `after:`, and left unsolved deliberately.

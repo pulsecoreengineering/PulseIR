@@ -180,6 +180,54 @@ A device declares what it *is*, so the machine refers to `pump` rather than to
 GPIO25. `type` implies a class and a driver for the common cases; anything
 unfamiliar must state its `class` rather than be guessed at.
 
+## Not Everything Is a State Machine
+
+PulseHSM is **one tenant** of this IR, not its foundation. A model with no
+`machine:` at all is a complete project, and its generated sketch contains no
+PulseHSM, no `fsm`, and no event enum — it is plain Arduino.
+
+Two sections cover the work that does not want a state chart.
+
+### `tasks:` — work on an interval
+
+```yaml
+parameters:
+  blink_ms: { type: int, default: 500, range: [50, 10000], unit: ms }
+
+tasks:
+  blink: { every: blink_ms, do: toggle_led }
+```
+
+Scheduling is configuration, so it belongs in the model. The interval may be a
+literal or an int parameter, and a parameter is read every pass — retuning it at
+runtime takes effect immediately. A late run never queues up catch-up runs.
+
+### `commands:` — a line of text in, a named action out
+
+```yaml
+hardware:
+  buses:
+    console: { interface: uart, port: 0, baud: 9600 }
+
+commands:
+  source: console
+  map:
+    on:     led_on
+    off:    led_off
+    status: [report, show_help]
+    reset:  { event: RESET }        # with a machine, a command can raise an event
+```
+
+Declaring the console as a bus is what lets the model **set the baud rate** —
+there is no hardcoded `Serial.begin(115200)` in the output when you do.
+
+Generated for you: a non-blocking reader, a line reassembled across `loop()`
+passes, an over-long line refused rather than truncated into the wrong command,
+and an "unknown command" reply. What a command *means* is your action, in C —
+a dispatch table is data, parsing arguments out of a line is not.
+
+See `examples/blink.yaml` and `examples/serial_console.yaml`.
+
 ## Splitting a Model Across Files
 
 One giant YAML is hard to maintain and hard to review, so a model is normally a
@@ -220,13 +268,14 @@ See `examples/boiler/` and `examples/sensor_gateway/`.
 
 ## Examples
 
-Six worked models, each generated, compiled, linked against the real runtime
-and run by the test suite. They double as the acceptance gate for the schema
-(PLAN.md §4) — every one is written in the schema as it stands, with no
-special cases.
+Eight worked models, each generated, compiled and run by the test suite. Six
+link against the real runtime; two deliberately do not, and are built *without*
+`PulseHSM.cpp` so that any leftover reference to it fails at link time.
 
 | Model | Shows |
 |---|---|
+| `blink.yaml` | No state machine at all — one task, one interval |
+| `serial_console.yaml` | Commands over the serial monitor, baud rate from the model |
 | `traffic_light.yaml` | Phases, a pedestrian request, a night mode on the parent state |
 | `motor_controller.yaml` | Speed phases with the ramp arithmetic left in C, wildcard trip |
 | `pump_tank.yaml` | Float-switch hysteresis, dry-run and overfill protection |

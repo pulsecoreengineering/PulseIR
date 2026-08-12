@@ -340,6 +340,79 @@ test('rejects a duration that is zero, negative or fractional', () => {
 });
 
 // ============================================================================
+// PROJECTS WITHOUT A STATE MACHINE
+//
+// PulseHSM is one tenant of this IR. A model made only of tasks, or only of
+// commands, is complete - but a model that does nothing at all is a mistake
+// worth catching.
+// ============================================================================
+
+function plain(body: string): string {
+  return `
+project: {name: plain, version: "1.0"}
+parameters:
+  tick_ms: {type: int, default: 500}
+  ratio:   {type: float, default: 1.5}
+${body}
+`;
+}
+
+test('accepts a model that is only tasks', () => {
+  const project = expectAccept(plain(`tasks:
+  blink: {every: tick_ms, do: toggle}`), 'tasks only');
+
+  if (project.system.states.length !== 0) throw new Error('a task-only model must have no states');
+  if (project.system.tasks?.[0].every !== 'tick_ms') throw new Error('the interval was not kept');
+});
+
+test('accepts a model that is only commands, in either short form', () => {
+  const project = expectAccept(plain(`commands:
+  map:
+    on: led_on
+    both: [led_on, beep]
+    long: {do: led_off, description: turn it off}`), 'commands only');
+
+  const map = project.system.commands!.commands;
+  if (map.length !== 3) throw new Error(`expected 3 commands, got ${map.length}`);
+  if (map[1].actions?.length !== 2) throw new Error('the list form did not keep both actions');
+  if (map[2].description !== 'turn it off') throw new Error('the long form lost its description');
+});
+
+test('rejects a model that does nothing at all', () => {
+  expectReject(plain('hardware:\n  devices:\n    led: {type: digital_output, pin: GPIO2}'),
+    'The model does nothing', 'no machine, no tasks, no commands');
+});
+
+test('rejects transitions with no states to connect', () => {
+  // Caught while resolving the transition's own endpoints, which names the
+  // state that is missing rather than just saying the machine is empty.
+  expectReject(plain(`events:
+  GO: {source: external}
+machine:
+  transitions:
+    - {from: a, on: GO, to: b}`), 'state "a"', 'transitions without states');
+});
+
+test('rejects a task with no interval or nothing to do', () => {
+  expectReject(plain('tasks:\n  blink: {do: toggle}'), 'has no "every"', 'task without an interval');
+  expectReject(plain('tasks:\n  blink: {every: 500}'), 'has no "do"', 'task that does nothing');
+  expectReject(plain('tasks:\n  blink: {every: 0, do: toggle}'), 'positive whole number', 'zero interval');
+  expectReject(plain('tasks:\n  blink: {every: nope, do: toggle}'), 'not a declared parameter', 'unknown parameter');
+  expectReject(plain('tasks:\n  blink: {every: ratio, do: toggle}'), 'must be an int', 'float interval');
+});
+
+test('rejects a command table that could never match anything', () => {
+  expectReject(plain('commands:\n  source: console'), 'declares no "map"', 'no map');
+  expectReject(plain('commands:\n  map:\n    on: {}'), 'neither "do" nor "event"', 'command that does nothing');
+});
+
+test('rejects a command raising an event the model never declares', () => {
+  expectReject(plain(`commands:
+  map:
+    go: {event: NOPE}`), 'unknown event "NOPE"', 'unknown event');
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} validation test(s) failed`);
