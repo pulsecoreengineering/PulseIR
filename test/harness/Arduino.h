@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <ctime>
 
 #define HIGH 1
@@ -48,6 +49,16 @@ public:
   void println(long v) { std::printf("%ld\n", v); }
   void println(unsigned long v) { std::printf("%lu\n", v); }
   void println(double v) { std::printf("%g\n", v); }
+
+  // Incoming bytes. A test feeds the port with feed(); generated command
+  // readers consume it exactly as they would consume a serial monitor.
+  int available() { return (int)(incoming.size() - readAt); }
+  int read() { return readAt < incoming.size() ? (unsigned char)incoming[readAt++] : -1; }
+  void feed(const std::string& text) { incoming += text; }
+
+private:
+  std::string incoming;
+  std::size_t readAt = 0;
 };
 
 extern SerialShim Serial;

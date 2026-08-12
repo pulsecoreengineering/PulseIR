@@ -1,5 +1,5 @@
 /**
- * PulseHSM IR Parser
+ * PulseIR Parser
  * 
  * Converts YAML → PulseModel
  * Validates references and schema
@@ -20,6 +20,9 @@ import type {
   Action,
   Region,
   StateRef,
+  Task,
+  Command,
+  CommandSet,
 } from '../model/index.js';
 import type { SourceResolver } from './resolver.js';
 import { findPinConflicts, describePinConflict } from '../analysis/pins.js';
@@ -428,6 +431,8 @@ export class Parser {
     actionCatalogue.forEach((_, name) => this.actionNames.add(name));
 
     const transitions = this.parseTransitionList(machine.transitions, actionCatalogue);
+    const tasks = this.parseTaskMap(raw.tasks, actionCatalogue);
+    const commands = this.parseCommands(raw.commands, actionCatalogue);
 
     const resources = this.parseBusMap(hardware.buses);
     const components = this.parseDeviceMap(hardware.devices);
@@ -443,6 +448,8 @@ export class Parser {
     this.assertLibraryRefs(resources, libraries);
     this.assertBusRefs(components, resources);
     this.assertTimedTransitions(transitions, parameters || []);
+    this.assertTaskIntervals(tasks, parameters || []);
+    this.assertUsable(states, tasks, commands);
 
     // Buses and devices generate macros from the same name, so a collision
     // between the two would silently produce one set of defines.
@@ -462,6 +469,8 @@ export class Parser {
       events,
       states,
       transitions,
+      tasks,
+      commands,
       components,
       resources,
       parameters,
@@ -665,6 +674,116 @@ export class Parser {
         description: entry.description as string | undefined,
       };
     });
+  }
+
+  /**
+   * `tasks:` - work that repeats on an interval.
+   *
+   *   tasks:
+   *     blink: { every: blink_ms, do: toggle_led }
+   *
+   * Not every board is a state machine. A blink or a heartbeat is scheduling,
+   * which is configuration, so it belongs in the model rather than being
+   * dressed up as a two-state HSM.
+   */
+  private parseTaskMap(raw: unknown, catalogue: Map<string, Action>): Task[] {
+    return this.mapEntries(raw, 'tasks').map(([name, def], index) => {
+      if (def.every === undefined) {
+        throw new ParseError(
+          `Task "${name}" has no "every". A task runs on an interval:\n` +
+          `  tasks:\n    ${name}: { every: 500, do: some_action }`
+        );
+      }
+
+      const actions = this.resolveActions(def.do, catalogue, index);
+      if (!actions?.length) {
+        throw new ParseError(`Task "${name}" has no "do", so it would do nothing every ${def.every}ms`);
+      }
+
+      return {
+        name,
+        every: this.parseInterval(def.every, `Task "${name}"`),
+        actions,
+        description: def.description as string | undefined,
+      };
+    });
+  }
+
+  /**
+   * `commands:` - a line of text in, a named action out.
+   *
+   *   commands:
+   *     source: console
+   *     map:
+   *       on:  led_on
+   *       off: led_off
+   *
+   * A dispatch table is data. Pulling arguments out of a command line is not,
+   * and stays in the action you write.
+   */
+  private parseCommands(raw: unknown, catalogue: Map<string, Action>): CommandSet | undefined {
+    if (raw === undefined || raw === null) return undefined;
+
+    if (!isPlainObject(raw)) {
+      throw new ParseError(
+        'commands: must be a mapping:\n' +
+        '  commands:\n    source: console\n    map:\n      on: led_on'
+      );
+    }
+
+    if (!isPlainObject(raw.map)) {
+      throw new ParseError('commands: declares no "map", so no command would ever be recognised');
+    }
+
+    const seen = new Set<string>();
+    const commands: Command[] = Object.entries(raw.map).map(([match, def], index) => {
+      const text = match.trim();
+      if (!text) throw new ParseError('A command cannot be an empty string');
+      if (seen.has(text)) throw new ParseError(`Command "${text}" is declared twice`);
+      seen.add(text);
+
+      // `on: led_on` and `on: [a, b]` are the short forms; the long form is a
+      // mapping, and is the only one that can raise an event.
+      const long = isPlainObject(def) ? def : null;
+      const event = long?.event as string | undefined;
+      if (event !== undefined && !this.eventNames.has(event)) {
+        throw new ParseError(`Command "${text}" raises unknown event "${event}"`);
+      }
+
+      const actions = this.resolveActions(long ? long.do : def, catalogue, index);
+      if (!actions?.length && event === undefined) {
+        throw new ParseError(
+          `Command "${text}" has neither "do" nor "event", so receiving it would do nothing`
+        );
+      }
+
+      return { match: text, actions, event, description: long?.description as string | undefined };
+    });
+
+    return {
+      source: raw.source as string | undefined,
+      commands,
+      reportUnknown: raw.report_unknown === undefined ? true : Boolean(raw.report_unknown),
+    };
+  }
+
+  /** Milliseconds: a positive literal, or the name of an int parameter. */
+  private parseInterval(raw: unknown, where: string): number | string {
+    if (typeof raw === 'number') {
+      if (!Number.isInteger(raw) || raw <= 0) {
+        throw new ParseError(
+          `${where} has an interval of ${raw}. It must be a positive whole number of ` +
+          'milliseconds, or the name of an int parameter.'
+        );
+      }
+      return raw;
+    }
+    if (typeof raw === 'string' && raw.trim()) return raw.trim();
+
+    throw new ParseError(
+      `${where} has an interval of type ${typeof raw}. Use a number of milliseconds, ` +
+      'or the name of an int parameter.'
+    );
   }
 
   /**
@@ -1178,6 +1297,56 @@ export class Parser {
         });
       }
     });
+  }
+
+  /** A task interval naming a parameter must name a real int one. */
+  private assertTaskIntervals(tasks: Task[], parameters: Parameter[]): void {
+    const byName = new Map(parameters.map(p => [p.name, p]));
+
+    for (const task of tasks) {
+      if (typeof task.every !== 'string') continue;
+
+      const parameter = byName.get(task.every);
+      if (!parameter) {
+        const known = [...byName.keys()];
+        throw new ParseError(
+          `Task "${task.name}" runs every "${task.every}", which is not a declared parameter. ` +
+          (known.length ? `Known parameters: ${known.join(', ')}.` : 'No parameters are declared.')
+        );
+      }
+      if (parameter.type !== 'int') {
+        throw new ParseError(
+          `Task "${task.name}" runs every "${task.every}", which is declared as ` +
+          `${parameter.type}. An interval in milliseconds must be an int.`
+        );
+      }
+    }
+  }
+
+  /**
+   * A model has to *do* something.
+   *
+   * A state machine is one way, but not the only one - PulseHSM is one tenant
+   * of this IR, so `tasks:` or `commands:` alone is a complete project. What is
+   * not allowed is a model with none of the three, which would generate a
+   * sketch that runs an empty loop forever.
+   */
+  private assertUsable(
+    states: State[],
+    tasks: Task[],
+    commands: CommandSet | undefined
+  ): void {
+    if (states.length > 0 || tasks.length > 0 || commands) return;
+
+    // Transitions are not checked here: every one names a `from` and a `to`,
+    // and those are resolved against the state list as they are parsed. A
+    // transition with no states cannot get this far.
+    throw new ParseError(
+      'The model does nothing. Give it at least one of:\n' +
+      '  machine:   states and transitions\n' +
+      '  tasks:     work that repeats on an interval\n' +
+      '  commands:  actions to run when a command arrives'
+    );
   }
 
   /**

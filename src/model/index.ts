@@ -1,5 +1,5 @@
 /**
- * PulseHSM IR - Model exports
+ * PulseIR - Model exports
  * 
  * All IR types and interfaces used throughout the system
  */

@@ -65,6 +65,14 @@ const SOURCES = [
     files: { 'blinker.yaml': STARTER },
   },
   {
+    label: 'blink — no state machine at all, just a task',
+    file: 'examples/blink.yaml',
+  },
+  {
+    label: 'serial console — commands over the serial monitor, no state machine',
+    file: 'examples/serial_console.yaml',
+  },
+  {
     label: 'boiler — multi-file, hierarchical states, guards',
     dir: 'examples/boiler',
     entry: 'pulse.yaml',

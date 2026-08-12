@@ -46,6 +46,15 @@ function generate(yamlPath: string): string {
  * unit, so the driver can see the generated enums and state globals.
  */
 function buildAndRun(name: string, sketch: string, driver: string): string {
+  return build(name, sketch, driver, true);
+}
+
+/** Same, for a sketch that declares no state machine and must not need one. */
+function buildAndRunPlain(name: string, sketch: string, driver: string): string {
+  return build(name, sketch, driver, false);
+}
+
+function build(name: string, sketch: string, driver: string, withRuntime: boolean): string {
   const sourcePath = path.join(buildDir, `${name}.cpp`);
   const binaryPath = path.join(buildDir, name);
 
@@ -57,7 +66,9 @@ function buildAndRun(name: string, sketch: string, driver: string): string {
   // model's sizes out of another's.
   const configDir = path.join(buildDir, `${name}-config`);
   fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(path.join(configDir, 'PulseHSM_config.h'), sizingFrom(sketch));
+  if (withRuntime) {
+    fs.writeFileSync(path.join(configDir, 'PulseHSM_config.h'), sizingFrom(sketch));
+  }
 
   execFileSync(
     'g++',
@@ -68,7 +79,9 @@ function buildAndRun(name: string, sketch: string, driver: string): string {
       '-Werror',
       sourcePath,
       path.join(harnessDir, 'serial.cpp'),
-      path.join(depsDir, 'PulseHSM.cpp'),
+      // Deliberately omitted for a machine-less project: if the sketch still
+      // referenced the runtime, this would fail to link, which is the point.
+      ...(withRuntime ? [path.join(depsDir, 'PulseHSM.cpp')] : []),
       `-I${configDir}`,
       `-I${harnessDir}`,
       `-I${depsDir}`,
@@ -141,7 +154,10 @@ static void report() {
 
 // sendEvent() only queues; update() drains the queue and applies the
 // transition, exactly as loop() would.
-static void step(SystemEvent e) {
+//
+// Marked used because a driver may reach the machine only through commands,
+// and the suite builds with -Werror.
+__attribute__((unused)) static void step(SystemEvent e) {
   fsm.sendEvent(e);
   fsm.update();
   report();
@@ -896,6 +912,197 @@ int main() {
     buildAndRun('timers_retuned', sketch, restart),
     ['work/first', 'work/first', 'done'],
     'a duration named by a parameter did not follow the parameter'
+  );
+});
+
+// ============================================================================
+// PROJECTS WITH NO STATE MACHINE
+//
+// PulseHSM is one tenant of this IR, not its foundation. These link *without*
+// PulseHSM.cpp, so any leftover reference to the runtime fails at link time
+// rather than merely being untidy.
+// ============================================================================
+
+test('a blink is a task, and generates no state machine at all', () => {
+  const sketch = generate(path.join(repoRoot, 'examples/blink.yaml'));
+
+  for (const trace of ['PulseHSM', 'fsm.', 'SystemEvent', 'addState']) {
+    assert(!sketch.includes(trace), `a machine-less sketch still mentions "${trace}"`);
+  }
+  assert(sketch.includes('void action_toggle_led(SystemContext* ctx)'), 'no stub for the task action');
+
+  const driver = `
+int main() {
+  setup();
+
+  // blink_ms is 500, so four passes at 499ms apart cross it twice.
+  Serial.println("-- 4 x 499ms");
+  for (int i = 0; i < 4; i++) { pulseTestAdvance(499); loop(); }
+
+  // Retuning at runtime must take effect on the next pass, not at reboot.
+  Serial.println("-- retuned to 100ms");
+  systemParameters.blink_ms = 100;
+  pulseTestAdvance(100); loop();
+  return 0;
+}`;
+
+  const output = buildAndRunPlain('blink', sketch, driver);
+  const runs = output.split('\n').filter(line => line.includes('Action: toggle_led')).length;
+  assert(runs === 3, `expected 3 toggles (2 before the retune, 1 after), got ${runs}\n${output}`);
+  assert(
+    output.indexOf('-- retuned') < output.lastIndexOf('Action: toggle_led'),
+    'the retuned interval never fired'
+  );
+});
+
+test('a serial console sets its own baud rate and dispatches commands', () => {
+  const sketch = generate(path.join(repoRoot, 'examples/serial_console.yaml'));
+
+  // The whole point of declaring the console as a bus: no hardcoded rate.
+  assert(sketch.includes('#define CONSOLE_BAUD 9600'), 'the declared baud rate is missing');
+  assert(!sketch.includes('Serial.begin(115200)'), 'setup() still opens the console at a hardcoded rate');
+  assert(
+    (sketch.match(/Serial\.begin\(/g) || []).length === 1,
+    'the console is opened more than once, so one baud rate silently wins'
+  );
+  assert(!sketch.includes('PulseHSM'), 'a machine-less sketch still references the runtime');
+
+  const driver = `
+int main() {
+  setup();
+
+  Serial.println("-- three lines at once, one of them unknown");
+  Serial.feed("on\\nstatus\\nnope\\n");
+  loop();
+
+  // A serial monitor delivers bytes when it feels like it; a command split
+  // across two passes of loop() has to be reassembled, not dropped.
+  Serial.println("-- one command split across two passes");
+  Serial.feed("of");
+  loop();
+  Serial.feed("f\\n");
+  loop();
+
+  // Too long to fit: refusing is right, truncating would run "on" instead.
+  Serial.println("-- an over-long line, then a good one");
+  for (int i = 0; i < 200; i++) Serial.feed("x");
+  Serial.feed("\\non\\n");
+  loop();
+  return 0;
+}`;
+
+  const output = buildAndRunPlain('serial_console', sketch, driver);
+  const said = (needle: string) => output.includes(needle);
+
+  assert(said('Action: led_on'), '"on" did not run its action');
+  assert(said('Action: report') && said('Action: show_help'), '"status" did not run both its actions');
+  assert(said('Unknown command: nope'), 'an unrecognised command was silently swallowed');
+  assert(said('Action: led_off'), 'a command split across two loop() passes was lost');
+  assert(said('Command too long'), 'an over-long line was not reported');
+
+  // And the reader recovered: the command after the over-long line still ran.
+  const afterOverflow = output.slice(output.indexOf('Command too long'));
+  assert(
+    afterOverflow.includes('Action: led_on'),
+    `the reader did not recover after an over-long line:\n${afterOverflow}`
+  );
+});
+
+test('a machine, tasks and commands work together', () => {
+  // Each of the three was tested alone. Together is where the seams are, and
+  // one of them was real: loop() ran tasks and commands *before* syncContext(),
+  // so an action fired by either saw whatever the last event dispatch left.
+  const sketch = generate(path.join(repoRoot, 'test/fixtures/combined.yaml'));
+
+  assert(sketch.includes('#define CONSOLE_BAUD 19200'), 'the console baud rate was lost among the buses');
+  assert(
+    /void loop\(\) \{\s*\n\s*syncContext\(\);/.test(sketch),
+    'loop() runs tasks and commands before refreshing the context they are handed'
+  );
+
+  const driver = `${DRIVER_PRELUDE}
+int main() {
+  setup();
+  report();
+
+  // A command that raises an event has to reach the machine.
+  Serial.feed("start\\n");
+  loop();
+  report();
+
+  // A task keeps running whatever state the machine is in, and a command that
+  // runs actions directly works alongside it.
+  Serial.println("-- 250ms later, plus a direct command");
+  pulseTestAdvance(250);
+  Serial.feed("report\\n");
+  loop();
+  report();
+
+  // The timed transition out of running/warming is a separate clock from the
+  // task, and reaching it must not depend on the task having fired.
+  Serial.println("-- past hold_ms");
+  pulseTestAdvance(1000);
+  loop();
+  report();
+
+  Serial.println("-- stop");
+  Serial.feed("stop\\n");
+  loop();
+  report();
+  return 0;
+}`;
+
+  const output = buildAndRun('combined', sketch, driver);
+
+  assertTrace(
+    output,
+    [
+      'idle',
+      'running/warming',   // "start" raised START and the machine moved
+      'running/warming',
+      'running/steady',    // the after: timer fired, independently of the task
+      'idle',              // "stop" raised STOP from the inner state
+    ],
+    'combined dispatch trace mismatch'
+  );
+
+  // The task ran on its own clock throughout, and the multi-action command ran
+  // both of its actions.
+  const samples = output.split('\n').filter(l => l.includes('Action: sample')).length;
+  assert(samples >= 2, `the task and the command should both have sampled, saw ${samples}`);
+  assert(output.includes('Action: announce'), 'the second action of a multi-action command never ran');
+});
+
+test('a project with no machine gets no runtime vendored beside it', () => {
+  // Shipping a copy of PulseHSM with a blink would claim a dependency that is
+  // not there, and leave a PulseHSM_config.h sizing a table nothing allocates.
+  const project = new Parser().parseFrom(
+    path.join(repoRoot, 'examples/blink.yaml'),
+    new FileResolver()
+  );
+  const files = new Codegen().generateFiles(project);
+
+  assert(!files.needsRuntime, 'a machine-less project asked for the runtime');
+  assert(
+    !files.generated.some(f => f.path === 'PulseHSM_config.h'),
+    'a machine-less project was given a runtime sizing header'
+  );
+  assert(
+    !files.scaffolds.some(f => f.path.includes('guards')),
+    'a machine-less project was given a guards file; guards live on transitions'
+  );
+  for (const file of [...files.generated, ...files.scaffolds]) {
+    assert(!file.contents.includes('PulseHSM'), `${file.path} still references the runtime`);
+  }
+
+  // And the same model with a machine does still get all of it.
+  const withMachine = new Codegen().generateFiles(
+    new Parser().parseFrom(path.join(repoRoot, 'examples/boiler/pulse.yaml'), new FileResolver())
+  );
+  assert(withMachine.needsRuntime, 'a project with a machine no longer asks for the runtime');
+  assert(
+    withMachine.generated.some(f => f.path === 'PulseHSM_config.h'),
+    'a project with a machine lost its sizing header'
   );
 });
 

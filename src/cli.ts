@@ -113,10 +113,13 @@ async function main() {
         // The sketch is one file, but the build is not: PulseHSM.cpp is
         // compiled separately and would keep its default table sizes, silently
         // refusing states past the eighth. The config header is what stops
-        // that, so it goes next to the sketch.
-        const configPath = path.join(path.dirname(outputPath), 'PulseHSM_config.h');
-        fs.writeFileSync(configPath, codegen.generateConfigHeader());
-        console.log(`✓ Written to ${configPath} (keep it beside PulseHSM.h)`);
+        // that, so it goes next to the sketch - but only for a project that
+        // has a state machine at all.
+        if (project.system.states.length > 0) {
+          const configPath = path.join(path.dirname(outputPath), 'PulseHSM_config.h');
+          fs.writeFileSync(configPath, codegen.generateConfigHeader());
+          console.log(`✓ Written to ${configPath} (keep it beside PulseHSM.h)`);
+        }
       } else {
         console.log(cppCode);
       }
@@ -164,6 +167,14 @@ function writeProject(dir: string, project: GeneratedProject): void {
     }
     fs.writeFileSync(target, file.contents);
     console.log(`  ✓ ${file.path} (yours to fill in)`);
+  }
+
+  // A project with no state machine never touches PulseHSM, and shipping a
+  // copy of it anyway would claim a dependency that is not there.
+  if (!project.needsRuntime) {
+    console.log(`✓ Sketch folder ready at ${dir}`);
+    console.log('  (no state machine in this model, so no runtime was vendored)');
+    return;
   }
 
   // Vendored rather than assumed installed: the sketch folder owns its runtime,

@@ -1,5 +1,10 @@
 /**
- * PulseHSM IR Code Generator
+ * Arduino backend for PulseIR.
+ *
+ * This is *a* backend, not the IR: it turns a PulseModel into an Arduino
+ * sketch. When the model declares a state machine it targets the PulseHSM
+ * runtime; when it does not, it emits plain Arduino with no runtime at all,
+ * and `hasMachine` is the seam between the two.
  *
  * Converts PulseModel → C++ code targeting the PulseHSM runtime (deps/).
  *
@@ -27,6 +32,7 @@ import type {
   State,
   Transition,
   Parameter,
+  Resource,
   StateRef,
 } from '../model/index.js';
 import { InterfaceBackend } from './interfaces.js';
@@ -84,6 +90,14 @@ export interface GeneratedFile {
 }
 
 export interface GeneratedProject {
+  /**
+   * Whether this project uses PulseHSM at all.
+   *
+   * False for a model with no `machine:`, and the caller must not vendor the
+   * runtime beside it - shipping a copy of PulseHSM with a blink would say the
+   * dependency exists when it does not.
+   */
+  needsRuntime: boolean;
   /** Rewritten on every run. Never edit these. */
   generated: GeneratedFile[];
   /** Written only if absent, so your implementations survive regeneration. */
@@ -98,6 +112,18 @@ export class Codegen {
 
   /** Index of the synthetic root, or -1 when the model has no wildcards. */
   private rootIndex = -1;
+
+  /**
+   * True when the model declares a state machine.
+   *
+   * PulseHSM is one tenant of this IR, not its foundation: a blink, or a board
+   * that answers commands over the serial monitor, is a complete project with
+   * no states at all. When this is false nothing about the runtime is emitted -
+   * no include, no sizing header, no fsm - and the sketch is plain Arduino.
+   */
+  private get hasMachine(): boolean {
+    return this.states.length > 0;
+  }
 
   /** transition index → guard binding (only for transitions that have a guard) */
   private guards: Map<number, GuardBinding> = new Map();
@@ -141,6 +167,8 @@ export class Codegen {
       this.generateActionDeclarations(),
       this.generateEventHandlers(),
       this.generateTimeouts(),
+      this.generateTasks(),
+      this.generateCommands(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
       this.generateGuardImplementations(),
@@ -172,13 +200,20 @@ export class Codegen {
     const actionName = 'src/actions.cpp';
 
     return {
+      // Only a project with a state machine needs the runtime, the header that
+      // sizes it, or a place to put guards - guards live on transitions.
+      needsRuntime: this.hasMachine,
       generated: [
-        { path: 'PulseHSM_config.h', contents: this.generateConfigHeader() },
+        ...(this.hasMachine
+          ? [{ path: 'PulseHSM_config.h', contents: this.generateConfigHeader() }]
+          : []),
         { path: headerName, contents: this.composeHeader(headerName) },
         { path: `${base}.ino`, contents: this.composeSketch(headerName) },
       ],
       scaffolds: [
-        { path: guardName, contents: this.composeGuardFile(headerName) },
+        ...(this.hasMachine
+          ? [{ path: guardName, contents: this.composeGuardFile(headerName) }]
+          : []),
         { path: actionName, contents: this.composeActionFile(headerName) },
       ],
     };
@@ -197,7 +232,7 @@ export class Codegen {
       this.declParameterStruct(),
       this.declSensorStruct(),
       this.declContextStruct(),
-      this.machineGlobals(true),
+      this.hasMachine ? this.machineGlobals(true) : '',
       `// Instances the sketch defines.
 extern SystemParameters systemParameters;
 extern SystemSensors systemSensors;
@@ -219,15 +254,19 @@ void setupInterfaces();${this.declInterfaceGlobals()}`,
     // The sizing macros must precede PulseHSM.h, and the header does that -
     // so the sketch includes the header first and nothing else.
     return [
-      `/**\n * PulseHSM Generated Code - DO NOT EDIT.\n *\n * Regenerated from the model every time. Your guards and actions live in\n * src/, which this file never overwrites.\n */\n\n#include "${headerName}"`,
+      `/**\n * PulseIR Generated Code - DO NOT EDIT.\n *\n * Regenerated from the model every time. Your guards and actions live in\n * src/, which this file never overwrites.\n */\n\n#include "${headerName}"`,
       this.defEventNames(),
       this.defParameterInstance(),
       'SystemSensors systemSensors = {};',
       'SystemContext systemContext;',
-      this.machineGlobals(false).replace(/^\/\/ =+\n\/\/ STATE MACHINE\n\/\/ =+\n\n/m, ''),
+      this.hasMachine
+        ? this.machineGlobals(false).replace(/^\/\/ =+\n\/\/ STATE MACHINE\n\/\/ =+\n\n/m, '')
+        : '',
       this.defInterfaces().trimStart(),
       this.generateEventHandlers(),
       this.generateTimeouts(),
+      this.generateTasks(),
+      this.generateCommands(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
     ].join('\n\n') + '\n';
@@ -379,17 +418,42 @@ ${this.generateActionImplementations()}
   private generateHeader(): string {
     const { name, version } = this.project;
     const date = new Date().toISOString().split('T')[0];
-    const { maxStates, maxEvents, levels } = this.sizing();
 
-    return `/**
- * PulseHSM Generated Code
+    const preamble = `/**
+ * PulseIR Generated Code
  *
  * Project: ${name}
  * Version: ${version}
  * Generated: ${date}
  *
- * This file was auto-generated from a PulseHSM model.
+ * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
+ *
+ * Runtime: none. This model declares no state machine, so the sketch below is
+ * plain Arduino and needs no library beyond the core.
+ *
+ * Action signatures follow FUNCTION_CONTRACT.md:
+ *   void action_<name>(SystemContext* ctx)
+ */`;
+
+    // No state machine, so no runtime: this is a plain Arduino sketch.
+    if (!this.hasMachine) {
+      return `${preamble}\n\n#include <Arduino.h>`;
+    }
+
+    const { maxStates, maxEvents, levels } = this.sizing();
+
+    return `/**
+ * PulseIR Generated Code
+ *
+ * Project: ${name}
+ * Version: ${version}
+ * Generated: ${date}
+ *
+ * This file was auto-generated from a PulseIR model.
+ * DO NOT EDIT MANUALLY - regenerate from source instead.
+ *
+ * Runtime: PulseHSM (this model declares a state machine).
  *
  * Guard/action signatures follow FUNCTION_CONTRACT.md:
  *   bool guard_<name>(const SystemContext* ctx)
@@ -575,7 +639,11 @@ ${body.length > 0 ? body.join('\n').replace(/\n+$/, '') : '  // Nothing to initi
   private generateEventEnum(): string {
     const events = this.project.system.events;
     if (events.length === 0) {
-      throw new CodegenError('System defines no events; nothing to dispatch');
+      if (this.hasMachine) {
+        throw new CodegenError('System defines no events; nothing to dispatch');
+      }
+      // A machine-less project has nothing to dispatch, so there is no enum.
+      return '';
     }
     if (events.length > 256) {
       throw new CodegenError('PulseHSM event IDs are uint8_t; at most 256 events are supported');
@@ -734,7 +802,7 @@ struct SystemContext {
   // =========================================================================
 
   private generateMachineDeclarations(): string {
-    return this.machineGlobals(false);
+    return this.hasMachine ? this.machineGlobals(false) : '';
   }
 
   /**
@@ -768,6 +836,8 @@ ${indices}`;
   // =========================================================================
 
   private generateGuardDeclarations(): string {
+    if (!this.hasMachine) return '';
+
     if (this.guardStubs.size === 0) {
       return `// ============================================================================
 // GUARD DECLARATIONS
@@ -820,7 +890,10 @@ ${declarations}`;
       handlers.push(this.generateHandler(flat, owned));
     }
 
-    const sync = `// Refresh the context handed to every guard and action.
+    // Without a machine there is no runtime to ask where we are, so the state
+    // fields stay at their "no state" values and only the data is refreshed.
+    const sync = this.hasMachine
+      ? `// Refresh the context handed to every guard and action.
 // Called at the top of each handler so guards see the live machine state.
 static void syncContext() {
   systemContext.currentState = fsm.getCurrentState();
@@ -828,9 +901,21 @@ static void syncContext() {
   systemContext.eventData = fsm.getEventData();
   systemContext.parameters = &systemParameters;
   systemContext.sensors = &systemSensors;
+}`
+      : `// Refresh the context handed to every action. This project has no state
+// machine, so the state fields stay at -1 and only the data is refreshed.
+static void syncContext() {
+  systemContext.currentState = -1;
+  systemContext.previousState = -1;
+  systemContext.eventData = 0;
+  systemContext.parameters = &systemParameters;
+  systemContext.sensors = &systemSensors;
 }`;
 
     if (handlers.length === 0) {
+      // A machine-less project still needs syncContext, but not the heading.
+      if (!this.hasMachine) return sync;
+
       return `// ============================================================================
 // EVENT HANDLERS
 // ============================================================================
@@ -940,9 +1025,6 @@ ${cases.join('\n')}
   // =========================================================================
 
   private generateSetupFunction(): string {
-    if (this.states.length === 0) {
-      throw new CodegenError('System defines no states; nothing to generate');
-    }
 
     const components = this.project.system.components || [];
     const gpioComponents = components.filter(c => c.driver.includes('gpio'));
@@ -989,31 +1071,16 @@ ${cases.join('\n')}
       .join('\n\n');
 
     // begin() requires a leaf, so descend the initial chain from the first
-    // top-level state in the model.
+    // top-level state in the model. Only meaningful when there is a machine.
     const firstTopLevel = this.states.findIndex(s => s.parent === -1 && s.path !== ROOT_PATH);
     const rootRelative = this.rootIndex !== -1
       ? this.states.findIndex(s => s.parent === this.rootIndex)
       : firstTopLevel;
-    const startIndex = this.resolveEntry(rootRelative === -1 ? 0 : rootRelative);
+    const startIndex = this.hasMachine
+      ? this.resolveEntry(rootRelative === -1 ? 0 : rootRelative)
+      : -1;
 
-    return `// ============================================================================
-// SETUP
-// ============================================================================
-
-${componentComments}
-
-void setup() {
-  Serial.begin(115200);
-  Serial.println("\\n\\n=== ${this.project.name} v${this.project.version} ===");
-
-  // Buses and peripherals declared as resources
-  setupInterfaces();
-
-
-  // Wire up the context handed to every guard and action
-  systemContext.parameters = &systemParameters;
-  systemContext.sensors = &systemSensors;
-
+    const machineSetup = !this.hasMachine ? '' : `
   // Register states. Parents are registered before their children.
 ${registrations}
 
@@ -1023,7 +1090,198 @@ ${this.registrationCheck()}
 
   Serial.print("Initial state: ");
   Serial.println(fsm.getCurrentName());
+`;
+
+    return `// ============================================================================
+// SETUP
+// ============================================================================
+
+${componentComments}
+
+void setup() {
+${this.consoleSetup()}
+  // Buses and peripherals declared as resources
+  setupInterfaces();
+
+  // Wire up the context handed to every action
+  systemContext.parameters = &systemParameters;
+  systemContext.sensors = &systemSensors;
+${machineSetup}}`;
+  }
+
+  // =========================================================================
+  // CONSOLE, TASKS AND COMMANDS
+  //
+  // None of this needs a state machine. A blink is scheduling and a command
+  // table is a lookup, so both are configuration, and both belong to projects
+  // that never declare a state at all.
+  // =========================================================================
+
+  /** The declared UART that owns the console, if the model declares one. */
+  private consoleResource(): Resource | undefined {
+    const named = this.project.system.commands?.source;
+    const buses = this.project.system.resources || [];
+
+    if (named) {
+      const found = buses.find(r => r.name === named);
+      if (!found) {
+        throw new CodegenError(
+          `commands.source is "${named}", which is not a declared bus. ` +
+          `Declare it under hardware.buses, or drop the line to use the default console.`
+        );
+      }
+      return found;
+    }
+
+    // Port 0 is the USB serial monitor on every board this targets.
+    return buses.find(r => String(r.interface) === 'uart' && Number(r.binding?.port ?? 1) === 0);
+  }
+
+  /** The C expression naming the console stream, e.g. `Serial`. */
+  private consoleStream(): string {
+    const resource = this.consoleResource();
+    if (!resource) return 'Serial';
+
+    const port = Number(resource.binding?.port ?? 1);
+    return port === 0 ? 'Serial' : `Serial${port}`;
+  }
+
+  /**
+   * Opening the console.
+   *
+   * A declared uart on port 0 already emits its own `Serial.begin(baud)` in
+   * setupInterfaces(), so opening it again here at a hardcoded 115200 would
+   * quietly override the baud rate the model asked for.
+   */
+  private consoleSetup(): string {
+    const declared = this.consoleResource();
+    const banner = `  ${this.consoleStream()}.println("\\n\\n=== ${this.project.name} v${this.project.version} ===");`;
+
+    if (declared && Number(declared.binding?.port ?? 1) === 0) {
+      return `  // ${declared.name} opens the console; setupInterfaces() sets its baud rate.\n  setupInterfaces();\n${banner}\n`;
+    }
+    return `  Serial.begin(115200);\n${banner}\n`;
+  }
+
+  /** `enteredAt`-style globals and the loop body for `tasks:`. */
+  private generateTasks(): string {
+    const tasks = this.project.system.tasks || [];
+    if (tasks.length === 0) return '';
+
+    const blocks = tasks.map(task => {
+      const base = this.sanitize(task.name);
+      const interval = typeof task.every === 'string'
+        ? `(unsigned long)systemParameters.${this.sanitize(task.every)}`
+        : `${task.every}UL`;
+      const source = typeof task.every === 'string' ? `${task.every} (parameter)` : `every ${task.every}ms`;
+      const calls = task.actions
+        .map(a => `  action_${this.sanitize(a.name)}(&systemContext);`)
+        .join('\n');
+
+      return `// Task "${task.name}" - ${source}.${task.description ? `\n// ${task.description}` : ''}
+static unsigned long lastRun_${base} = 0;
+
+static void runTask_${base}() {
+  if (millis() - lastRun_${base} < ${interval}) return;
+  // Anchor to now rather than to the deadline: a late run must not queue up
+  // catch-up runs, which on a busy loop turns a blink into a stutter.
+  lastRun_${base} = millis();
+
+${calls}
 }`;
+    });
+
+    return `// ============================================================================
+// TASKS
+// ============================================================================
+//
+// Each runs on its own interval, checked every pass of loop(). An interval
+// naming a parameter is read every time, so retuning it takes effect at once.
+// Subtraction on unsigned long is correct across the millis() rollover.
+
+${blocks.join('\n\n')}`;
+  }
+
+  /** The line reader and dispatch table for `commands:`. */
+  private generateCommands(): string {
+    const set = this.project.system.commands;
+    if (!set) return '';
+
+    const stream = this.consoleStream();
+
+    const cases = set.commands.map(command => {
+      const calls = (command.actions || [])
+        .map(a => `    action_${this.sanitize(a.name)}(&systemContext);`)
+        .join('\n');
+      const raise = command.event
+        ? `    fsm.sendEvent(EVENT_${this.sanitizeUpper(command.event)});`
+        : '';
+
+      return `  if (strcmp(line, ${JSON.stringify(command.match)}) == 0) {${
+        command.description ? `\n    // ${command.description}` : ''
+      }
+${[calls, raise].filter(Boolean).join('\n')}
+    return;
+  }`;
+    });
+
+    const unknown = set.reportUnknown === false ? '' : `
+  ${stream}.print("Unknown command: ");
+  ${stream}.println(line);`;
+
+    return `// ============================================================================
+// COMMANDS
+// ============================================================================
+//
+// One line of text in, one named action out. Reading the line is generated;
+// making sense of anything *inside* it is not - that belongs in your action,
+// where a parser can be written and debugged like ordinary C.
+
+// Most Arduino cores pull this in through Arduino.h, but not all of them, and
+// the dispatch table below is nothing but strcmp.
+#include <string.h>
+
+/** Longest command line accepted. Anything longer is reported and discarded. */
+#define COMMAND_BUFFER 64
+
+static char commandLine[COMMAND_BUFFER];
+static uint8_t commandLength = 0;
+static bool commandOverflow = false;
+
+static void dispatchCommand(const char* line) {
+${cases.join('\n')}${unknown}
+}
+
+/**
+ * Read whatever has arrived, a line at a time.
+ *
+ * Never blocks: it consumes only what is already buffered, so loop() keeps
+ * running whether or not anyone is typing.
+ */
+static void pollCommands() {
+  while (${stream}.available() > 0) {
+    const int next = ${stream}.read();
+
+    if (next == '\\n' || next == '\\r') {
+      if (commandOverflow) {
+        ${stream}.println("Command too long; ignored.");
+several_reset
+      } else if (commandLength > 0) {
+        commandLine[commandLength] = '\\0';
+        dispatchCommand(commandLine);
+several_reset
+      }
+      continue;
+    }
+
+    if (commandLength >= COMMAND_BUFFER - 1) {
+      // Truncating and dispatching would run the wrong command; refuse instead.
+      commandOverflow = true;
+      continue;
+    }
+    commandLine[commandLength++] = (char)next;
+  }
+}`.replace(/several_reset/g, '        commandLength = 0;\n        commandOverflow = false;');
   }
 
   /** The two C names a state with timed transitions needs. */
@@ -1160,15 +1418,19 @@ ${blocks.join('\n\n')}`;
   // =========================================================================
 
   private generateLoopFunction(): string {
-    const example = this.project.system.events[0];
-    const exampleName = example ? `EVENT_${this.sanitizeUpper(example.name)}` : 'EVENT_NONE';
+    const body: string[] = [];
 
-    return `// ============================================================================
-// MAIN LOOP
-// ============================================================================
+    if (this.project.system.commands) body.push('  pollCommands();');
 
-void loop() {
-  // TODO: Read sensors into systemSensors, then raise events.
+    for (const task of this.project.system.tasks || []) {
+      body.push(`  runTask_${this.sanitize(task.name)}();`);
+    }
+
+    if (this.hasMachine) {
+      const example = this.project.system.events[0];
+      const exampleName = example ? `EVENT_${this.sanitizeUpper(example.name)}` : 'EVENT_NONE';
+
+      body.push(`  // TODO: Read sensors into systemSensors, then raise events.
   // Example:
   //   systemSensors.temperature = readTemperature();
   //   if (systemSensors.temperature >= systemParameters.setpoint) {
@@ -1176,9 +1438,28 @@ void loop() {
   //   }
   //
   // sendEvent() is ISR-safe, so interrupts may call it directly.
-  // Never call delay() here - it starves fsm.update().
 
-  fsm.update();
+  fsm.update();`);
+    } else if (body.length === 0) {
+      body.push('  // Nothing declared to run. Add tasks: or commands: to the model.');
+    }
+
+    // Tasks and commands call actions from loop(), not from an event handler,
+    // so nothing else has refreshed the context they are handed. With a machine
+    // this used to be skipped, and those actions saw whatever the last event
+    // dispatch left behind - a stale currentState and a stale eventData.
+    const sync = this.project.system.commands || (this.project.system.tasks || []).length
+      ? '  syncContext();\n'
+      : '';
+
+    return `// ============================================================================
+// MAIN LOOP
+// ============================================================================
+//
+// Never call delay() here: it stops everything below it from running.
+
+void loop() {
+${sync}${body.join('\n')}
 }`;
   }
 
@@ -1187,6 +1468,8 @@ void loop() {
   // =========================================================================
 
   private generateGuardImplementations(): string {
+    if (!this.hasMachine) return '';
+
     if (this.guardStubs.size === 0) {
       return `// ============================================================================
 // GUARD IMPLEMENTATIONS
@@ -1403,14 +1686,23 @@ ${implementations.join('\n\n')}`;
   }
 
   private indexActions(): void {
-    this.project.system.transitions.forEach((t, idx) => {
-      for (const a of t.actions || []) {
-        if (!a.name) {
-          throw new CodegenError(`Transition ${idx} has an action without a name`);
-        }
-        this.actionNames.add(a.name);
+    const collect = (actions: { name: string }[] | undefined, where: string) => {
+      for (const action of actions || []) {
+        if (!action.name) throw new CodegenError(`${where} has an action without a name`);
+        this.actionNames.add(action.name);
       }
-    });
+    };
+
+    this.project.system.transitions.forEach((t, idx) => collect(t.actions, `Transition ${idx}`));
+
+    // Tasks and commands call actions too, and a machine-less project has
+    // nothing but those - miss them and it generates no stubs at all.
+    for (const task of this.project.system.tasks || []) {
+      collect(task.actions, `Task "${task.name}"`);
+    }
+    for (const command of this.project.system.commands?.commands || []) {
+      collect(command.actions, `Command "${command.match}"`);
+    }
   }
 
   private indexTransitions(): void {

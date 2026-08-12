@@ -1,0 +1,74 @@
+# A state machine, tasks and commands in one model.
+#
+# Each of the three works on its own; this fixture is about them together,
+# which is where the seams are:
+#
+#   - a command that raises an event has to reach the machine
+#   - an action fired from a task or a command runs outside any event dispatch,
+#     so the context it is handed has to be refreshed by loop(), not by a
+#     handler that may not have run for a while
+#   - the console's baud rate must survive being one of several buses
+
+project:
+  name: combined
+  version: "1.0"
+
+target:
+  board: esp32
+
+hardware:
+  buses:
+    console:   { interface: uart, port: 0, baud: 19200 }
+    field_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    led:  { type: digital_output, pin: GPIO2 }
+    temp: { type: analog_input, pin: GPIO34, unit: degC }
+
+parameters:
+  poll_ms:  { type: int, default: 250 }
+  hold_ms:  { type: int, default: 1000 }
+
+events:
+  START: { source: external }
+  STOP:  { source: external }
+  TRIP:  { source: sensor }
+
+actions:
+  led_on:   { driver: gpio_control, params: { device: led, value: HIGH } }
+  led_off:  { driver: gpio_control, params: { device: led, value: LOW } }
+  sample:   { driver: adc_read }
+  announce: { driver: console_report }
+
+machine:
+  states:
+    idle:
+    running:
+      initial: warming
+      states:
+        warming:
+        steady:
+    tripped:
+
+  transitions:
+    - { from: idle, on: START, to: running, do: led_on }
+    - { from: running, on: STOP, to: idle, do: led_off }
+
+    # A timed transition alongside tasks: both are clocks, and they must not
+    # interfere with each other.
+    - { from: running/warming, after: hold_ms, to: running/steady }
+
+    - { from: "*", on: TRIP, to: tripped, do: led_off }
+
+tasks:
+  # Runs regardless of which state the machine is in.
+  poll:
+    every: poll_ms
+    do: sample
+
+commands:
+  source: console
+  map:
+    start:  { event: START }
+    stop:   { event: STOP }
+    now:    sample
+    report: [sample, announce]
