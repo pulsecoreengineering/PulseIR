@@ -39,6 +39,8 @@ const $ = <T extends HTMLElement>(id: string): T => {
 const source = $<HTMLTextAreaElement>('source');
 const highlightLayer = $<HTMLPreElement>('highlight');
 const gutter = $<HTMLDivElement>('gutter');
+const gutterLines = $<HTMLDivElement>('gutter-lines');
+const highlightCode = $<HTMLElement>('highlight-code');
 const status = $<HTMLDivElement>('status');
 const fileBar = $<HTMLDivElement>('file-bar');
 const panes = {
@@ -190,17 +192,29 @@ function paint(): void {
 
   // A trailing newline needs a line to sit on, or the last line of a
   // scrolled-to-the-bottom document has nothing beneath the caret.
-  highlightLayer.innerHTML = `<code>${highlight(text)}\n</code>`;
+  highlightCode.innerHTML = `${highlight(text)}\n`;
   syncScroll();
 }
 
-/** Keep the colour layer under the same part of the document as the caret. */
+/**
+ * Keep the colour layer and the numbers under the same part of the document as
+ * the caret.
+ *
+ * By transform, not by setting scrollTop on them. scrollTop is clamped to the
+ * element's own `scrollHeight - clientHeight`, and the textarea's client box is
+ * shorter than the overlays' whenever it shows a scrollbar that consumes layout
+ * space - which classic Windows scrollbars do and overlay ones do not. The
+ * textarea could then scroll about 15px further than the layers beneath it
+ * could follow, so near the bottom of a long file the text sat almost a line
+ * away from the caret. A transform has no clamp.
+ */
 function syncScroll(): void {
-  highlightLayer.scrollTop = source.scrollTop;
-  highlightLayer.scrollLeft = source.scrollLeft;
+  const x = source.scrollLeft;
+  const y = source.scrollTop;
+  highlightCode.style.transform = `translate(${-x}px, ${-y}px)`;
   // The gutter follows vertically only: numbers stay put while a long line
   // scrolls sideways past them.
-  gutter.scrollTop = source.scrollTop;
+  gutterLines.style.transform = `translateY(${-y}px)`;
 }
 
 /**
@@ -227,8 +241,7 @@ function paintGutter(): void {
   for (let n = 1; n <= lines; n++) {
     numbers.push(`<span class="ln${n === badLine ? ' bad' : ''}">${n}</span>`);
   }
-  gutter.innerHTML = numbers.join('');
-  gutter.scrollTop = source.scrollTop;
+  gutterLines.innerHTML = numbers.join('');
 }
 
 /** Mark, or clear, the line the parser objected to. */

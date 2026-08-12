@@ -157,9 +157,10 @@ test('the highlight overlay shares every metric with the textarea', () => {
     'an unscoped "pre code" rule is back; scope it to .pane or it hits the editor'
   );
 
-  // And the overlay's <code> must inherit rather than set its own.
+  // And the overlay's <code> must inherit rather than set its own. The rule is
+  // a selector list, since the gutter's inner layer needs the same treatment.
   assert(
-    /#highlight code\s*\{[^}]*font:\s*inherit/.test(html),
+    /#highlight code[^{]*\{[^}]*font:\s*inherit/.test(html),
     'the overlay <code> does not inherit its font from .editor-text'
   );
 
@@ -229,12 +230,12 @@ test('the line gutter lines up with the text and stays out of a copy', () => {
 
   // Vertical only: numbers stay put while a long line scrolls sideways.
   assert(
-    /gutter\.scrollTop = source\.scrollTop/.test(main),
-    'the gutter is not scrolled with the text'
+    /gutterLines\.style\.transform = `translateY\(\$\{-y\}px\)`/.test(main),
+    'the gutter is not kept in step with the text'
   );
   assert(
-    !/gutter\.scrollLeft/.test(main),
-    'the gutter must not scroll horizontally with the text'
+    !/gutterLines\.style\.transform = `translate\(/.test(main),
+    'the gutter must not move sideways with the text'
   );
 
   // Numbers survive the degraded path, where colouring is switched off.
@@ -244,6 +245,34 @@ test('the line gutter lines up with the text and stays out of a copy', () => {
   assert(
     gutterAt !== -1 && limitAt !== -1 && gutterAt < limitAt,
     'a file too large to highlight would be left with stale line numbers'
+  );
+});
+
+test('the overlays are moved by transform, never by scrolling them', () => {
+  // This shipped broken. The layers were kept in step by setting their
+  // scrollTop, which the browser clamps to each element's own
+  // `scrollHeight - clientHeight`. A classic Windows scrollbar takes up layout
+  // space and shortens the *textarea's* client box but not the overlays', so
+  // the textarea could scroll ~15px further than they could follow: near the
+  // bottom of a long file the caret sat most of a line away from its own text.
+  // Headless Linux uses overlay scrollbars, which take no space, which is
+  // exactly why the browser check missed it. A transform has no clamp.
+  //
+  // `npm run check:editor` measures the real thing; this stops the mechanism
+  // being swapped back.
+  const main = read('web/main.ts');
+  const sync = /function syncScroll\(\): void \{([\s\S]*?)\n\}/.exec(main)?.[1];
+
+  assert(!!sync, 'syncScroll() not found - has it been renamed?');
+  assert(
+    /\.style\.transform = /.test(sync!),
+    'syncScroll() no longer positions the layers with a transform'
+  );
+  assert(
+    !/\.scroll(Top|Left) = /.test(sync!),
+    'syncScroll() sets scrollTop/scrollLeft on an overlay; that clamps, and the ' +
+    'layers drift from the caret near the bottom of a long file on any platform ' +
+    'with scrollbars that take up space'
   );
 });
 

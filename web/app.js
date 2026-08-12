@@ -6354,6 +6354,8 @@ ${implementations.join("\n\n")}`;
   var source = $("source");
   var highlightLayer = $("highlight");
   var gutter = $("gutter");
+  var gutterLines = $("gutter-lines");
+  var highlightCode = $("highlight-code");
   var status = $("status");
   var fileBar = $("file-bar");
   var panes = {
@@ -6449,14 +6451,15 @@ machine:
       source.style.color = "";
       highlightLayer.hidden = false;
     }
-    highlightLayer.innerHTML = `<code>${highlight(text)}
-</code>`;
+    highlightCode.innerHTML = `${highlight(text)}
+`;
     syncScroll();
   }
   function syncScroll() {
-    highlightLayer.scrollTop = source.scrollTop;
-    highlightLayer.scrollLeft = source.scrollLeft;
-    gutter.scrollTop = source.scrollTop;
+    const x = source.scrollLeft;
+    const y = source.scrollTop;
+    highlightCode.style.transform = `translate(${-x}px, ${-y}px)`;
+    gutterLines.style.transform = `translateY(${-y}px)`;
   }
   var badLine = null;
   function paintGutter() {
@@ -6467,8 +6470,7 @@ machine:
     for (let n = 1; n <= lines; n++) {
       numbers.push(`<span class="ln${n === badLine ? " bad" : ""}">${n}</span>`);
     }
-    gutter.innerHTML = numbers.join("");
-    gutter.scrollTop = source.scrollTop;
+    gutterLines.innerHTML = numbers.join("");
   }
   function setBadLine(line) {
     if (badLine === line)

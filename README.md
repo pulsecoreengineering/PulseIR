@@ -308,6 +308,10 @@ examples can no longer cost you your work.
 > **The exported folder is the durable copy** — export anything you want to
 > keep, or commit it.
 
+```bash
+npm run check:editor   # optional: verifies the editor's layers in a real browser
+```
+
 The YAML pane is syntax-highlighted — keys, strings, numbers, comments and
 flow collections — with no editor library and no network: a colour layer sits
 exactly beneath a transparent textarea. `on:` and `off:` stay keys, because in
@@ -343,6 +347,14 @@ uses, compiled to a bundle. It cannot drift from what `pulse-ir` writes to disk.
 
 Re-run `npm run build:web` after changing anything under `src/` or `examples/`;
 `npm test` fails if the committed bundle or baked examples go stale.
+
+The editor draws its coloured text and line numbers **behind** a transparent
+textarea, so whether those layers sit exactly under the caret is a rendering
+property no amount of reading the source can prove. `npm run check:editor`
+measures it in a real browser — at every corner of the scroll range, and with
+the textarea shortened to reproduce the classic Windows scrollbars that
+headless Linux does not have. It skips itself when Playwright is not installed,
+so it is not part of `npm test`.
 
 `web/app.js` and `web/examples.ts` are generated but committed, so rebuilding
 has to be a genuine no-op or every `npm run web` blocks the next `git pull`.
