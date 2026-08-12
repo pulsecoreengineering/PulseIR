@@ -34,7 +34,18 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+/**
+ * Read a repo file with line endings normalised.
+ *
+ * A Windows checkout hands these back as CRLF, and every comparison below is
+ * about content rather than line endings - see the LF test at the bottom for
+ * the part that does care.
+ */
 const read = (relative: string): string =>
+  fs.readFileSync(path.join(repoRoot, relative), 'utf8').replace(/\r\n?/g, '\n');
+
+/** Read without normalising, for the tests that are about the bytes. */
+const readRaw = (relative: string): string =>
   fs.readFileSync(path.join(repoRoot, relative), 'utf8');
 
 // ============================================================================
@@ -75,7 +86,7 @@ test('multi-file examples are baked with every file they include', () => {
   // The editor resolves includes between open buffers, so every file the
   // model references has to be present or the example cannot load.
   for (const name of fs.readdirSync(dir).filter(f => f.endsWith('.yaml'))) {
-    const contents = fs.readFileSync(path.join(dir, name), 'utf8');
+    const contents = read(path.join('examples/greenhouse', name));
     assert(module.includes(JSON.stringify(name)), `greenhouse example is missing ${name}`);
     assert(module.includes(JSON.stringify(contents)), `${name} in the editor differs from disk`);
   }
@@ -172,6 +183,42 @@ test('the editor paints highlighting on every path that changes the text', () =>
   assert(
     main.includes("source.addEventListener('scroll', syncScroll"),
     'the colour layer is not kept in step when the textarea scrolls'
+  );
+});
+
+test('the committed artefacts are LF, so a rebuild is a no-op on any platform', () => {
+  // This blocked a `git pull` twice. web/app.js and web/examples.ts are
+  // generated but committed; on a Windows checkout the sources arrive as CRLF,
+  // the rebuild carries that into the output, and the regenerated files really
+  // are different - so git reports local changes and refuses to merge.
+  //
+  // Fixed in two places, and both are checked here: .gitattributes pins the
+  // working tree to LF, and the build normalises whatever it is handed.
+  for (const artefact of ['web/app.js', 'web/examples.ts']) {
+    const contents = readRaw(artefact);
+    const at = contents.indexOf('\r');
+    assert(
+      at === -1,
+      `${artefact} contains a CR at offset ${at}; generated files must be LF-only`
+    );
+  }
+
+  // examples.ts embeds the models as escaped strings, so a CRLF that got in
+  // before JSON.stringify survives as a literal backslash-r and would never be
+  // caught by normalising the finished file. It has to be fixed at the read.
+  const baked = readRaw('web/examples.ts');
+  assert(
+    !baked.includes('\\r\\n'),
+    'web/examples.ts has CRLF baked inside a model string - normalise when reading, ' +
+    'not when writing'
+  );
+});
+
+test('.gitattributes pins the working tree to LF', () => {
+  const attributes = read('.gitattributes');
+  assert(
+    /^\*\s+text=auto\s+eol=lf\s*$/m.test(attributes),
+    '.gitattributes no longer forces LF; a Windows checkout will break `git pull` again'
   );
 });
 

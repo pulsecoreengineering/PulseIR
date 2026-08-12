@@ -328,15 +328,30 @@ uses, compiled to a bundle. It cannot drift from what `pulse-ir` writes to disk.
 Re-run `npm run build:web` after changing anything under `src/` or `examples/`;
 `npm test` fails if the committed bundle or baked examples go stale.
 
-`web/app.js` and `web/examples.ts` are generated but committed, and the build
-writes them **only when the output actually changes** — so rebuilding on an
-unchanged checkout leaves the tree clean and never blocks a `git pull`. If an
-older build did leave them modified and a pull refuses to run, they are
-regenerable, so discarding is safe:
+`web/app.js` and `web/examples.ts` are generated but committed, so rebuilding
+has to be a genuine no-op or every `npm run web` blocks the next `git pull`.
+Two things make that true: the build writes only when the output actually
+changes, and everything is normalised to LF — `.gitattributes` pins the working
+tree, and the build normalises whatever it is handed. Without the second half a
+Windows checkout hands the build CRLF sources, the regenerated files really do
+differ, and the pull is refused.
+
+If a pull is blocked on those two files, they are regenerable, so discarding is
+safe:
 
 ```bash
 git checkout -- web/app.js web/examples.ts
 git pull
+```
+
+If it keeps happening, the working tree predates `.gitattributes` and still
+holds CRLF. Rewrite it once:
+
+```bash
+git rm --cached -r .
+git reset --hard
+npm run build:web      # should now report "already current"
+git status             # clean
 ```
 
 ## Generating a Sketch Folder

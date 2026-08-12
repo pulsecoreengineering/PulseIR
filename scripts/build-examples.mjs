@@ -12,7 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
-import { writeIfChanged } from './write-if-changed.mjs';
+import { writeIfChanged, readText } from './write-if-changed.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -111,7 +111,7 @@ for (const source of SOURCES) {
     const name = path.basename(source.file);
     examples[source.label] = {
       entry: name,
-      files: { [name]: fs.readFileSync(path.join(repoRoot, source.file), 'utf8') },
+      files: { [name]: readText(path.join(repoRoot, source.file)) },
     };
     continue;
   }
@@ -120,7 +120,7 @@ for (const source of SOURCES) {
   const files = {};
   for (const name of fs.readdirSync(dir).sort()) {
     if (!name.endsWith('.yaml') && !name.endsWith('.yml')) continue;
-    files[name] = fs.readFileSync(path.join(dir, name), 'utf8');
+    files[name] = readText(path.join(dir, name));
   }
 
   if (!files[source.entry]) {
