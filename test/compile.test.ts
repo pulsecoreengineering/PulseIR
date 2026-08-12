@@ -777,6 +777,30 @@ int main() {
   }
 });
 
+test('the vendored runtime still reads PulseHSM_config.h', () => {
+  // deps/ is a hand-copied snapshot of PulseHSM. Everything above depends on
+  // PulseHSM.h including the generated config, so re-vendoring a copy without
+  // that hook would silently reinstate the dropped-state bug - the config file
+  // would be written, ignored, and nothing would look wrong.
+  //
+  // Until the hook is upstream in PulseHSM itself, this is what notices.
+  const header = fs.readFileSync(path.join(depsDir, 'PulseHSM.h'), 'utf8');
+
+  assert(
+    header.includes('__has_include("PulseHSM_config.h")'),
+    'deps/PulseHSM.h no longer includes PulseHSM_config.h - re-apply the hook ' +
+    'above the PULSEHSM_MAX_* defaults, or the generated sizes are ignored'
+  );
+
+  // It has to come before the defaults, or #ifndef sees them already set.
+  const hookAt = header.indexOf('PulseHSM_config.h');
+  const defaultAt = header.indexOf('#ifndef PULSEHSM_MAX_STATES');
+  assert(
+    hookAt !== -1 && defaultAt !== -1 && hookAt < defaultAt,
+    'the config hook must precede the PULSEHSM_MAX_* defaults'
+  );
+});
+
 // ============================================================================
 
 if (failures > 0) {
