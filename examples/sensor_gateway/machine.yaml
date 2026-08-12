@@ -13,7 +13,6 @@ events:
   PUBLISH_DUE:   { source: timer }
   FIELD_TIMEOUT: { source: internal, description: A field device stopped answering }
   RESET:         { source: mqtt, description: Remote reset from the dashboard }
-  TIMER_EXPIRED: { source: timer }
 
 actions:
   begin_wifi:      { driver: wifi_connect }
@@ -35,6 +34,10 @@ machine:
       states:
         joining_wifi:
         joining_broker:
+        # An attempt that has timed out waits here before the next one. Two
+        # states, because a timer restarts on entry and so a state cannot
+        # usefully time out into itself.
+        backoff:
     online:
       initial: polling
       states:
@@ -46,7 +49,7 @@ machine:
 
   transitions:
     - from: starting
-      on: TIMER_EXPIRED
+      after: 250
       to: connecting
       do: begin_wifi
 
@@ -60,14 +63,19 @@ machine:
       to: online
       do: [show_ok, drain_buffer]
 
-    # GATE FINDING: retry_backoff wants to be a timeout on connecting. With no
-    # timeout in the model the C code owns the retry clock and raises the event.
-    - from: connecting
-      on: TIMER_EXPIRED
-      guard:
-        name: backoff_elapsed
-        description: retry_backoff has passed since the last attempt
-      to: connecting
+    # Retry loop: an attempt that has not succeeded within retry_backoff drops
+    # into backoff, which starts the next one.
+    - from: connecting/joining_wifi
+      after: retry_backoff
+      to: connecting/backoff
+
+    - from: connecting/joining_broker
+      after: retry_backoff
+      to: connecting/backoff
+
+    - from: connecting/backoff
+      after: 250
+      to: connecting/joining_wifi
       do: begin_wifi
 
     - from: online/polling
@@ -102,10 +110,7 @@ machine:
       do: [poll_field, buffer_batch]
 
     - from: degraded
-      on: TIMER_EXPIRED
-      guard:
-        name: backoff_elapsed
-        description: retry_backoff has passed since the last attempt
+      after: retry_backoff
       to: connecting
       do: begin_wifi
 

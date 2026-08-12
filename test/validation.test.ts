@@ -226,6 +226,120 @@ test('accepts a wildcard source', () => {
 });
 
 // ============================================================================
+// TIMED TRANSITIONS
+//
+// A duration is data, so getting it wrong has to fail here, in the model, and
+// not later inside generated C++ the student never wrote.
+// ============================================================================
+
+/** The domain schema, where `after:` lives. */
+function timed(transitions: string, parameters = 'hold_ms: {type: int, default: 1000}'): string {
+  return `
+project: {name: timing, version: "1.0"}
+parameters:
+  ${parameters}
+events:
+  GO: {source: external}
+machine:
+  states:
+    idle:
+    busy:
+      initial: one
+      states:
+        one:
+        two:
+  transitions:
+${transitions}
+`;
+}
+
+test('accepts a literal duration', () => {
+  const project = new Parser().parse(timed('    - {from: idle, after: 500, to: busy}'));
+  const t = project.system.transitions[0];
+  if (t.after !== 500) throw new Error(`after was not kept: ${JSON.stringify(t)}`);
+  if (t.event !== undefined) throw new Error('a timed transition must not invent an event');
+});
+
+test('accepts a duration that names an int parameter', () => {
+  const project = new Parser().parse(timed('    - {from: idle, after: hold_ms, to: busy}'));
+  if (project.system.transitions[0].after !== 'hold_ms') {
+    throw new Error('the parameter name was not kept');
+  }
+});
+
+test('accepts a timer on a composite state', () => {
+  // The whole point of generating timers rather than using addState()'s.
+  expectAccept(timed('    - {from: busy, after: hold_ms, to: idle}'), 'composite timer');
+});
+
+test('rejects a transition with both "on" and "after"', () => {
+  expectReject(
+    timed('    - {from: idle, on: GO, after: 500, to: busy}'),
+    'both "on" and "after"',
+    'two triggers'
+  );
+});
+
+test('rejects a transition with neither "on" nor "after"', () => {
+  expectReject(
+    timed('    - {from: idle, to: busy}'),
+    'neither "on" nor "after"',
+    'no trigger'
+  );
+});
+
+test('rejects a duration naming a parameter that does not exist', () => {
+  expectReject(
+    timed('    - {from: idle, after: nope_ms, to: busy}'),
+    'not a declared parameter',
+    'unknown parameter'
+  );
+});
+
+test('rejects a duration naming a non-integer parameter', () => {
+  // A float millisecond count would not compile against `unsigned long`.
+  expectReject(
+    timed('    - {from: idle, after: setpoint, to: busy}', 'setpoint: {type: float, default: 1.5}'),
+    'must be an int',
+    'float parameter'
+  );
+});
+
+test('rejects a timer that re-enters its own state', () => {
+  // The clock is stamped on entry, and a self-transition never leaves the
+  // state - so it would fire every pass rather than repeat every 500ms. The
+  // message has to say that, and point at the shape that does work.
+  expectReject(
+    timed('    - {from: idle, after: 500, to: idle}'),
+    'would fire on every pass',
+    'self timer'
+  );
+  expectReject(
+    timed('    - {from: idle, after: 500, to: idle}'),
+    'alternate between two states',
+    'self timer names the fix'
+  );
+});
+
+test('rejects a timer from the wildcard', () => {
+  expectReject(
+    timed('    - {from: "*", after: 500, to: busy}'),
+    'needs a real "from"',
+    'wildcard timer'
+  );
+});
+
+test('rejects a duration that is zero, negative or fractional', () => {
+  for (const value of ['0', '-1', '1.5']) {
+    expectReject(
+      timed(`    - {from: idle, after: ${value}, to: busy}`),
+      'positive whole number',
+      `after: ${value}`
+    );
+  }
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} validation test(s) failed`);

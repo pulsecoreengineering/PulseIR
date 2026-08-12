@@ -2,11 +2,9 @@
 #
 # Single file: at this size, splitting would cost more than it saves.
 #
-# NOTE (gate finding): every transition here is driven by TIMER_EXPIRED, and
-# the model has nowhere to say how long a state lasts. The durations live in
-# `parameters` and the C code has to compare them against
-# fsm.getStateElapsed() itself. PulseHSM already supports this natively via
-# addState()'s timeoutMs/timeoutNext - the IR simply has no field for it.
+# Every phase change here is driven by time, and `after:` says so directly:
+# the generated code owns the clock, so there is no TIMER_EXPIRED event to
+# raise and nothing to compare against millis() by hand.
 
 project:
   name: traffic_light
@@ -27,11 +25,11 @@ hardware:
 parameters:
   green_ms:  { type: int, default: 20000, range: [5000, 120000], unit: ms }
   amber_ms:  { type: int, default: 3000,  range: [2000, 6000],   unit: ms }
+  flash_ms:  { type: int, default: 1000,  range: [200, 5000],    unit: ms }
   red_ms:    { type: int, default: 15000, range: [5000, 120000], unit: ms }
   walk_ms:   { type: int, default: 12000, range: [5000, 60000],  unit: ms }
 
 events:
-  TIMER_EXPIRED: { source: timer, description: The current phase has run its time }
   WALK_REQUEST:  { source: external, description: Pedestrian pressed the button }
   GO_NIGHT:      { source: external }
   GO_DAY:        { source: external }
@@ -45,6 +43,9 @@ actions:
   all_lamps_off: { driver: gpio_control, params: {devices: [lamp_red, lamp_amber, lamp_green], value: LOW} }
   latch_request: { driver: request_latch }
   flash_amber:   { driver: gpio_control, params: {device: lamp_amber, value: TOGGLE} }
+  # `night` flashes by toggling from its own update code rather than a timed
+  # self-transition: `after` may not point at its own state, because that would
+  # restart the clock forever and the state could never be left.
 
 machine:
   states:
@@ -68,17 +69,20 @@ machine:
       do: latch_request
 
     - from: operating/go
-      on: TIMER_EXPIRED
+      after: green_ms
       to: operating/prepare_stop
       do: [all_lamps_off, show_amber]
 
     - from: operating/prepare_stop
-      on: TIMER_EXPIRED
+      after: amber_ms
       to: operating/stop
       do: [all_lamps_off, show_red]
 
+    # Two candidates on the same timer, in order: a waiting pedestrian gets the
+    # crossing, otherwise traffic goes. Exactly how two transitions on one event
+    # behave - a blocked guard falls through to the next.
     - from: operating/stop
-      on: TIMER_EXPIRED
+      after: red_ms
       guard:
         name: walk_requested
         description: a pedestrian pressed the button during this cycle
@@ -86,12 +90,12 @@ machine:
       do: show_walk
 
     - from: operating/stop
-      on: TIMER_EXPIRED
+      after: red_ms
       to: operating/go
       do: [all_lamps_off, show_green]
 
     - from: operating/walk
-      on: TIMER_EXPIRED
+      after: walk_ms
       to: operating/go
       do: [clear_walk, all_lamps_off, show_green]
 
@@ -99,11 +103,6 @@ machine:
       on: GO_NIGHT
       to: night
       do: all_lamps_off
-
-    - from: night
-      on: TIMER_EXPIRED
-      to: night
-      do: flash_amber
 
     - from: night
       on: GO_DAY

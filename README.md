@@ -143,6 +143,39 @@ machine:
       to: running/maintaining
 ```
 
+### Transitions Driven by Time
+
+A transition fires either when an event arrives (`on:`) or when a duration
+elapses (`after:`) — never both, and never neither:
+
+```yaml
+    - from: operating/go
+      after: green_ms            # a parameter, so it stays tunable
+      to: operating/prepare_stop
+      do: [all_lamps_off, show_amber]
+
+    - from: filling/priming
+      after: 8000                # or just a number of milliseconds
+      to: fault/dry_run
+```
+
+`after:` is a normal transition in every other respect — guards, `do:`,
+ordering and fall-through all behave exactly as they do with `on:`. Two
+timers on one state are read in order, so "proceed once flow appears, but trip
+at eight seconds if it never does" is two lines.
+
+- **A timer starts when its state is entered.** Put one on a composite and it
+  measures the whole phase: moving between that state's children does not
+  restart it.
+- **A parameter is read every pass**, so retuning `green_ms` over MQTT takes
+  effect immediately rather than at the next reboot.
+- **A state cannot time out into itself.** The clock only restarts on entry, so
+  that would fire on every pass instead of repeating. Alternate between two
+  states for a cycle.
+
+This replaces the pattern of declaring a `TIMER_EXPIRED` event and comparing
+`millis()` by hand: a duration is data, and data belongs in the model.
+
 A device declares what it *is*, so the machine refers to `pump` rather than to
 GPIO25. `type` implies a class and a driver for the common cases; anything
 unfamiliar must state its `class` rather than be guessed at.
@@ -340,6 +373,8 @@ Beyond generating code, the model is checked before anything is written:
 - a pin claimed by two different devices or buses, whatever the spelling
   (`GPIO25`, `gpio_25` and `25` are the same pin)
 - a transition to a state that does not exist, or an ambiguous bare name
+- a transition with both `on:` and `after:`, or with neither
+- an `after:` naming a parameter that is missing, or is not an int
 - an action a transition performs that the catalogue never declared
 - a device on a bus that was never declared
 - a name declared in two different files

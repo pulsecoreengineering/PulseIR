@@ -18,11 +18,16 @@
 #define OUTPUT 1
 #define INPUT_PULLUP 2
 
-inline unsigned long millis() {
-  return (unsigned long)(clock() * 1000ULL / CLOCKS_PER_SEC);
-}
+// A virtual clock, so a test can say "twenty seconds pass" without waiting.
+// Wall-clock time would make every timed transition a race, and CPU time makes
+// the result depend on how fast the machine running the tests happens to be.
+extern unsigned long pulseTestClockMs;
 
-inline void delay(unsigned long) {}
+inline unsigned long millis() { return pulseTestClockMs; }
+inline void delay(unsigned long ms) { pulseTestClockMs += ms; }
+
+/** Move the clock forward. Tests call this instead of sleeping. */
+inline void pulseTestAdvance(unsigned long ms) { pulseTestClockMs += ms; }
 inline void pinMode(int, int) {}
 inline void digitalWrite(int, int) {}
 inline int digitalRead(int) { return 0; }

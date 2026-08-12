@@ -146,6 +146,17 @@ static void step(SystemEvent e) {
   fsm.update();
   report();
 }
+
+// Move the virtual clock forward and let the machine notice. Timed transitions
+// are checked in update(), so time only "passes" when the loop runs.
+//
+// Marked used because most drivers here have no timers to wait on, and the
+// suite builds with -Werror.
+__attribute__((unused)) static void wait(unsigned long ms) {
+  pulseTestAdvance(ms);
+  fsm.update();
+  report();
+}
 `;
 
 test('boiler example compiles, links and runs on the PulseHSM runtime', () => {
@@ -503,15 +514,23 @@ int main() {
   // A self-transition on the current leaf: the latch runs, the phase holds.
   step(EVENT_WALK_REQUEST);
 
-  step(EVENT_TIMER_EXPIRED);   // go -> prepare_stop
-  step(EVENT_TIMER_EXPIRED);   // prepare_stop -> stop
+  // Timing comes from the model now - no TIMER_EXPIRED event exists. One
+  // millisecond short of green_ms must not move; the machine holds its phase.
+  wait(19999);
+  wait(1);                     // go -> prepare_stop, at exactly green_ms
 
-  // Two transitions leave "stop" on the same event. The guarded one is listed
-  // first; its stub returns false, so the unguarded fallback fires instead.
-  step(EVENT_TIMER_EXPIRED);
+  wait(3000);                  // prepare_stop -> stop, at amber_ms
+
+  // Two transitions share the red_ms timer. The guarded one is listed first;
+  // its stub returns false, so the unguarded fallback fires instead.
+  wait(15000);
 
   // GO_NIGHT is declared on the composite parent, so it fires from any phase.
   step(EVENT_GO_NIGHT);
+
+  // Nothing in "night" is timed, so the clock running on must not move it.
+  wait(600000);
+
   step(EVENT_GO_DAY);          // back to operating, landing on its initial child
   return 0;
 }`;
@@ -523,13 +542,27 @@ int main() {
     [
       'operating/go',
       'operating/go',
+      'operating/go',
       'operating/prepare_stop',
       'operating/stop',
       'operating/go',
       'night',
+      'night',
       'operating/go',
     ],
     'traffic light dispatch trace mismatch'
+  );
+
+  // The clock must restart on entry, or the second phase would fire instantly
+  // with the elapsed time carried over from the first.
+  assert(
+    sketch.includes('enteredAt_operating_prepare_stop = millis();'),
+    'entering a timed state does not restart its clock'
+  );
+  // Read every tick, so retuning a parameter at runtime takes effect.
+  assert(
+    sketch.includes('(unsigned long)systemParameters.green_ms'),
+    'a duration named by a parameter was baked in instead of read live'
   );
 
   // A multi-action transition must run every action, in written order.
@@ -555,8 +588,11 @@ int main() {
   // Wildcard: an e-stop has to work from every state, including stopped.
   step(EVENT_ESTOP);
 
-  // The restart delay lives in a guard, because the model cannot express
-  // "wait restart_delay". The stub returns false, so the trip latches.
+  // The restart delay is a state now, so RESET is simply not wired up yet.
+  step(EVENT_RESET);
+
+  // Once restart_delay has passed, the same event is accepted.
+  wait(5000);
   step(EVENT_RESET);
   return 0;
 }`;
@@ -571,8 +607,10 @@ int main() {
       'running/cruising',
       'running/decelerating',
       'stopped',
-      'tripped',
-      'tripped',
+      'tripped/locked',
+      'tripped/locked',
+      'tripped/resettable',
+      'stopped',
     ],
     'motor controller dispatch trace mismatch'
   );
@@ -600,14 +638,20 @@ int main() {
   step(EVENT_FAULT_RESET);  // declared on the composite "fault"
   step(EVENT_LEVEL_LOW);    // filling again
 
-  // TIMER_EXPIRED is guarded in the leaf (flow_established) AND in the parent
-  // (fill_ran_too_long). Both stubs return false, so neither consumes it and
-  // the machine stays exactly where it was - the interesting bubbling case.
-  step(EVENT_TIMER_EXPIRED);
+  // Priming carries two timers. Past settle_ms the guarded one gets a chance
+  // every pass, and its stub returns false, so nothing moves...
+  wait(settle_and_a_bit);
 
-  step(EVENT_LEVEL_HIGH);   // handled by the composite "filling"
+  // ...until dry_run_ms, when the unguarded one trips. An earlier unguarded
+  // candidate must not shadow a later shorter one, and a later one must not
+  // pre-empt an earlier longer one.
+  wait(dry_run_remainder);
+
+  step(EVENT_FAULT_RESET);
   return 0;
-}`;
+}`
+    .replace('settle_and_a_bit', '3000')      // settle_ms is 2000
+    .replace('dry_run_remainder', '5000');    // 3000 + 5000 = dry_run_ms
 
   const output = buildAndRun('pump_tank', sketch, driver);
 
@@ -620,9 +664,18 @@ int main() {
       'idle',
       'filling/priming',
       'filling/priming',
+      'fault/dry_run',
       'idle',
     ],
     'pump/tank dispatch trace mismatch'
+  );
+
+  // The overfill timer is on the composite, which is the case PulseHSM's own
+  // timeoutMs cannot express: it only ever checks the current *leaf*.
+  assert(
+    sketch.includes('enteredAt_filling = millis();') &&
+    sketch.includes('static void tick_filling()'),
+    'the composite "filling" got no timer of its own'
   );
 
   // start_pump and stop_pump share a driver but are distinct actions; if
@@ -639,7 +692,14 @@ int main() {
   setup();
   report();
 
-  step(EVENT_TIMER_EXPIRED);  // starting -> connecting/joining_wifi
+  wait(250);                  // starting -> connecting/joining_wifi
+
+  // The retry loop: an attempt that stalls for retry_backoff drops into
+  // backoff, which starts the next one. Two states, because a timer restarts
+  // on entry and so cannot usefully point at its own state.
+  wait(5000);                 // joining_wifi -> backoff
+  wait(250);                  // backoff -> joining_wifi, retrying
+
   step(EVENT_LINK_UP);        // -> joining_broker
   step(EVENT_BROKER_UP);      // -> online/polling
   step(EVENT_POLL_DUE);       // self-transition on the leaf
@@ -655,6 +715,8 @@ int main() {
     output,
     [
       'starting',
+      'connecting/joining_wifi',
+      'connecting/backoff',
       'connecting/joining_wifi',
       'connecting/joining_broker',
       'online/polling',
@@ -775,6 +837,66 @@ int main() {
       `${macro} disagrees between the sketch (${inSketch}) and the config header (${inConfig})`
     );
   }
+});
+
+test('a timer on a composite is not restarted by moving between its children', () => {
+  // This is the case PulseHSM's own timeoutMs cannot express - it only ever
+  // checks the current leaf - and it is the reason "after" is generated rather
+  // than passed to addState().
+  const sketch = generate(path.join(repoRoot, 'test/fixtures/timers.yaml'));
+
+  const driver = `${DRIVER_PRELUDE}
+int main() {
+  setup();
+  report();
+
+  step(EVENT_BEGIN);   // idle -> work, descends to first
+
+  wait(600);           // 600ms into "work"
+  step(EVENT_SWAP);    // work/first -> work/second, still inside "work"
+  wait(300);           // 900ms total - not yet
+  wait(100);           // 1000ms total - fires, because the swap did not reset it
+
+  wait(250);           // the literal 250ms timer on "done"
+  return 0;
+}`;
+
+  const output = buildAndRun('timers', sketch, driver);
+
+  assertTrace(
+    output,
+    [
+      'idle',
+      'work/first',
+      'work/first',
+      'work/second',
+      'work/second',
+      'done',
+      'quick',
+    ],
+    'composite timer trace mismatch - a child transition restarted the parent clock'
+  );
+
+  // Re-entering the composite must restart it, though: only entry stamps it.
+  const restart = `${DRIVER_PRELUDE}
+int main() {
+  setup();
+
+  // Retuning the parameter at runtime has to take effect on the next pass,
+  // which only works because the tick reads it instead of capturing it.
+  systemParameters.hold_ms = 5000;
+
+  step(EVENT_BEGIN);
+  wait(4999);          // the old 1000ms default would have fired long ago
+  wait(1);
+  return 0;
+}`;
+
+  assertTrace(
+    buildAndRun('timers_retuned', sketch, restart),
+    ['work/first', 'work/first', 'done'],
+    'a duration named by a parameter did not follow the parameter'
+  );
 });
 
 test('the vendored runtime still reads PulseHSM_config.h', () => {

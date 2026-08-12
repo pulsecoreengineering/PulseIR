@@ -208,9 +208,15 @@ function renderStructure(project: PulseProject): string {
       ? '<span class="tag wild">any state</span>'
       : `<code>${escapeHtml(t.source)}</code>`;
 
+    // A timed transition has no event; show what it waits for instead, so the
+    // table stays a complete picture of what makes the machine move.
+    const trigger = t.event !== undefined
+      ? `<code>${escapeHtml(t.event)}</code>`
+      : `<span class="tag timer">after</span> <code>${escapeHtml(String(t.after))}</code>`;
+
     return `<tr>
       <td>${src}</td>
-      <td><code>${escapeHtml(t.event)}</code></td>
+      <td>${trigger}</td>
       <td>${target}</td>
       <td>${guard}</td>
       <td>${actions}</td>
@@ -235,7 +241,7 @@ function renderStructure(project: PulseProject): string {
     <p class="hint">A transition on an enclosing state also applies to its
     children, and an inner transition on the same event wins.</p>
     <table>
-      <thead><tr><th>From</th><th>On</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
+      <thead><tr><th>From</th><th>Trigger</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="dim">No transitions defined.</td></tr>'}</tbody>
     </table>
 
