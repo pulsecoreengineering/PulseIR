@@ -186,6 +186,50 @@ test('the editor paints highlighting on every path that changes the text', () =>
   );
 });
 
+test('the line gutter lines up with the text and stays out of a copy', () => {
+  const html = read('web/index.html');
+
+  // Same metrics block as the other two layers, or the numbers drift.
+  assert(
+    /id="gutter"[^>]*class="[^"]*\beditor-text\b/.test(html),
+    'the gutter does not use the shared .editor-text metrics'
+  );
+
+  // Selecting code and copying it must not pick up the line numbers.
+  assert(
+    /#gutter\s*\{[^}]*user-select:\s*none/.test(html),
+    'line numbers would end up in a copied selection'
+  );
+
+  // The text layers have to leave room for it, from the same variable the
+  // gutter is sized by.
+  assert(
+    /#source,\s*#highlight\s*\{[^}]*padding-left:\s*var\(--gutter-width/.test(html),
+    'the text layers do not reserve the gutter width'
+  );
+
+  const main = read('web/main.ts');
+
+  // Vertical only: numbers stay put while a long line scrolls sideways.
+  assert(
+    /gutter\.scrollTop = source\.scrollTop/.test(main),
+    'the gutter is not scrolled with the text'
+  );
+  assert(
+    !/gutter\.scrollLeft/.test(main),
+    'the gutter must not scroll horizontally with the text'
+  );
+
+  // Numbers survive the degraded path, where colouring is switched off.
+  const paintBody = /function paint\(\): void \{([\s\S]*?)\n\}/.exec(main)?.[1] ?? '';
+  const gutterAt = paintBody.indexOf('paintGutter()');
+  const limitAt = paintBody.indexOf('HIGHLIGHT_LIMIT');
+  assert(
+    gutterAt !== -1 && limitAt !== -1 && gutterAt < limitAt,
+    'a file too large to highlight would be left with stale line numbers'
+  );
+});
+
 test('the committed artefacts are LF, so a rebuild is a no-op on any platform', () => {
   // This blocked a `git pull` twice. web/app.js and web/examples.ts are
   // generated but committed; on a Windows checkout the sources arrive as CRLF,
