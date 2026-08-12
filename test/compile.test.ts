@@ -1103,7 +1103,9 @@ int main() {
   const said = (needle: string) => output.includes(needle);
 
   assert(said('Action: led_on'), '"on" did not run its action');
-  assert(said('Action: report') && said('Action: show_help'), '"status" did not run both its actions');
+  assert(said('Action: read_temp'), '"status" did not run its action');
+  // `log:` prints text and values straight from the model.
+  assert(/temp=[\d.]+ degC  fan_duty=128/.test(output), `the log template did not print: ${output}`);
   assert(said('Unknown command: nope'), 'an unrecognised command was silently swallowed');
   assert(said('Action: led_off'), 'a command split across two loop() passes was lost');
   assert(said('Command too long'), 'an over-long line was not reported');
@@ -1293,9 +1295,9 @@ test('an action stub says where its data comes from', () => {
   // is ctx, and the stub names every field rather than leaving it to be found
   // in a header.
   const sketch = generate(path.join(repoRoot, 'examples/serial_console.yaml'));
-  const stub = /void action_report\(SystemContext\* ctx\) \{[\s\S]*?\n\}/.exec(sketch)?.[0] ?? '';
+  const stub = /void action_read_temp\(SystemContext\* ctx\) \{[\s\S]*?\n\}/.exec(sketch)?.[0] ?? '';
 
-  assert(stub.length > 0, 'no stub found for action_report');
+  assert(stub.length > 0, 'no stub found for action_read_temp');
   assert(stub.includes('ctx->sensors->temp'), 'the stub does not name the declared sensor');
   assert(stub.includes('degC'), 'the sensor unit from the model is not shown');
   assert(stub.includes('ctx->parameters->report_ms'), 'the stub does not name the declared parameters');

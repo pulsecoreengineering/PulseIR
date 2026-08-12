@@ -276,6 +276,39 @@ however long the loop took to come round to every period, and that error
 accumulates. If it falls a whole interval behind — a long blocking call, a
 reconnect — it resyncs instead of firing once per missed period.
 
+### `log:` — print text and values from the model
+
+```yaml
+tasks:
+  heartbeat:
+    every: report_ms
+    do: read_temp
+    log: "temp={temp} degC  setpoint={setpoint}"
+```
+
+```c
+Serial.print("temp=");
+Serial.print(systemSensors.temp);
+Serial.print(" degC  setpoint=");
+Serial.print(systemParameters.setpoint);
+Serial.println();
+```
+
+Each `{name}` is a declared **parameter or sensor**; a name that is neither is a
+model error listing what you can use, not a C++ error in code you never wrote.
+`{{` and `}}` print a literal brace. On a task the line prints *after* the
+actions, so a task that samples and then reports shows the reading it just
+took; on a command it is the reply.
+
+One print per piece, rather than `printf` — float formatting costs several
+kilobytes of flash on an embedded core, for a handful of prints.
+
+It stays a template and nothing more: no arithmetic, no width or precision, no
+conditionals. The first of those turns it into a language, and the answer there
+is a named action in C.
+
+Needs a declared console, and says so if there isn't one.
+
 ### `commands:` — a line of text in, a named action out
 
 ```yaml

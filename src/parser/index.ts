@@ -26,6 +26,7 @@ import type {
 } from '../model/index.js';
 import type { SourceResolver } from './resolver.js';
 import { findPinConflicts, describePinConflict } from '../analysis/pins.js';
+import { parseTemplate, templateRefs, TemplateError } from '../analysis/template.js';
 
 export interface ParseOptions {
   /** Id of the document being parsed, used to resolve relative includes. */
@@ -449,6 +450,7 @@ export class Parser {
     this.assertBusRefs(components, resources);
     this.assertTimedTransitions(transitions, parameters || []);
     this.assertTaskIntervals(tasks, parameters || []);
+    this.assertLogRefs(tasks, commands, parameters || [], components || []);
     this.assertUsable(states, tasks, commands);
 
     // Buses and devices generate macros from the same name, so a collision
@@ -696,14 +698,19 @@ export class Parser {
       }
 
       const actions = this.resolveActions(def.do, catalogue, index);
-      if (!actions?.length) {
-        throw new ParseError(`Task "${name}" has no "do", so it would do nothing every ${def.every}ms`);
+      const log = this.parseLog(def.log, `Task "${name}"`);
+
+      if (!actions?.length && log === undefined) {
+        throw new ParseError(
+          `Task "${name}" has neither "do" nor "log", so it would do nothing every ${def.every}ms`
+        );
       }
 
       return {
         name,
         every: this.parseInterval(def.every, `Task "${name}"`),
-        actions,
+        actions: actions ?? [],
+        log,
         description: def.description as string | undefined,
       };
     });
@@ -751,13 +758,15 @@ export class Parser {
       }
 
       const actions = this.resolveActions(long ? long.do : def, catalogue, index);
-      if (!actions?.length && event === undefined) {
+      const log = this.parseLog(long?.log, `Command "${text}"`);
+
+      if (!actions?.length && event === undefined && log === undefined) {
         throw new ParseError(
-          `Command "${text}" has neither "do" nor "event", so receiving it would do nothing`
+          `Command "${text}" has no "do", "event" or "log", so receiving it would do nothing`
         );
       }
 
-      return { match: text, actions, event, description: long?.description as string | undefined };
+      return { match: text, actions, event, log, description: long?.description as string | undefined };
     });
 
     return {
@@ -765,6 +774,23 @@ export class Parser {
       commands,
       reportUnknown: raw.report_unknown === undefined ? true : Boolean(raw.report_unknown),
     };
+  }
+
+  /** `log: "temp={temp}C"` - checked for shape here, for names later. */
+  private parseLog(raw: unknown, where: string): string | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (typeof raw !== 'string') {
+      throw new ParseError(`${where} has a "log" of type ${typeof raw}; it must be a string`);
+    }
+
+    try {
+      parseTemplate(raw);
+    } catch (error) {
+      throw new ParseError(
+        `${where}: ${error instanceof TemplateError ? error.message : String(error)}`
+      );
+    }
+    return raw;
   }
 
   /** Milliseconds: a positive literal, or the name of an int parameter. */
@@ -1297,6 +1323,44 @@ export class Parser {
         });
       }
     });
+  }
+
+  /**
+   * Every `{name}` in a log template must name something the model declared.
+   *
+   * Checked here rather than in the backend, so a typo is a model error with
+   * the alternatives listed - not a C++ compile error in generated code.
+   */
+  private assertLogRefs(
+    tasks: Task[],
+    commands: CommandSet | undefined,
+    parameters: Parameter[],
+    components: Component[]
+  ): void {
+    const known = new Map<string, string>();
+    for (const parameter of parameters) known.set(parameter.name, 'parameter');
+    for (const device of components) {
+      if (device.class === 'sensor') known.set(device.name, 'sensor');
+    }
+
+    const check = (template: string | undefined, where: string) => {
+      if (template === undefined) return;
+      for (const name of templateRefs(parseTemplate(template))) {
+        if (known.has(name)) continue;
+        const options = [...known.keys()];
+        throw new ParseError(
+          `${where} logs "{${name}}", which is not a declared parameter or sensor. ` +
+          (options.length
+            ? `Available: ${options.join(', ')}.`
+            : 'The model declares no parameters and no sensors.')
+        );
+      }
+    };
+
+    for (const task of tasks) check(task.log, `Task "${task.name}"`);
+    for (const command of commands?.commands || []) {
+      check(command.log, `Command "${command.match}"`);
+    }
   }
 
   /** A task interval naming a parameter must name a real int one. */

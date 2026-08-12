@@ -227,6 +227,11 @@
   .menu button.current { color: var(--accent); font-weight: 600; }
   .menu button.danger:hover { background: var(--err-bg); color: var(--err-fg); }
 
+  /* Copy buttons confirm in place: a toast would be more machinery than the
+     feedback is worth. */
+  #copy-yaml, #copy-output { flex: 0 0 auto; font-size: 12.5px; padding: 3px 9px; }
+  button.copied { color: var(--ok-fg); border-color: var(--ok-fg); }
+
   /* Dropping a folder or a zip anywhere on the page imports it. */
   body.dropping::after {
     content: 'Drop a model folder or .zip to import';
@@ -329,6 +334,7 @@
       <div class="filetabs" id="file-bar"></div>
       <button id="add-file" title="Add a file to this model">+ File</button>
       <button id="set-entry" title="Parse starting from the open file">Set entry</button>
+      <button id="copy-yaml" title="Copy this file to the clipboard">Copy</button>
     </div>
     <div class="editor">
       <div id="gutter" class="editor-text" aria-hidden="true"><div id="gutter-lines"></div></div>
@@ -345,6 +351,8 @@
       <button class="tab" data-tab="topics">MQTT topics</button>
       <button class="tab" data-tab="libraries">Libraries</button>
       <button class="tab" data-tab="structure">Structure</button>
+      <div class="spacer"></div>
+      <button id="copy-output" title="Copy the visible pane to the clipboard">Copy</button>
     </div>
     <div class="panes">
       <div class="stale-note" id="stale-note" hidden>
