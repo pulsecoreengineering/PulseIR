@@ -3773,11 +3773,11 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
       if (!items)
         return;
       const seen = /* @__PURE__ */ new Set();
-      for (const item of items) {
-        if (seen.has(item.name)) {
-          throw new ParseError(`Duplicate ${kind} "${item.name}" (check whether two included files both declare it)`);
+      for (const item2 of items) {
+        if (seen.has(item2.name)) {
+          throw new ParseError(`Duplicate ${kind} "${item2.name}" (check whether two included files both declare it)`);
         }
-        seen.add(item.name);
+        seen.add(item2.name);
       }
     }
     parseLibraries(raw) {
@@ -4650,11 +4650,11 @@ ${this.defInterfaces()}`;
         const emission = this.emissions.get(resource.name);
         if (!emission)
           continue;
-        const heading = `// ${resource.name} (${resource.interface})` + (resource.description ? ` - ${resource.description}` : "");
+        const heading2 = `// ${resource.name} (${resource.interface})` + (resource.description ? ` - ${resource.description}` : "");
         if (emission.defines.length > 0) {
-          blocks.push([heading, ...emission.defines].join("\n"));
+          blocks.push([heading2, ...emission.defines].join("\n"));
         } else {
-          blocks.push(heading);
+          blocks.push(heading2);
         }
         todos.push(...emission.todos);
       }
@@ -5929,6 +5929,361 @@ ${implementations.join("\n\n")}`;
     return rendered.join("\n");
   }
 
+  // dist/web/projects.js
+  var PROJECTS_KEY = "pulseir.projects";
+  var CURRENT_KEY = "pulseir.currentProject";
+  var LEGACY_KEY = "pulseir.workspace";
+  function nameFromModel(yaml2, fallback) {
+    const block = /^project:[^\S\n]*\n(?:[^\S\n]+.*\n?)*/m.exec(yaml2)?.[0];
+    const name = block ? /^[^\S\n]+name:[^\S\n]*(?:"([^"]*)"|'([^']*)'|(\S+))/m.exec(block) : null;
+    const found = name?.[1] ?? name?.[2] ?? name?.[3];
+    return found?.trim() || fallback;
+  }
+  var counter = 0;
+  function newId() {
+    counter += 1;
+    return `p${Date.now().toString(36)}${counter.toString(36)}`;
+  }
+  var lastStamp = 0;
+  function stamp() {
+    lastStamp = Math.max(Date.now(), lastStamp + 1);
+    return lastStamp;
+  }
+  var ProjectStore = class {
+    constructor(storage) {
+      this.storage = storage;
+    }
+    readAll() {
+      const raw = this.storage.getItem(PROJECTS_KEY);
+      if (!raw)
+        return {};
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+    writeAll(projects) {
+      this.storage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+    }
+    /** Every project, most recently updated first. */
+    list() {
+      return Object.values(this.readAll()).sort((a, b) => b.updatedAt - a.updatedAt);
+    }
+    get(id) {
+      return this.readAll()[id] ?? null;
+    }
+    /** The project last opened, or the most recent one, or null when empty. */
+    current() {
+      const id = this.storage.getItem(CURRENT_KEY);
+      if (id) {
+        const found = this.get(id);
+        if (found)
+          return found;
+      }
+      return this.list()[0] ?? null;
+    }
+    setCurrent(id) {
+      this.storage.setItem(CURRENT_KEY, id);
+    }
+    /** A name not already taken, by appending a number. */
+    uniqueName(wanted) {
+      const taken = new Set(this.list().map((p) => p.name));
+      if (!taken.has(wanted))
+        return wanted;
+      for (let n = 2; ; n++) {
+        const candidate = `${wanted} ${n}`;
+        if (!taken.has(candidate))
+          return candidate;
+      }
+    }
+    create(name, files, entry) {
+      const project = {
+        id: newId(),
+        name: this.uniqueName(name),
+        files: { ...files },
+        entry,
+        active: entry,
+        updatedAt: stamp()
+      };
+      const all = this.readAll();
+      all[project.id] = project;
+      this.writeAll(all);
+      this.setCurrent(project.id);
+      return project;
+    }
+    /** Store the current contents of a project. Touches updatedAt. */
+    save(project) {
+      const all = this.readAll();
+      all[project.id] = { ...project, updatedAt: stamp() };
+      this.writeAll(all);
+    }
+    rename(id, name) {
+      const all = this.readAll();
+      const project = all[id];
+      if (!project)
+        return null;
+      const others = new Set(Object.values(all).filter((p) => p.id !== id).map((p) => p.name));
+      let unique = name;
+      for (let n = 2; others.has(unique); n++)
+        unique = `${name} ${n}`;
+      project.name = unique;
+      project.updatedAt = stamp();
+      this.writeAll(all);
+      return project;
+    }
+    duplicate(id) {
+      const source2 = this.get(id);
+      if (!source2)
+        return null;
+      return this.create(`${source2.name} copy`, source2.files, source2.entry);
+    }
+    /** Removes it, and returns whatever should be opened next. */
+    remove(id) {
+      const all = this.readAll();
+      delete all[id];
+      this.writeAll(all);
+      const next = this.list()[0] ?? null;
+      if (next)
+        this.setCurrent(next.id);
+      else
+        this.storage.removeItem(CURRENT_KEY);
+      return next;
+    }
+    /**
+     * Bring the pre-projects single workspace across, once.
+     *
+     * Someone with work in the old key must not lose it just because the editor
+     * grew projects. Returns the migrated project, or null when there was none.
+     */
+    migrateLegacy() {
+      const raw = this.storage.getItem(LEGACY_KEY);
+      if (!raw)
+        return null;
+      try {
+        const old = JSON.parse(raw);
+        if (!old?.files || !old.entry || old.files[old.entry] === void 0) {
+          this.storage.removeItem(LEGACY_KEY);
+          return null;
+        }
+        const project = this.create(nameFromModel(old.files[old.entry], "My model"), old.files, old.entry);
+        this.storage.removeItem(LEGACY_KEY);
+        return project;
+      } catch {
+        this.storage.removeItem(LEGACY_KEY);
+        return null;
+      }
+    }
+  };
+  var MODEL_FILE = /\.ya?ml$/i;
+  function foldImport(paths) {
+    const names = Object.keys(paths).filter((p) => MODEL_FILE.test(p) && !p.split("/").some(isJunk));
+    if (names.length === 0)
+      return { files: {}, folder: null };
+    const folder = commonFolder(names);
+    const files = {};
+    for (const name of names) {
+      files[folder ? name.slice(folder.length + 1) : name] = paths[name];
+    }
+    return { files, folder };
+  }
+  function isJunk(segment) {
+    return segment === "__MACOSX" || segment === ".git" || segment.startsWith("._");
+  }
+  function commonFolder(names) {
+    const first = names[0].split("/");
+    if (first.length < 2)
+      return null;
+    const candidate = first[0];
+    return names.every((n) => n.startsWith(`${candidate}/`)) ? candidate : null;
+  }
+  function importedName(files, entry, folder, fallback) {
+    if (folder)
+      return folder;
+    return nameFromModel(files[entry] ?? "", fallback);
+  }
+  function findEntry(files) {
+    const names = Object.keys(files).sort();
+    const declares = names.filter((n) => /^project:/m.test(files[n]));
+    if (declares.length === 1)
+      return declares[0];
+    if (declares.length > 1) {
+      return declares.find((n) => /^pulse\.ya?ml$/i.test(n)) ?? declares[0];
+    }
+    return names[0] ?? null;
+  }
+
+  // dist/web/zip.js
+  var CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let bit = 0; bit < 8; bit++)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      table[i] = c >>> 0;
+    }
+    return table;
+  })();
+  function crc32(bytes) {
+    let c = 4294967295;
+    for (let i = 0; i < bytes.length; i++) {
+      c = CRC_TABLE[(c ^ bytes[i]) & 255] ^ c >>> 8;
+    }
+    return (c ^ 4294967295) >>> 0;
+  }
+  var Writer = class {
+    constructor() {
+      this.parts = [];
+      this.length = 0;
+    }
+    bytes(part) {
+      this.parts.push(part);
+      this.length += part.length;
+    }
+    u16(value) {
+      const part = new Uint8Array(2);
+      new DataView(part.buffer).setUint16(0, value, true);
+      this.bytes(part);
+    }
+    u32(value) {
+      const part = new Uint8Array(4);
+      new DataView(part.buffer).setUint32(0, value >>> 0, true);
+      this.bytes(part);
+    }
+    finish() {
+      const out = new Uint8Array(this.length);
+      let at = 0;
+      for (const part of this.parts) {
+        out.set(part, at);
+        at += part.length;
+      }
+      return out;
+    }
+  };
+  function dosStamp(when) {
+    return {
+      time: when.getHours() << 11 | when.getMinutes() << 5 | when.getSeconds() >> 1,
+      // Years count from 1980, and the format cannot go earlier.
+      date: Math.max(1980, when.getFullYear()) - 1980 << 9 | when.getMonth() + 1 << 5 | when.getDate()
+    };
+  }
+  var UTF8_NAMES = 2048;
+  function zip(files, when = /* @__PURE__ */ new Date()) {
+    const encoder = new TextEncoder();
+    const stamp2 = dosStamp(when);
+    const out = new Writer();
+    const central = [];
+    for (const [path, text] of Object.entries(files)) {
+      const name = encoder.encode(path);
+      const data = encoder.encode(text);
+      const crc = crc32(data);
+      const offset = out.length;
+      out.u32(67324752);
+      out.u16(20);
+      out.u16(UTF8_NAMES);
+      out.u16(0);
+      out.u16(stamp2.time);
+      out.u16(stamp2.date);
+      out.u32(crc);
+      out.u32(data.length);
+      out.u32(data.length);
+      out.u16(name.length);
+      out.u16(0);
+      out.bytes(name);
+      out.bytes(data);
+      central.push({ name, crc, size: data.length, offset });
+    }
+    const centralStart = out.length;
+    for (const entry of central) {
+      out.u32(33639248);
+      out.u16(20);
+      out.u16(20);
+      out.u16(UTF8_NAMES);
+      out.u16(0);
+      out.u16(stamp2.time);
+      out.u16(stamp2.date);
+      out.u32(entry.crc);
+      out.u32(entry.size);
+      out.u32(entry.size);
+      out.u16(entry.name.length);
+      out.u16(0);
+      out.u16(0);
+      out.u16(0);
+      out.u16(0);
+      out.u32(0);
+      out.u32(entry.offset);
+      out.bytes(entry.name);
+    }
+    out.u32(101010256);
+    out.u16(0);
+    out.u16(0);
+    out.u16(central.length);
+    out.u16(central.length);
+    out.u32(out.length - centralStart);
+    out.u32(centralStart);
+    out.u16(0);
+    return out.finish();
+  }
+  var ZipError = class extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "ZipError";
+    }
+  };
+  async function inflateRaw(data) {
+    if (typeof DecompressionStream === "undefined") {
+      throw new ZipError("This zip is compressed, and this browser cannot decompress it. Re-export it, or import the folder instead of the zip.");
+    }
+    const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+  async function unzip(input) {
+    const view = new DataView(input.buffer, input.byteOffset, input.byteLength);
+    let eocd = -1;
+    const earliest = Math.max(0, input.length - 22 - 65535);
+    for (let at2 = input.length - 22; at2 >= earliest; at2--) {
+      if (view.getUint32(at2, true) === 101010256) {
+        eocd = at2;
+        break;
+      }
+    }
+    if (eocd === -1)
+      throw new ZipError("Not a zip file (no end-of-central-directory record)");
+    const count = view.getUint16(eocd + 10, true);
+    let at = view.getUint32(eocd + 16, true);
+    const files = {};
+    const decoder = new TextDecoder();
+    for (let i = 0; i < count; i++) {
+      if (at + 46 > input.length || view.getUint32(at, true) !== 33639248) {
+        throw new ZipError(`Damaged zip: central directory entry ${i + 1} is not where it should be`);
+      }
+      const method = view.getUint16(at + 10, true);
+      const compressed = view.getUint32(at + 20, true);
+      const nameLength = view.getUint16(at + 28, true);
+      const extraLength = view.getUint16(at + 30, true);
+      const commentLength = view.getUint16(at + 32, true);
+      const localAt = view.getUint32(at + 42, true);
+      const name = decoder.decode(input.subarray(at + 46, at + 46 + nameLength));
+      at += 46 + nameLength + extraLength + commentLength;
+      if (name.endsWith("/"))
+        continue;
+      if (view.getUint32(localAt, true) !== 67324752) {
+        throw new ZipError(`Damaged zip: "${name}" does not start with a local file header`);
+      }
+      const dataAt = localAt + 30 + view.getUint16(localAt + 26, true) + view.getUint16(localAt + 28, true);
+      const raw = input.subarray(dataAt, dataAt + compressed);
+      if (method === 0) {
+        files[name] = raw.slice();
+      } else if (method === 8) {
+        files[name] = await inflateRaw(raw);
+      } else {
+        throw new ZipError(`"${name}" uses compression method ${method}, which is not supported`);
+      }
+    }
+    return files;
+  }
+
   // dist/web/examples.js
   var EXAMPLES = {
     "starter \u2014 a two-state blinker": {
@@ -5999,6 +6354,8 @@ ${implementations.join("\n\n")}`;
   var source = $("source");
   var highlightLayer = $("highlight");
   var gutter = $("gutter");
+  var gutterLines = $("gutter-lines");
+  var highlightCode = $("highlight-code");
   var status = $("status");
   var fileBar = $("file-bar");
   var panes = {
@@ -6008,52 +6365,73 @@ ${implementations.join("\n\n")}`;
     structure: $("pane-structure")
   };
   var exampleSelect = $("example");
+  var projectButton = $("project-button");
+  var projectName = $("project-name");
+  var projectMenu = $("project-menu");
+  var importZipInput = $("import-zip");
+  var importFolderInput = $("import-folder");
   var namespaceInput = $("namespace");
   var staleNote = $("stale-note");
-  var STORAGE_KEY = "pulseir.workspace";
-  var workspace = { files: {}, entry: "", active: "" };
+  var store = new ProjectStore(localStorage);
+  var workspace = { id: "", name: "", files: {}, entry: "", active: "", updatedAt: 0 };
   var current = null;
   function fileNames() {
     const rest = Object.keys(workspace.files).filter((n) => n !== workspace.entry).sort();
     return workspace.entry ? [workspace.entry, ...rest] : rest;
   }
-  function loadExample(label) {
-    const example = EXAMPLES[label];
-    if (!example)
-      return;
-    workspace = {
-      files: { ...example.files },
-      entry: example.entry,
-      active: example.entry
-    };
+  function openProject(project) {
+    workspace = project;
+    store.setCurrent(project.id);
+    source.value = workspace.files[workspace.active] ?? "";
+    projectName.textContent = project.name;
+    renderFileBar();
+    paint();
+    render();
   }
   function restore() {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed.files && Object.keys(parsed.files).length && parsed.files[parsed.entry]) {
-          workspace = {
-            files: parsed.files,
-            entry: parsed.entry,
-            active: parsed.files[parsed.active] !== void 0 ? parsed.active : parsed.entry
-          };
-          return;
-        }
-      } catch {
-      }
-    }
-    const legacy = localStorage.getItem("pulseir.source");
-    if (legacy && legacy.trim()) {
-      workspace = { files: { "model.yaml": legacy }, entry: "model.yaml", active: "model.yaml" };
-      localStorage.removeItem("pulseir.source");
-      return;
-    }
-    loadExample(Object.keys(EXAMPLES)[0]);
+    const migrated = store.migrateLegacy();
+    if (migrated)
+      return migrated;
+    const existing = store.current();
+    if (existing)
+      return existing;
+    const label = Object.keys(EXAMPLES)[0];
+    const example = EXAMPLES[label];
+    return store.create(nameFromModel(example.files[example.entry], "My model"), example.files, example.entry);
   }
   function persist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
+    if (workspace.id)
+      store.save(workspace);
   }
+  var BLANK_MODEL = `# A new PulseIR model.
+project:
+  name: untitled
+  version: "1.0"
+
+target:
+  board: esp32
+
+hardware:
+  devices:
+    led: { type: digital_output, pin: GPIO2 }
+
+events:
+  PRESS: { source: external }
+
+machine:
+  states:
+    off:
+    on:
+
+  transitions:
+    - from: off
+      on: PRESS
+      to: on
+
+    - from: on
+      on: PRESS
+      to: off
+`;
   var HIGHLIGHT_LIMIT = 2e5;
   var highlightingOn = true;
   function paint() {
@@ -6073,14 +6451,15 @@ ${implementations.join("\n\n")}`;
       source.style.color = "";
       highlightLayer.hidden = false;
     }
-    highlightLayer.innerHTML = `<code>${highlight(text)}
-</code>`;
+    highlightCode.innerHTML = `${highlight(text)}
+`;
     syncScroll();
   }
   function syncScroll() {
-    highlightLayer.scrollTop = source.scrollTop;
-    highlightLayer.scrollLeft = source.scrollLeft;
-    gutter.scrollTop = source.scrollTop;
+    const x = source.scrollLeft;
+    const y = source.scrollTop;
+    highlightCode.style.transform = `translate(${-x}px, ${-y}px)`;
+    gutterLines.style.transform = `translateY(${-y}px)`;
   }
   var badLine = null;
   function paintGutter() {
@@ -6091,8 +6470,7 @@ ${implementations.join("\n\n")}`;
     for (let n = 1; n <= lines; n++) {
       numbers.push(`<span class="ln${n === badLine ? " bad" : ""}">${n}</span>`);
     }
-    gutter.innerHTML = numbers.join("");
-    gutter.scrollTop = source.scrollTop;
+    gutterLines.innerHTML = numbers.join("");
   }
   function setBadLine(line) {
     if (badLine === line)
@@ -6270,11 +6648,9 @@ ${parser.warnings.join("\n")}`);
     }
     workspace.files[clean] = `# ${clean}
 #
-# Add this to the entry file's include list:
-#   include:
+# Add this to the entry file's import list:
+#   imports:
 #     - ${clean}
-
-system:
 `;
     selectFile(clean);
     render();
@@ -6317,6 +6693,133 @@ system:
     renderFileBar();
     render();
   }
+  function newProject(label) {
+    const template = label ? EXAMPLES[label] : null;
+    const files = template ? { ...template.files } : { "pulse.yaml": BLANK_MODEL };
+    const entry = template ? template.entry : "pulse.yaml";
+    const suggested = nameFromModel(files[entry], template ? label : "untitled");
+    const name = prompt("Project name", store.uniqueName(suggested));
+    if (!name?.trim())
+      return;
+    openProject(store.create(name.trim(), files, entry));
+  }
+  function renameProject() {
+    const name = prompt("Rename project", workspace.name);
+    if (!name?.trim() || name.trim() === workspace.name)
+      return;
+    const renamed = store.rename(workspace.id, name.trim());
+    if (renamed)
+      openProject(renamed);
+  }
+  function duplicateProject() {
+    persist();
+    const copy = store.duplicate(workspace.id);
+    if (copy)
+      openProject(copy);
+  }
+  function deleteProject() {
+    if (!confirm(`Delete the project "${workspace.name}"? This cannot be undone.`))
+      return;
+    const next = store.remove(workspace.id);
+    openProject(next ?? freshProject());
+  }
+  function freshProject() {
+    return store.create("untitled", { "pulse.yaml": BLANK_MODEL }, "pulse.yaml");
+  }
+  function exportProject() {
+    persist();
+    const folder = safeFolderName(workspace.name);
+    const entries = {};
+    for (const [name, text] of Object.entries(workspace.files)) {
+      entries[`${folder}/${name}`] = text;
+    }
+    download(`${folder}.zip`, zip(entries), "application/zip");
+  }
+  function safeFolderName(name) {
+    const clean = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
+    return clean || "model";
+  }
+  function importFiles(paths, fallbackName) {
+    const { files, folder } = foldImport(paths);
+    if (Object.keys(files).length === 0) {
+      alert("No .yaml files in there. A PulseIR project is a folder of YAML models.");
+      return;
+    }
+    const entry = findEntry(files);
+    openProject(store.create(importedName(files, entry, folder, fallbackName), files, entry));
+    if (!/^project:/m.test(files[entry])) {
+      alert(`None of the imported files declares "project:", so "${entry}" was opened as the entry file. Use "Set entry" if that is the wrong one.`);
+    }
+  }
+  async function importZipFile(file) {
+    try {
+      const entries = await unzip(new Uint8Array(await file.arrayBuffer()));
+      const decoder = new TextDecoder();
+      const paths = {};
+      for (const [name, bytes] of Object.entries(entries)) {
+        paths[name] = decoder.decode(bytes);
+      }
+      importFiles(paths, file.name.replace(/\.zip$/i, ""));
+    } catch (error) {
+      alert(error instanceof ZipError ? error.message : `Could not read that zip: ${error}`);
+    }
+  }
+  async function importFileList(list, fallbackName) {
+    const files = [...list];
+    if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
+      await importZipFile(files[0]);
+      return;
+    }
+    const paths = {};
+    for (const file of files) {
+      const relative = file.webkitRelativePath;
+      paths[relative || file.name] = await file.text();
+    }
+    importFiles(paths, fallbackName);
+  }
+  function closeMenu() {
+    projectMenu.hidden = true;
+    projectButton.setAttribute("aria-expanded", "false");
+  }
+  function item(label, sub, run, extra = "") {
+    const button = document.createElement("button");
+    button.type = "button";
+    if (extra)
+      button.className = extra;
+    button.innerHTML = `<span>${escapeHtml2(label)}</span>${sub ? `<span class="sub">${escapeHtml2(sub)}</span>` : ""}`;
+    button.addEventListener("click", () => {
+      closeMenu();
+      run();
+    });
+    return button;
+  }
+  function separator() {
+    const line = document.createElement("div");
+    line.className = "sep";
+    return line;
+  }
+  function heading(text) {
+    const label = document.createElement("div");
+    label.className = "heading";
+    label.textContent = text;
+    return label;
+  }
+  function openMenu() {
+    persist();
+    projectMenu.replaceChildren();
+    projectMenu.append(item("New project\u2026", "", () => newProject()), item("Rename\u2026", "", renameProject), item("Duplicate", "", duplicateProject), separator(), item("Import folder\u2026", "", () => importFolderInput.click()), item("Import .zip\u2026", "", () => importZipInput.click()), item("Export as .zip", "", exportProject), separator());
+    const projects = store.list();
+    projectMenu.append(heading(projects.length > 1 ? "Recent projects" : "Projects"));
+    for (const project of projects) {
+      projectMenu.append(item(project.name, project.id === workspace.id ? "open" : `${Object.keys(project.files).length} file${Object.keys(project.files).length === 1 ? "" : "s"}`, () => {
+        if (project.id !== workspace.id)
+          openProject(project);
+      }, project.id === workspace.id ? "current" : ""));
+    }
+    projectMenu.append(separator(), item("Delete this project", "", deleteProject, "danger"));
+    projectMenu.hidden = false;
+    projectButton.setAttribute("aria-expanded", "true");
+  }
   function debounce(fn, ms) {
     let handle;
     return () => {
@@ -6349,10 +6852,7 @@ system:
       option.textContent = key;
       exampleSelect.append(option);
     }
-    restore();
-    source.value = workspace.files[workspace.active] ?? "";
-    renderFileBar();
-    paint();
+    openProject(restore());
     const rerender = debounce(render, 150);
     source.addEventListener("input", () => {
       workspace.files[workspace.active] = source.value;
@@ -6362,19 +6862,10 @@ system:
     source.addEventListener("scroll", syncScroll, { passive: true });
     namespaceInput.addEventListener("input", rerender);
     exampleSelect.addEventListener("change", () => {
-      const example = EXAMPLES[exampleSelect.value];
-      if (!example)
-        return;
-      const untouched = Object.values(EXAMPLES).some((candidate) => JSON.stringify(candidate.files) === JSON.stringify(workspace.files));
-      if (!untouched && !confirm("Replace the current model with this example?")) {
-        exampleSelect.value = "";
-        return;
-      }
-      loadExample(exampleSelect.value);
-      source.value = workspace.files[workspace.active];
-      renderFileBar();
-      paint();
-      render();
+      const label = exampleSelect.value;
+      exampleSelect.value = "";
+      if (EXAMPLES[label])
+        newProject(label);
     });
     for (const button of document.querySelectorAll(".tab")) {
       button.addEventListener("click", () => selectTab(button.dataset.tab));
@@ -6407,8 +6898,60 @@ system:
       paint();
       rerender();
     });
+    projectButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (projectMenu.hidden)
+        openMenu();
+      else
+        closeMenu();
+    });
+    document.addEventListener("click", (event) => {
+      if (!projectMenu.hidden && !projectMenu.contains(event.target))
+        closeMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !projectMenu.hidden)
+        closeMenu();
+    });
+    importZipInput.addEventListener("change", () => {
+      const file = importZipInput.files?.[0];
+      importZipInput.value = "";
+      if (file)
+        void importZipFile(file);
+    });
+    importFolderInput.addEventListener("change", () => {
+      const files = importFolderInput.files;
+      const picked = files ? [...files] : [];
+      importFolderInput.value = "";
+      if (picked.length)
+        void importFileList(picked, "imported");
+    });
+    let dragDepth = 0;
+    document.addEventListener("dragenter", (event) => {
+      if (!event.dataTransfer?.types.includes("Files"))
+        return;
+      event.preventDefault();
+      dragDepth++;
+      document.body.classList.add("dropping");
+    });
+    document.addEventListener("dragover", (event) => {
+      if (event.dataTransfer?.types.includes("Files"))
+        event.preventDefault();
+    });
+    document.addEventListener("dragleave", () => {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0)
+        document.body.classList.remove("dropping");
+    });
+    document.addEventListener("drop", (event) => {
+      if (!event.dataTransfer?.files.length)
+        return;
+      event.preventDefault();
+      dragDepth = 0;
+      document.body.classList.remove("dropping");
+      void importFileList(event.dataTransfer.files, "dropped");
+    });
     selectTab(localStorage.getItem("pulseir.tab") || "sketch");
-    render();
   }
   init();
 })();

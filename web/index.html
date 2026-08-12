@@ -164,15 +164,21 @@
     background: var(--err-bg);
   }
   #highlight {
-    overflow: hidden;                 /* scrolled in step with the textarea */
+    overflow: hidden;                 /* content is translated, never scrolled */
     pointer-events: none;
     color: var(--text);
   }
   /* The inner <code> must add nothing of its own; every metric comes from the
-     .editor-text block the textarea also uses. */
-  #highlight code {
+     .editor-text block the textarea also uses.
+     It is moved with a transform rather than by scrolling its parent: a
+     parent's scrollTop is clamped to its own scrollHeight - clientHeight, and
+     the textarea's client box is shorter whenever it shows a scrollbar that
+     takes up space. A transform has no such limit, so the two can never
+     disagree. */
+  #highlight code, #gutter-lines {
     display: block; font: inherit; line-height: inherit; letter-spacing: inherit;
     white-space: inherit; tab-size: inherit; color: inherit;
+    will-change: transform;
   }
   textarea#source {
     resize: none; outline: none; background: transparent;
@@ -192,6 +198,44 @@
   .y-punct   { color: var(--dim); }
   .y-anchor  { color: var(--y-anchor); }
   .y-tag     { color: var(--y-anchor); }
+
+  /* Project menu. A plain popup - no framework, and it has to work offline. */
+  .menu-host { position: relative; }
+  #project-button { font-family: var(--mono); font-size: 12.5px; max-width: 26ch; }
+  /* Unconstrained, the template list stretches and wraps the header. */
+  #example { max-width: 24ch; }
+  #project-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .caret { color: var(--dim); }
+  .menu {
+    position: absolute; top: calc(100% + 4px); left: 0; z-index: 20;
+    min-width: 250px; max-height: 70vh; overflow-y: auto;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .18); padding: 4px;
+  }
+  .menu button {
+    display: flex; width: 100%; gap: 8px; align-items: baseline;
+    border: 0; background: transparent; text-align: left;
+    padding: 6px 9px; border-radius: 6px; font-size: 13px;
+  }
+  .menu button:hover:not(:disabled) { background: var(--panel); color: var(--text); }
+  .menu button .sub { color: var(--dim); font-size: 11.5px; margin-left: auto; }
+  .menu .sep { height: 1px; background: var(--border); margin: 4px 2px; }
+  .menu .heading {
+    padding: 6px 9px 2px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--dim);
+  }
+  .menu button.current { color: var(--accent); font-weight: 600; }
+  .menu button.danger:hover { background: var(--err-bg); color: var(--err-fg); }
+
+  /* Dropping a folder or a zip anywhere on the page imports it. */
+  body.dropping::after {
+    content: 'Drop a model folder or .zip to import';
+    position: fixed; inset: 12px; z-index: 50; pointer-events: none;
+    display: flex; align-items: center; justify-content: center;
+    border: 2px dashed var(--accent); border-radius: 12px;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    color: var(--accent); font-size: 15px;
+  }
 
   .panes { flex: 1; overflow: auto; min-height: 0; }
   .stale-note {
@@ -254,7 +298,14 @@
 <header>
   <h1>PulseIR <span>editor</span></h1>
 
-  <label for="example">Example</label>
+  <div class="menu-host">
+    <button id="project-button" aria-haspopup="true" aria-expanded="false">
+      <span id="project-name">—</span> <span class="caret">▾</span>
+    </button>
+    <div class="menu" id="project-menu" hidden></div>
+  </div>
+
+  <label for="example">New from</label>
   <select id="example"><option value="">—</option></select>
 
   <label for="namespace">MQTT namespace</label>
@@ -267,6 +318,11 @@
   <button id="download-libraries">libraries.json</button>
 </header>
 
+<!-- Import needs a real file input; kept out of the way and driven from the
+     project menu. `webkitdirectory` is what lets a whole folder be picked. -->
+<input id="import-zip" type="file" accept=".zip,application/zip" hidden>
+<input id="import-folder" type="file" webkitdirectory multiple hidden>
+
 <main>
   <section class="side">
     <div class="bar filebar">
@@ -275,8 +331,8 @@
       <button id="set-entry" title="Parse starting from the open file">Set entry</button>
     </div>
     <div class="editor">
-      <div id="gutter" class="editor-text" aria-hidden="true"></div>
-      <pre id="highlight" class="editor-text" aria-hidden="true"><code></code></pre>
+      <div id="gutter" class="editor-text" aria-hidden="true"><div id="gutter-lines"></div></div>
+      <pre id="highlight" class="editor-text" aria-hidden="true"><code id="highlight-code"></code></pre>
       <textarea id="source" class="editor-text" spellcheck="false" autocomplete="off"
                 autocorrect="off" autocapitalize="off" wrap="off"
                 aria-label="PulseIR model source"></textarea>

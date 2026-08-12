@@ -12,7 +12,8 @@
     "web": "npm run build:web && node scripts/serve.mjs",
     "dev": "tsc --watch",
     "test": "node --test dist/test/**/*.test.js",
-    "cli": "node dist/src/cli.js"
+    "cli": "node dist/src/cli.js",
+    "check:editor": "node scripts/check-editor.mjs"
   },
   "dependencies": {
     "js-yaml": "^4.1.0"

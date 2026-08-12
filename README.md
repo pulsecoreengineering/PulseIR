@@ -292,6 +292,26 @@ A browser editor with live output: edit the model on the left, watch the
 generated sketch, the MQTT topic manifest, the library manifest and the state
 structure update as you type.
 
+### Projects
+
+The editor holds many projects, not one. **Export as .zip** writes a real
+folder — unzip it and `pulse-ir --outdir` builds it unchanged, which is the
+point: the editor and the CLI work on the same thing rather than on two
+formats. **Import** takes that zip back, or a folder, or files dropped onto the
+page; it strips the wrapping directory, ignores everything that is not a model,
+and finds the entry file by looking for `project:` rather than trusting a name.
+
+Picking a template under **New from** starts a *new* project, so browsing the
+examples can no longer cost you your work.
+
+> Projects live in browser storage, which one "clear browsing data" wipes.
+> **The exported folder is the durable copy** — export anything you want to
+> keep, or commit it.
+
+```bash
+npm run check:editor   # optional: verifies the editor's layers in a real browser
+```
+
 The YAML pane is syntax-highlighted — keys, strings, numbers, comments and
 flow collections — with no editor library and no network: a colour layer sits
 exactly beneath a transparent textarea. `on:` and `off:` stay keys, because in
@@ -327,6 +347,14 @@ uses, compiled to a bundle. It cannot drift from what `pulse-ir` writes to disk.
 
 Re-run `npm run build:web` after changing anything under `src/` or `examples/`;
 `npm test` fails if the committed bundle or baked examples go stale.
+
+The editor draws its coloured text and line numbers **behind** a transparent
+textarea, so whether those layers sit exactly under the caret is a rendering
+property no amount of reading the source can prove. `npm run check:editor`
+measures it in a real browser — at every corner of the scroll range, and with
+the textarea shortened to reproduce the classic Windows scrollbars that
+headless Linux does not have. It skips itself when Playwright is not installed,
+so it is not part of `npm test`.
 
 `web/app.js` and `web/examples.ts` are generated but committed, so rebuilding
 has to be a genuine no-op or every `npm run web` blocks the next `git pull`.
