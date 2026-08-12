@@ -1,5 +1,5 @@
 /**
- * PulseHSM IR Parser
+ * PulseIR Parser
  * 
  * Converts YAML → PulseModel
  * Validates references and schema

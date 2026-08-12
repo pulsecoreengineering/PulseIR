@@ -154,7 +154,10 @@ static void report() {
 
 // sendEvent() only queues; update() drains the queue and applies the
 // transition, exactly as loop() would.
-static void step(SystemEvent e) {
+//
+// Marked used because a driver may reach the machine only through commands,
+// and the suite builds with -Werror.
+__attribute__((unused)) static void step(SystemEvent e) {
   fsm.sendEvent(e);
   fsm.update();
   report();
@@ -1002,6 +1005,104 @@ int main() {
   assert(
     afterOverflow.includes('Action: led_on'),
     `the reader did not recover after an over-long line:\n${afterOverflow}`
+  );
+});
+
+test('a machine, tasks and commands work together', () => {
+  // Each of the three was tested alone. Together is where the seams are, and
+  // one of them was real: loop() ran tasks and commands *before* syncContext(),
+  // so an action fired by either saw whatever the last event dispatch left.
+  const sketch = generate(path.join(repoRoot, 'test/fixtures/combined.yaml'));
+
+  assert(sketch.includes('#define CONSOLE_BAUD 19200'), 'the console baud rate was lost among the buses');
+  assert(
+    /void loop\(\) \{\s*\n\s*syncContext\(\);/.test(sketch),
+    'loop() runs tasks and commands before refreshing the context they are handed'
+  );
+
+  const driver = `${DRIVER_PRELUDE}
+int main() {
+  setup();
+  report();
+
+  // A command that raises an event has to reach the machine.
+  Serial.feed("start\\n");
+  loop();
+  report();
+
+  // A task keeps running whatever state the machine is in, and a command that
+  // runs actions directly works alongside it.
+  Serial.println("-- 250ms later, plus a direct command");
+  pulseTestAdvance(250);
+  Serial.feed("report\\n");
+  loop();
+  report();
+
+  // The timed transition out of running/warming is a separate clock from the
+  // task, and reaching it must not depend on the task having fired.
+  Serial.println("-- past hold_ms");
+  pulseTestAdvance(1000);
+  loop();
+  report();
+
+  Serial.println("-- stop");
+  Serial.feed("stop\\n");
+  loop();
+  report();
+  return 0;
+}`;
+
+  const output = buildAndRun('combined', sketch, driver);
+
+  assertTrace(
+    output,
+    [
+      'idle',
+      'running/warming',   // "start" raised START and the machine moved
+      'running/warming',
+      'running/steady',    // the after: timer fired, independently of the task
+      'idle',              // "stop" raised STOP from the inner state
+    ],
+    'combined dispatch trace mismatch'
+  );
+
+  // The task ran on its own clock throughout, and the multi-action command ran
+  // both of its actions.
+  const samples = output.split('\n').filter(l => l.includes('Action: sample')).length;
+  assert(samples >= 2, `the task and the command should both have sampled, saw ${samples}`);
+  assert(output.includes('Action: announce'), 'the second action of a multi-action command never ran');
+});
+
+test('a project with no machine gets no runtime vendored beside it', () => {
+  // Shipping a copy of PulseHSM with a blink would claim a dependency that is
+  // not there, and leave a PulseHSM_config.h sizing a table nothing allocates.
+  const project = new Parser().parseFrom(
+    path.join(repoRoot, 'examples/blink.yaml'),
+    new FileResolver()
+  );
+  const files = new Codegen().generateFiles(project);
+
+  assert(!files.needsRuntime, 'a machine-less project asked for the runtime');
+  assert(
+    !files.generated.some(f => f.path === 'PulseHSM_config.h'),
+    'a machine-less project was given a runtime sizing header'
+  );
+  assert(
+    !files.scaffolds.some(f => f.path.includes('guards')),
+    'a machine-less project was given a guards file; guards live on transitions'
+  );
+  for (const file of [...files.generated, ...files.scaffolds]) {
+    assert(!file.contents.includes('PulseHSM'), `${file.path} still references the runtime`);
+  }
+
+  // And the same model with a machine does still get all of it.
+  const withMachine = new Codegen().generateFiles(
+    new Parser().parseFrom(path.join(repoRoot, 'examples/boiler/pulse.yaml'), new FileResolver())
+  );
+  assert(withMachine.needsRuntime, 'a project with a machine no longer asks for the runtime');
+  assert(
+    withMachine.generated.some(f => f.path === 'PulseHSM_config.h'),
+    'a project with a machine lost its sizing header'
   );
 });
 

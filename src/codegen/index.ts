@@ -1,5 +1,10 @@
 /**
- * PulseHSM IR Code Generator
+ * Arduino backend for PulseIR.
+ *
+ * This is *a* backend, not the IR: it turns a PulseModel into an Arduino
+ * sketch. When the model declares a state machine it targets the PulseHSM
+ * runtime; when it does not, it emits plain Arduino with no runtime at all,
+ * and `hasMachine` is the seam between the two.
  *
  * Converts PulseModel → C++ code targeting the PulseHSM runtime (deps/).
  *
@@ -85,6 +90,14 @@ export interface GeneratedFile {
 }
 
 export interface GeneratedProject {
+  /**
+   * Whether this project uses PulseHSM at all.
+   *
+   * False for a model with no `machine:`, and the caller must not vendor the
+   * runtime beside it - shipping a copy of PulseHSM with a blink would say the
+   * dependency exists when it does not.
+   */
+  needsRuntime: boolean;
   /** Rewritten on every run. Never edit these. */
   generated: GeneratedFile[];
   /** Written only if absent, so your implementations survive regeneration. */
@@ -187,13 +200,20 @@ export class Codegen {
     const actionName = 'src/actions.cpp';
 
     return {
+      // Only a project with a state machine needs the runtime, the header that
+      // sizes it, or a place to put guards - guards live on transitions.
+      needsRuntime: this.hasMachine,
       generated: [
-        { path: 'PulseHSM_config.h', contents: this.generateConfigHeader() },
+        ...(this.hasMachine
+          ? [{ path: 'PulseHSM_config.h', contents: this.generateConfigHeader() }]
+          : []),
         { path: headerName, contents: this.composeHeader(headerName) },
         { path: `${base}.ino`, contents: this.composeSketch(headerName) },
       ],
       scaffolds: [
-        { path: guardName, contents: this.composeGuardFile(headerName) },
+        ...(this.hasMachine
+          ? [{ path: guardName, contents: this.composeGuardFile(headerName) }]
+          : []),
         { path: actionName, contents: this.composeActionFile(headerName) },
       ],
     };
@@ -212,7 +232,7 @@ export class Codegen {
       this.declParameterStruct(),
       this.declSensorStruct(),
       this.declContextStruct(),
-      this.machineGlobals(true),
+      this.hasMachine ? this.machineGlobals(true) : '',
       `// Instances the sketch defines.
 extern SystemParameters systemParameters;
 extern SystemSensors systemSensors;
@@ -234,12 +254,14 @@ void setupInterfaces();${this.declInterfaceGlobals()}`,
     // The sizing macros must precede PulseHSM.h, and the header does that -
     // so the sketch includes the header first and nothing else.
     return [
-      `/**\n * PulseHSM Generated Code - DO NOT EDIT.\n *\n * Regenerated from the model every time. Your guards and actions live in\n * src/, which this file never overwrites.\n */\n\n#include "${headerName}"`,
+      `/**\n * PulseIR Generated Code - DO NOT EDIT.\n *\n * Regenerated from the model every time. Your guards and actions live in\n * src/, which this file never overwrites.\n */\n\n#include "${headerName}"`,
       this.defEventNames(),
       this.defParameterInstance(),
       'SystemSensors systemSensors = {};',
       'SystemContext systemContext;',
-      this.machineGlobals(false).replace(/^\/\/ =+\n\/\/ STATE MACHINE\n\/\/ =+\n\n/m, ''),
+      this.hasMachine
+        ? this.machineGlobals(false).replace(/^\/\/ =+\n\/\/ STATE MACHINE\n\/\/ =+\n\n/m, '')
+        : '',
       this.defInterfaces().trimStart(),
       this.generateEventHandlers(),
       this.generateTimeouts(),
@@ -407,6 +429,9 @@ ${this.generateActionImplementations()}
  * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
  *
+ * Runtime: none. This model declares no state machine, so the sketch below is
+ * plain Arduino and needs no library beyond the core.
+ *
  * Action signatures follow FUNCTION_CONTRACT.md:
  *   void action_<name>(SystemContext* ctx)
  */`;
@@ -419,14 +444,16 @@ ${this.generateActionImplementations()}
     const { maxStates, maxEvents, levels } = this.sizing();
 
     return `/**
- * PulseHSM Generated Code
+ * PulseIR Generated Code
  *
  * Project: ${name}
  * Version: ${version}
  * Generated: ${date}
  *
- * This file was auto-generated from a PulseHSM model.
+ * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
+ *
+ * Runtime: PulseHSM (this model declares a state machine).
  *
  * Guard/action signatures follow FUNCTION_CONTRACT.md:
  *   bool guard_<name>(const SystemContext* ctx)
@@ -1417,9 +1444,11 @@ ${blocks.join('\n\n')}`;
       body.push('  // Nothing declared to run. Add tasks: or commands: to the model.');
     }
 
-    // syncContext() belongs to the event handlers; without a machine nothing
-    // else refreshes the context an action is handed.
-    const sync = !this.hasMachine && (this.project.system.commands || (this.project.system.tasks || []).length)
+    // Tasks and commands call actions from loop(), not from an event handler,
+    // so nothing else has refreshed the context they are handed. With a machine
+    // this used to be skipped, and those actions saw whatever the last event
+    // dispatch left behind - a stale currentState and a stale eventData.
+    const sync = this.project.system.commands || (this.project.system.tasks || []).length
       ? '  syncContext();\n'
       : '';
 

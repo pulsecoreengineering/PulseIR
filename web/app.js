@@ -4500,13 +4500,16 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
       const guardName = "src/guards.cpp";
       const actionName = "src/actions.cpp";
       return {
+        // Only a project with a state machine needs the runtime, the header that
+        // sizes it, or a place to put guards - guards live on transitions.
+        needsRuntime: this.hasMachine,
         generated: [
-          { path: "PulseHSM_config.h", contents: this.generateConfigHeader() },
+          ...this.hasMachine ? [{ path: "PulseHSM_config.h", contents: this.generateConfigHeader() }] : [],
           { path: headerName, contents: this.composeHeader(headerName) },
           { path: `${base}.ino`, contents: this.composeSketch(headerName) }
         ],
         scaffolds: [
-          { path: guardName, contents: this.composeGuardFile(headerName) },
+          ...this.hasMachine ? [{ path: guardName, contents: this.composeGuardFile(headerName) }] : [],
           { path: actionName, contents: this.composeActionFile(headerName) }
         ]
       };
@@ -4524,7 +4527,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         this.declParameterStruct(),
         this.declSensorStruct(),
         this.declContextStruct(),
-        this.machineGlobals(true),
+        this.hasMachine ? this.machineGlobals(true) : "",
         `// Instances the sketch defines.
 extern SystemParameters systemParameters;
 extern SystemSensors systemSensors;
@@ -4544,7 +4547,7 @@ void setupInterfaces();${this.declInterfaceGlobals()}`,
     composeSketch(headerName) {
       return [
         `/**
- * PulseHSM Generated Code - DO NOT EDIT.
+ * PulseIR Generated Code - DO NOT EDIT.
  *
  * Regenerated from the model every time. Your guards and actions live in
  * src/, which this file never overwrites.
@@ -4555,7 +4558,7 @@ void setupInterfaces();${this.declInterfaceGlobals()}`,
         this.defParameterInstance(),
         "SystemSensors systemSensors = {};",
         "SystemContext systemContext;",
-        this.machineGlobals(false).replace(/^\/\/ =+\n\/\/ STATE MACHINE\n\/\/ =+\n\n/m, ""),
+        this.hasMachine ? this.machineGlobals(false).replace(/^\/\/ =+\n\/\/ STATE MACHINE\n\/\/ =+\n\n/m, "") : "",
         this.defInterfaces().trimStart(),
         this.generateEventHandlers(),
         this.generateTimeouts(),
@@ -4706,6 +4709,9 @@ ${this.generateActionImplementations()}
  * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
  *
+ * Runtime: none. This model declares no state machine, so the sketch below is
+ * plain Arduino and needs no library beyond the core.
+ *
  * Action signatures follow FUNCTION_CONTRACT.md:
  *   void action_<name>(SystemContext* ctx)
  */`;
@@ -4716,14 +4722,16 @@ ${this.generateActionImplementations()}
       }
       const { maxStates, maxEvents, levels } = this.sizing();
       return `/**
- * PulseHSM Generated Code
+ * PulseIR Generated Code
  *
  * Project: ${name}
  * Version: ${version}
  * Generated: ${date}
  *
- * This file was auto-generated from a PulseHSM model.
+ * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
+ *
+ * Runtime: PulseHSM (this model declares a state machine).
  *
  * Guard/action signatures follow FUNCTION_CONTRACT.md:
  *   bool guard_<name>(const SystemContext* ctx)
@@ -5518,7 +5526,7 @@ ${blocks.join("\n\n")}`;
       } else if (body.length === 0) {
         body.push("  // Nothing declared to run. Add tasks: or commands: to the model.");
       }
-      const sync = !this.hasMachine && (this.project.system.commands || (this.project.system.tasks || []).length) ? "  syncContext();\n" : "";
+      const sync = this.project.system.commands || (this.project.system.tasks || []).length ? "  syncContext();\n" : "";
       return `// ============================================================================
 // MAIN LOOP
 // ============================================================================

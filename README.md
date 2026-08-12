@@ -1,15 +1,24 @@
-# PulseIR - PulseHSM Intermediate Representation
+# PulseIR — an intermediate representation for embedded systems
 
-A language-agnostic IR for embedded systems automation. Declaratively define your system behavior in YAML, then generate code for any target.
+Describe what a system *is* in YAML, and generate the firmware that runs it.
+
+**PulseHSM is one tenant of this IR, not its foundation.** A model may declare
+a state machine, and the Arduino backend targets PulseHSM when it does — but
+`machine:` is optional. A model made only of `tasks:` or `commands:` is a
+complete project, and its generated sketch contains no PulseHSM at all: no
+include, no runtime vendored beside it, no sizing header. Nothing in the IR
+types assumes a runtime.
 
 ## Architecture
 
 ```
 YAML (PulseProject)
   ↓ (parse)
-PulseModel (IR types)
+PulseModel (IR types)          ← runtime-neutral
   ↓ (validate)
-C++ Code (PulseHSM runtime)
+  ↓ (Arduino backend)
+C++ sketch  ── with a machine ──→ + PulseHSM
+            ── without one ─────→ plain Arduino, no runtime
 ```
 
 ## Project Structure
@@ -19,7 +28,7 @@ pulse-ir/
 ├── src/
 │   ├── model/           # IR types (what a system looks like)
 │   ├── parser/          # YAML → IR
-│   ├── codegen/         # IR → C++ (PulseHSM runtime)
+│   ├── codegen/         # IR → Arduino C++ (one backend, not the IR)
 │   └── cli.ts           # CLI entry point
 ├── test/
 └── examples/
@@ -55,10 +64,11 @@ The parser:
    duplicate states, malformed guards
 4. Returns a parsed model, or a `ParseError` describing what is wrong
 
-## Layer 3: Codegen (✓ DONE)
+## Layer 3: The Arduino Backend (✓ DONE)
 
-The codegen takes a validated PulseModel and emits an Arduino sketch that
-drives the PulseHSM runtime:
+One backend, not the IR. It takes a validated PulseModel and emits an Arduino
+sketch. A model with `tasks:` or `commands:` and no `machine:` gets plain
+Arduino; a model with a state machine gets the same plus PulseHSM:
 
 - Sizes `PULSEHSM_MAX_STATES` / `_EVENTS` / `_DEPTH` from the model, above the
   include so they take effect

@@ -1,5 +1,10 @@
 /**
- * PulseHSM Intermediate Representation - Core Types
+ * PulseIR - Core Types
+ *
+ * The intermediate representation itself, and deliberately not PulseHSM's.
+ * A model may declare a state machine, and if it does the Arduino backend
+ * targets PulseHSM - but `machine:` is optional, and `tasks:` or `commands:`
+ * alone is a complete project. Nothing in this file assumes a runtime.
  * 
  * These are the fundamental data structures that represent a system model.
  * They are intentionally simple and schema-agnostic.

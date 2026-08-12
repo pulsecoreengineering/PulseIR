@@ -331,6 +331,23 @@ Two things this shook out:
   `<string.h>`. Most Arduino cores pull it in through `Arduino.h`; the host
   compiler does not, and neither will every core.
 
+#### Finding 2d — The three did not compose
+
+`machine:`, `tasks:` and `commands:` were each covered alone, and that hid a
+real bug: `loop()` ran tasks and commands *before* `syncContext()`, so an action
+fired by either was handed whatever the last event dispatch left behind - a
+stale `currentState`, a stale `eventData`. Without a machine there was nothing
+to leave anything behind, and with a machine no test called an action from a
+task. `test/fixtures/combined.yaml` now exercises all three at once.
+
+The machine-less path leaked in the other direction too. `--outdir` was still
+vendoring `PulseHSM.h` and `.cpp` beside a blink, writing a `PulseHSM_config.h`
+sizing a table nothing allocates, scaffolding a `guards.cpp` for a project that
+can have no guards, and emitting `PulseHSM fsm;` into the multi-file header -
+the single-file path had been fixed and the folder path had not. `generateFiles`
+now reports `needsRuntime`, and a test asserts no generated file for a
+machine-less project mentions PulseHSM at all.
+
 #### Finding 2b — A state cannot repeat on a timer
 
 Surfaced while implementing `after:`, and left unsolved deliberately.
