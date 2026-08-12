@@ -292,6 +292,22 @@ A browser editor with live output: edit the model on the left, watch the
 generated sketch, the MQTT topic manifest, the library manifest and the state
 structure update as you type.
 
+### Projects
+
+The editor holds many projects, not one. **Export as .zip** writes a real
+folder — unzip it and `pulse-ir --outdir` builds it unchanged, which is the
+point: the editor and the CLI work on the same thing rather than on two
+formats. **Import** takes that zip back, or a folder, or files dropped onto the
+page; it strips the wrapping directory, ignores everything that is not a model,
+and finds the entry file by looking for `project:` rather than trusting a name.
+
+Picking a template under **New from** starts a *new* project, so browsing the
+examples can no longer cost you your work.
+
+> Projects live in browser storage, which one "clear browsing data" wipes.
+> **The exported folder is the durable copy** — export anything you want to
+> keep, or commit it.
+
 The YAML pane is syntax-highlighted — keys, strings, numbers, comments and
 flow collections — with no editor library and no network: a colour layer sits
 exactly beneath a transparent textarea. `on:` and `off:` stay keys, because in

@@ -20,6 +20,9 @@ import { TopicEmitter } from '../src/emit/topics.js';
 import { LibraryEmitter } from '../src/emit/libraries.js';
 import { flattenStates, resolveEntryLeaf, resolvePath } from '../src/analysis/states.js';
 import { highlight } from './highlight.js';
+import { ProjectStore, foldImport, findEntry, importedName, nameFromModel } from './projects.js';
+import type { Project } from './projects.js';
+import { zip, unzip, ZipError } from './zip.js';
 import type { PulseProject } from '../src/model/index.js';
 import { EXAMPLES } from './examples.js';
 
@@ -45,6 +48,11 @@ const panes = {
   structure: $<HTMLElement>('pane-structure'),
 };
 const exampleSelect = $<HTMLSelectElement>('example');
+const projectButton = $<HTMLButtonElement>('project-button');
+const projectName = $<HTMLSpanElement>('project-name');
+const projectMenu = $<HTMLDivElement>('project-menu');
+const importZipInput = $<HTMLInputElement>('import-zip');
+const importFolderInput = $<HTMLInputElement>('import-folder');
 const namespaceInput = $<HTMLInputElement>('namespace');
 const staleNote = $<HTMLDivElement>('stale-note');
 
@@ -52,18 +60,16 @@ const staleNote = $<HTMLDivElement>('stale-note');
 // Model state
 // ---------------------------------------------------------------------------
 
-interface Workspace {
-  /** Open buffers, keyed by the path an `include` would use. */
-  files: Record<string, string>;
-  /** File the parser starts from. */
-  entry: string;
-  /** File shown in the textarea. */
-  active: string;
-}
+const store = new ProjectStore(localStorage);
 
-const STORAGE_KEY = 'pulseir.workspace';
-
-let workspace: Workspace = { files: {}, entry: '', active: '' };
+/**
+ * The open project.
+ *
+ * Everything below still calls it `workspace`, because that is what it is from
+ * the editor's point of view: the files on screen. The difference is that there
+ * are now many of them and this one has a name.
+ */
+let workspace: Project = { id: '', name: '', files: {}, entry: '', active: '', updatedAt: 0 };
 
 /** Last successful render, so downloads never hand over a broken file. */
 let current: { project: PulseProject; sketch: string; topics: string; libraries: string } | null = null;
@@ -75,47 +81,34 @@ function fileNames(): string[] {
   return workspace.entry ? [workspace.entry, ...rest] : rest;
 }
 
-function loadExample(label: string): void {
-  const example = EXAMPLES[label];
-  if (!example) return;
-  workspace = {
-    files: { ...example.files },
-    entry: example.entry,
-    active: example.entry,
-  };
+/** Open a project, replacing whatever is on screen. */
+function openProject(project: Project): void {
+  workspace = project;
+  store.setCurrent(project.id);
+  source.value = workspace.files[workspace.active] ?? '';
+  projectName.textContent = project.name;
+  renderFileBar();
+  paint();
+  render();
 }
 
-function restore(): void {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved) {
-    try {
-      const parsed = JSON.parse(saved) as Workspace;
-      if (parsed.files && Object.keys(parsed.files).length && parsed.files[parsed.entry]) {
-        workspace = {
-          files: parsed.files,
-          entry: parsed.entry,
-          active: parsed.files[parsed.active] !== undefined ? parsed.active : parsed.entry,
-        };
-        return;
-      }
-    } catch {
-      // Corrupt state should not brick the editor; fall through to a default.
-    }
-  }
+/** The project to show on load: the last one open, or a starting point. */
+function restore(): Project {
+  // Anything left in the pre-projects single workspace comes across first, so
+  // upgrading the editor never costs someone their model.
+  const migrated = store.migrateLegacy();
+  if (migrated) return migrated;
 
-  // Migrate the single-buffer layout this editor used before multi-file.
-  const legacy = localStorage.getItem('pulseir.source');
-  if (legacy && legacy.trim()) {
-    workspace = { files: { 'model.yaml': legacy }, entry: 'model.yaml', active: 'model.yaml' };
-    localStorage.removeItem('pulseir.source');
-    return;
-  }
+  const existing = store.current();
+  if (existing) return existing;
 
-  loadExample(Object.keys(EXAMPLES)[0]);
+  const label = Object.keys(EXAMPLES)[0];
+  const example = EXAMPLES[label];
+  return store.create(nameFromModel(example.files[example.entry], 'My model'), example.files, example.entry);
 }
 
 function persist(): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
+  if (workspace.id) store.save(workspace);
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +122,37 @@ function persist(): void {
  * a few kilobytes - but a pasted-in monster should degrade to a working editor
  * rather than a laggy one.
  */
+/** What "New project" starts from. Deliberately tiny, and in today's schema. */
+const BLANK_MODEL = `# A new PulseIR model.
+project:
+  name: untitled
+  version: "1.0"
+
+target:
+  board: esp32
+
+hardware:
+  devices:
+    led: { type: digital_output, pin: GPIO2 }
+
+events:
+  PRESS: { source: external }
+
+machine:
+  states:
+    off:
+    on:
+
+  transitions:
+    - from: off
+      on: PRESS
+      to: on
+
+    - from: on
+      on: PRESS
+      to: off
+`;
+
 const HIGHLIGHT_LIMIT = 200_000;
 
 let highlightingOn = true;
@@ -461,7 +485,12 @@ function addFile(): void {
     return;
   }
 
-  workspace.files[clean] = `# ${clean}\n#\n# Add this to the entry file's include list:\n#   include:\n#     - ${clean}\n\nsystem:\n`;
+  workspace.files[clean] = `# ${clean}
+#
+# Add this to the entry file's import list:
+#   imports:
+#     - ${clean}
+`;
   selectFile(clean);
   render();
 }
@@ -510,6 +539,200 @@ function setEntry(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Projects
+// ---------------------------------------------------------------------------
+
+function newProject(label?: string): void {
+  const template = label ? EXAMPLES[label] : null;
+
+  const files: Record<string, string> = template
+    ? { ...template.files }
+    : { 'pulse.yaml': BLANK_MODEL };
+  const entry = template ? template.entry : 'pulse.yaml';
+  const suggested = nameFromModel(files[entry], template ? label! : 'untitled');
+
+  const name = prompt('Project name', store.uniqueName(suggested));
+  if (!name?.trim()) return;
+
+  openProject(store.create(name.trim(), files, entry));
+}
+
+function renameProject(): void {
+  const name = prompt('Rename project', workspace.name);
+  if (!name?.trim() || name.trim() === workspace.name) return;
+
+  const renamed = store.rename(workspace.id, name.trim());
+  if (renamed) openProject(renamed);
+}
+
+function duplicateProject(): void {
+  persist();
+  const copy = store.duplicate(workspace.id);
+  if (copy) openProject(copy);
+}
+
+function deleteProject(): void {
+  if (!confirm(`Delete the project "${workspace.name}"? This cannot be undone.`)) return;
+
+  const next = store.remove(workspace.id);
+  // Deleting the last project would leave nothing to edit, so start one.
+  openProject(next ?? freshProject());
+}
+
+function freshProject(): Project {
+  return store.create('untitled', { 'pulse.yaml': BLANK_MODEL }, 'pulse.yaml');
+}
+
+/** Export the open project as a folder, zipped. */
+function exportProject(): void {
+  persist();
+  // Entries are prefixed with the project name so unzipping gives a folder
+  // rather than scattering files into wherever it was unzipped.
+  const folder = safeFolderName(workspace.name);
+  const entries: Record<string, string> = {};
+  for (const [name, text] of Object.entries(workspace.files)) {
+    entries[`${folder}/${name}`] = text;
+  }
+
+  download(`${folder}.zip`, zip(entries), 'application/zip');
+}
+
+/** A name safe on every filesystem, and never empty. */
+function safeFolderName(name: string): string {
+  const clean = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '');
+  return clean || 'model';
+}
+
+/**
+ * Take a set of imported paths and open them as a new project.
+ *
+ * Shared by every import route - zip, folder picker, drag and drop - so they
+ * cannot drift apart.
+ */
+function importFiles(paths: Record<string, string>, fallbackName: string): void {
+  const { files, folder } = foldImport(paths);
+
+  if (Object.keys(files).length === 0) {
+    alert('No .yaml files in there. A PulseIR project is a folder of YAML models.');
+    return;
+  }
+
+  const entry = findEntry(files)!;
+  openProject(store.create(importedName(files, entry, folder, fallbackName), files, entry));
+
+  if (!/^project:/m.test(files[entry])) {
+    // Not fatal - it opens, and the status bar will say what is wrong - but
+    // worth saying plainly, because the entry file was a guess.
+    alert(
+      `None of the imported files declares "project:", so "${entry}" was opened as the ` +
+      'entry file. Use "Set entry" if that is the wrong one.'
+    );
+  }
+}
+
+async function importZipFile(file: File): Promise<void> {
+  try {
+    const entries = await unzip(new Uint8Array(await file.arrayBuffer()));
+    const decoder = new TextDecoder();
+    const paths: Record<string, string> = {};
+    for (const [name, bytes] of Object.entries(entries)) {
+      paths[name] = decoder.decode(bytes);
+    }
+    importFiles(paths, file.name.replace(/\.zip$/i, ''));
+  } catch (error) {
+    alert(error instanceof ZipError ? error.message : `Could not read that zip: ${error}`);
+  }
+}
+
+async function importFileList(list: FileList | File[], fallbackName: string): Promise<void> {
+  const files = [...list];
+
+  // A single zip is the export format; anything else is a set of loose files.
+  if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
+    await importZipFile(files[0]);
+    return;
+  }
+
+  const paths: Record<string, string> = {};
+  for (const file of files) {
+    // webkitRelativePath carries the folder structure a directory pick has;
+    // a plain multi-file selection has only names.
+    const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+    paths[relative || file.name] = await file.text();
+  }
+  importFiles(paths, fallbackName);
+}
+
+// ---------------------------------------------------------------------------
+// Project menu
+// ---------------------------------------------------------------------------
+
+function closeMenu(): void {
+  projectMenu.hidden = true;
+  projectButton.setAttribute('aria-expanded', 'false');
+}
+
+function item(label: string, sub: string, run: () => void, extra = ''): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  if (extra) button.className = extra;
+  button.innerHTML = `<span>${escapeHtml(label)}</span>${sub ? `<span class="sub">${escapeHtml(sub)}</span>` : ''}`;
+  button.addEventListener('click', () => {
+    closeMenu();
+    run();
+  });
+  return button;
+}
+
+function separator(): HTMLDivElement {
+  const line = document.createElement('div');
+  line.className = 'sep';
+  return line;
+}
+
+function heading(text: string): HTMLDivElement {
+  const label = document.createElement('div');
+  label.className = 'heading';
+  label.textContent = text;
+  return label;
+}
+
+function openMenu(): void {
+  persist();
+  projectMenu.replaceChildren();
+
+  projectMenu.append(
+    item('New project…', '', () => newProject()),
+    item('Rename…', '', renameProject),
+    item('Duplicate', '', duplicateProject),
+    separator(),
+    item('Import folder…', '', () => importFolderInput.click()),
+    item('Import .zip…', '', () => importZipInput.click()),
+    item('Export as .zip', '', exportProject),
+    separator(),
+  );
+
+  const projects = store.list();
+  projectMenu.append(heading(projects.length > 1 ? 'Recent projects' : 'Projects'));
+
+  for (const project of projects) {
+    projectMenu.append(item(
+      project.name,
+      project.id === workspace.id ? 'open' : `${Object.keys(project.files).length} file${
+        Object.keys(project.files).length === 1 ? '' : 's'
+      }`,
+      () => { if (project.id !== workspace.id) openProject(project); },
+      project.id === workspace.id ? 'current' : ''
+    ));
+  }
+
+  projectMenu.append(separator(), item('Delete this project', '', deleteProject, 'danger'));
+
+  projectMenu.hidden = false;
+  projectButton.setAttribute('aria-expanded', 'true');
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -521,8 +744,8 @@ function debounce(fn: () => void, ms: number): () => void {
   };
 }
 
-function download(filename: string, contents: string, type: string): void {
-  const url = URL.createObjectURL(new Blob([contents], { type }));
+function download(filename: string, contents: string | Uint8Array, type: string): void {
+  const url = URL.createObjectURL(new Blob([contents as BlobPart], { type }));
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
@@ -548,10 +771,7 @@ function init(): void {
     exampleSelect.append(option);
   }
 
-  restore();
-  source.value = workspace.files[workspace.active] ?? '';
-  renderFileBar();
-  paint();
+  openProject(restore());
 
   const rerender = debounce(render, 150);
 
@@ -564,25 +784,12 @@ function init(): void {
   source.addEventListener('scroll', syncScroll, { passive: true });
   namespaceInput.addEventListener('input', rerender);
 
+  // Picking a template starts a *new* project rather than overwriting the open
+  // one, so browsing the examples can no longer cost someone their work.
   exampleSelect.addEventListener('change', () => {
-    const example = EXAMPLES[exampleSelect.value];
-    if (!example) return;
-
-    // Only interrupt when there is actual work to lose. Switching between
-    // untouched examples should be free.
-    const untouched = Object.values(EXAMPLES).some(
-      candidate => JSON.stringify(candidate.files) === JSON.stringify(workspace.files)
-    );
-    if (!untouched && !confirm('Replace the current model with this example?')) {
-      exampleSelect.value = '';
-      return;
-    }
-
-    loadExample(exampleSelect.value);
-    source.value = workspace.files[workspace.active];
-    renderFileBar();
-    paint();
-    render();
+    const label = exampleSelect.value;
+    exampleSelect.value = '';
+    if (EXAMPLES[label]) newProject(label);
   });
 
   for (const button of document.querySelectorAll<HTMLButtonElement>('.tab')) {
@@ -617,8 +824,60 @@ function init(): void {
     rerender();
   });
 
+  projectButton.addEventListener('click', event => {
+    event.stopPropagation();
+    if (projectMenu.hidden) openMenu();
+    else closeMenu();
+  });
+
+  // Clicking anywhere else, or pressing Escape, dismisses the menu.
+  document.addEventListener('click', event => {
+    if (!projectMenu.hidden && !projectMenu.contains(event.target as Node)) closeMenu();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !projectMenu.hidden) closeMenu();
+  });
+
+  importZipInput.addEventListener('change', () => {
+    const file = importZipInput.files?.[0];
+    // Reset first, so picking the same file twice still fires a change event.
+    importZipInput.value = '';
+    if (file) void importZipFile(file);
+  });
+
+  importFolderInput.addEventListener('change', () => {
+    const files = importFolderInput.files;
+    const picked = files ? [...files] : [];
+    importFolderInput.value = '';
+    if (picked.length) void importFileList(picked, 'imported');
+  });
+
+  // Dropping a folder or a zip on the page imports it - the shortest route
+  // from "I have a model on disk" to "it is open".
+  let dragDepth = 0;
+  document.addEventListener('dragenter', event => {
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    event.preventDefault();
+    dragDepth++;
+    document.body.classList.add('dropping');
+  });
+  document.addEventListener('dragover', event => {
+    if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+  });
+  document.addEventListener('dragleave', () => {
+    // dragleave fires for every child element, so count rather than clear.
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) document.body.classList.remove('dropping');
+  });
+  document.addEventListener('drop', event => {
+    if (!event.dataTransfer?.files.length) return;
+    event.preventDefault();
+    dragDepth = 0;
+    document.body.classList.remove('dropping');
+    void importFileList(event.dataTransfer.files, 'dropped');
+  });
+
   selectTab((localStorage.getItem('pulseir.tab') as keyof typeof panes) || 'sketch');
-  render();
 }
 
 init();

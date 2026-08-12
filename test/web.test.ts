@@ -171,14 +171,31 @@ test('the highlight overlay shares every metric with the textarea', () => {
 });
 
 test('the editor paints highlighting on every path that changes the text', () => {
-  // Miss one and the colour layer shows the previous file's contents.
+  // Miss one and the colour layer shows the previous file's contents while the
+  // caret moves over it. Counting paint() calls used to stand in for this and
+  // was wrong the moment the repaint was funnelled through one place; the real
+  // invariant is that nothing sets the text without repainting after it.
   const main = read('web/main.ts');
-  const painted = (main.match(/\bpaint\(\)/g) || []).length;
+  const lines = main.split('\n');
 
+  const assignments = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => /^\s*source\.value = /.test(line));
+
+  assert(assignments.length > 0, 'no assignments to source.value found - has it been renamed?');
+
+  for (const { line, index } of assignments) {
+    const follows = lines.slice(index + 1, index + 5).join('\n');
+    assert(
+      /\bpaint\(\)/.test(follows),
+      `web/main.ts:${index + 1} sets the text without repainting:\n    ${line.trim()}`
+    );
+  }
+
+  // Typing does not assign to source.value, so it needs its own check.
   assert(
-    painted >= 6,
-    `only ${painted} paint() calls; switching files, loading an example, typing, ` +
-    'tabbing and first load all have to repaint'
+    /source\.addEventListener\('input'[\s\S]{0,200}?paint\(\)/.test(main),
+    'typing does not repaint'
   );
   assert(
     main.includes("source.addEventListener('scroll', syncScroll"),
