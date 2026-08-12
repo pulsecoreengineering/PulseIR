@@ -1,0 +1,43 @@
+libraries:
+  - name: ModbusMaster
+    include: ModbusMaster.h
+    version: "^2.0"
+    source: registry
+    description: Modbus RTU over RS-485
+
+hardware:
+  buses:
+    field_bus:
+      interface: uart
+      port: 2
+      baud: 19200
+      rx: GPIO16
+      tx: GPIO17
+      library: ModbusMaster
+      description: RS-485 to the field devices
+
+    local_bus:
+      interface: i2c
+      sda: GPIO21
+      scl: GPIO22
+      frequency: 100000
+
+    uplink:
+      interface: wifi
+      ssid: plant-scada
+      hostname: gateway-01
+
+    broker:
+      interface: mqtt
+      host: mqtt.plant.local
+      port: 8883
+      tls: true
+
+  devices:
+    cabinet_temp: { type: bme280, bus: local_bus, address: 0x76, unit: degC }
+    cabinet_rh:   { type: bme280, bus: local_bus, address: 0x76, unit: percent }
+    # Field readings arrive over Modbus, so they have no pin of their own.
+    line_pressure: { type: modbus_input, class: sensor, bus: field_bus, register: 30001, unit: bar }
+    line_flow:     { type: modbus_input, class: sensor, bus: field_bus, register: 30003, unit: lpm }
+    status_led:    { type: digital_output, pin: GPIO2 }
+    fault_relay:   { type: digital_output, pin: GPIO26 }

@@ -1,0 +1,111 @@
+# Brushed DC motor with direction, speed ramp and overcurrent trip.
+#
+# GATE FINDING: the ramp itself (accelerate at N rpm/s) is arithmetic over
+# time, so it belongs in C - the model only says *which phase* the motor is
+# in. That is the escape hatch working exactly as intended.
+
+project:
+  name: motor_controller
+  version: "1.0"
+  description: Speed-controlled DC motor with overcurrent protection
+
+target:
+  board: esp32
+
+hardware:
+  devices:
+    drive_pwm:   { type: pwm_output,    pin: GPIO25, channel: 0, frequency: 20000, resolution: 10 }
+    dir_forward: { type: digital_output, pin: GPIO26 }
+    dir_reverse: { type: digital_output, pin: GPIO27 }
+    # GPIO34/35 are input-only on this part, which suits a sense input.
+    current_sense: { type: analog_input, pin: GPIO34, unit: A }
+    estop:         { type: digital_input, pin: GPIO35 }
+
+parameters:
+  target_rpm:     { type: int,   default: 1200, range: [0, 3000],   unit: rpm }
+  ramp_rate:      { type: int,   default: 300,  range: [10, 2000],  unit: rpm_per_s }
+  trip_current:   { type: float, default: 4.5,  range: [0.5, 20.0], unit: A }
+  restart_delay:  { type: int,   default: 5000, range: [0, 60000],  unit: ms }
+
+events:
+  START:       { source: external }
+  STOP:        { source: external }
+  REVERSE:     { source: external }
+  AT_SPEED:    { source: internal, description: Ramp reached the target }
+  OVERCURRENT: { source: sensor }
+  ESTOP:       { source: external }
+  RESET:       { source: external }
+  TIMER_EXPIRED: { source: timer }
+
+actions:
+  engage_forward: { driver: gpio_control, params: {device: dir_forward, value: HIGH} }
+  engage_reverse: { driver: gpio_control, params: {device: dir_reverse, value: HIGH} }
+  release_drive:  { driver: pwm_control,  params: {device: drive_pwm, duty: 0} }
+  begin_ramp:     { driver: ramp }
+  hold_speed:     { driver: pwm_control }
+  begin_coast:    { driver: ramp, params: {to: 0} }
+  latch_fault:    { driver: fault_latch }
+  clear_fault:    { driver: fault_latch, params: {clear: true} }
+
+machine:
+  states:
+    stopped:
+    running:
+      initial: accelerating
+      states:
+        accelerating:
+        cruising:
+        decelerating:
+    tripped:
+
+  transitions:
+    - from: stopped
+      on: START
+      to: running
+      do: [engage_forward, begin_ramp]
+
+    - from: running/accelerating
+      on: AT_SPEED
+      to: running/cruising
+      do: hold_speed
+
+    - from: running
+      on: STOP
+      to: running/decelerating
+      do: begin_coast
+
+    - from: running/decelerating
+      on: AT_SPEED
+      to: stopped
+      do: release_drive
+
+    - from: running/cruising
+      on: REVERSE
+      to: running/decelerating
+      do: begin_coast
+
+    # Overcurrent and e-stop must work from any phase of running, and from
+    # stopped too - a shorted output can trip with the drive released.
+    - from: "*"
+      on: OVERCURRENT
+      guard:
+        name: over_trip_current
+        description: sensed current exceeded trip_current for the debounce window
+      to: tripped
+      do: [release_drive, latch_fault]
+
+    - from: "*"
+      on: ESTOP
+      to: tripped
+      do: [release_drive, latch_fault]
+
+    # GATE FINDING: this should be "wait restart_delay, then allow reset".
+    # With no timeout in the model, restart_delay is a parameter the C code
+    # has to enforce inside the guard.
+    - from: tripped
+      on: RESET
+      guard:
+        name: restart_delay_elapsed
+        description: restart_delay has passed since the trip
+      to: stopped
+      do: clear_fault

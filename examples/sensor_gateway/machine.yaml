@@ -1,0 +1,123 @@
+parameters:
+  poll_interval:  { type: int, default: 2000,  range: [200, 60000],  unit: ms }
+  publish_every:  { type: int, default: 5000,  range: [1000, 300000], unit: ms }
+  retry_backoff:  { type: int, default: 5000,  range: [1000, 120000], unit: ms }
+  max_retries:    { type: int, default: 5,     range: [1, 100] }
+
+events:
+  LINK_UP:       { source: internal }
+  LINK_DOWN:     { source: internal }
+  BROKER_UP:     { source: internal }
+  BROKER_DOWN:   { source: internal }
+  POLL_DUE:      { source: timer }
+  PUBLISH_DUE:   { source: timer }
+  FIELD_TIMEOUT: { source: internal, description: A field device stopped answering }
+  RESET:         { source: mqtt, description: Remote reset from the dashboard }
+  TIMER_EXPIRED: { source: timer }
+
+actions:
+  begin_wifi:      { driver: wifi_connect }
+  begin_broker:    { driver: mqtt_connect }
+  poll_field:      { driver: modbus_poll }
+  publish_batch:   { driver: mqtt_publish }
+  buffer_batch:    { driver: ring_buffer, params: {on_full: drop_oldest} }
+  drain_buffer:    { driver: ring_buffer, params: {drain: true} }
+  show_ok:         { driver: gpio_control, params: {device: status_led, value: HIGH} }
+  show_degraded:   { driver: gpio_control, params: {device: status_led, value: TOGGLE} }
+  trip_fault:      { driver: gpio_control, params: {device: fault_relay, value: HIGH} }
+  clear_fault:     { driver: gpio_control, params: {device: fault_relay, value: LOW} }
+
+machine:
+  states:
+    starting:
+    connecting:
+      initial: joining_wifi
+      states:
+        joining_wifi:
+        joining_broker:
+    online:
+      initial: polling
+      states:
+        polling:
+        publishing:
+    # Keep sampling with no uplink: the point of a gateway is not to lose data.
+    degraded:
+    faulted:
+
+  transitions:
+    - from: starting
+      on: TIMER_EXPIRED
+      to: connecting
+      do: begin_wifi
+
+    - from: connecting/joining_wifi
+      on: LINK_UP
+      to: connecting/joining_broker
+      do: begin_broker
+
+    - from: connecting/joining_broker
+      on: BROKER_UP
+      to: online
+      do: [show_ok, drain_buffer]
+
+    # GATE FINDING: retry_backoff wants to be a timeout on connecting. With no
+    # timeout in the model the C code owns the retry clock and raises the event.
+    - from: connecting
+      on: TIMER_EXPIRED
+      guard:
+        name: backoff_elapsed
+        description: retry_backoff has passed since the last attempt
+      to: connecting
+      do: begin_wifi
+
+    - from: online/polling
+      on: POLL_DUE
+      to: online/polling
+      do: poll_field
+
+    - from: online
+      on: PUBLISH_DUE
+      to: online/publishing
+      do: publish_batch
+
+    - from: online/publishing
+      on: POLL_DUE
+      to: online/polling
+      do: poll_field
+
+    - from: online
+      on: BROKER_DOWN
+      to: degraded
+      do: show_degraded
+
+    - from: online
+      on: LINK_DOWN
+      to: degraded
+      do: show_degraded
+
+    # Degraded still samples; readings queue until the uplink returns.
+    - from: degraded
+      on: POLL_DUE
+      to: degraded
+      do: [poll_field, buffer_batch]
+
+    - from: degraded
+      on: TIMER_EXPIRED
+      guard:
+        name: backoff_elapsed
+        description: retry_backoff has passed since the last attempt
+      to: connecting
+      do: begin_wifi
+
+    - from: "*"
+      on: FIELD_TIMEOUT
+      guard:
+        name: retries_exhausted
+        description: a field device missed max_retries consecutive polls
+      to: faulted
+      do: trip_fault
+
+    - from: "*"
+      on: RESET
+      to: starting
+      do: clear_fault

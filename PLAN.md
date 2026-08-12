@@ -190,6 +190,106 @@ The gate is the point of the plan. If a project needs a schema hack, that is
 the abstraction telling us something, and it is far cheaper to hear it now than
 after telemetry, storage, diagnostics and safety are all built on top.
 
+### 4.1 Result ✅ ALL FIVE PASS
+
+All five are modelled, generated, compiled with `-Werror`, linked against the
+real runtime, run, and checked against an expected dispatch trace. **No schema
+change was needed** — every project is written in the Phase 0 schema exactly as
+it stands.
+
+| Project | Files | States | Shape it exercises |
+|---|---|---|---|
+| `boiler` | 4 | 4 | Hierarchy, guards, wildcard fault |
+| `traffic_light` | 1 | 6 | Self-transitions, a parent-level mode switch |
+| `motor_controller` | 1 | 6 | Phases with the arithmetic left in C, wildcard trip |
+| `pump_tank` | 1 | 7 | Hysteresis, two guards on one event across two levels |
+| `sensor_gateway` | 3 | 10 | Four buses, MQTT + TLS, degraded operation |
+
+Passing is not the interesting part. Three things came out of it.
+
+#### Finding 1 — The runtime was silently sized wrong (fixed)
+
+`sensor_gateway` is the first model with more than eight states, and its ninth
+and tenth were **silently refused**. `PULSEHSM_MAX_STATES` was defined in the
+sketch only; `PulseHSM.cpp` is a separate translation unit, never saw it, and
+stayed on the default of `8`. `addState()` returned `-1`, `transitionTo(-1)` did
+nothing, and the machine simply ignored two of its own states. Nothing warned.
+
+Worse than the dropped states: the macro also sizes members of the `PulseHSM`
+class, so the two translation units disagreed about the object's layout. That
+is undefined behaviour in every model, not only large ones — the small ones were
+getting away with it.
+
+Fixed by moving the sizes into a generated `PulseHSM_config.h` that
+`PulseHSM.h` picks up via `__has_include`, so every translation unit is
+compiled against the same numbers. Both output paths write it: `--outdir`
+beside the runtime it vendors, and `--output` beside the sketch — a single-file
+sketch still links against a separately compiled `PulseHSM.cpp`, so it had the
+identical bug.
+
+Belt and braces, since a config header can still be moved or go stale:
+`setup()` now checks that every `addState()` came back with a real index and
+prints a `FATAL` line if not. The failure was silent, which was the worst part
+of it; now it is not.
+
+A regression test builds `sensor_gateway` the way the Arduino IDE would and
+asserts no state index came back negative.
+
+This is the clearest evidence so far for the project's own argument: a
+hand-written version of this firmware would have had the same bug, with nothing
+to catch it.
+
+#### Finding 2 — A state cannot say how long it lasts
+
+Every one of the four new projects hit this, and it is the single biggest gap:
+
+| Project | Wants |
+|---|---|
+| `traffic_light` | green for `green_ms`, amber for `amber_ms`, … |
+| `motor_controller` | `restart_delay` before a trip can be reset |
+| `pump_tank` | trip after `dry_run_ms` without flow; after `max_fill_ms` filling |
+| `sensor_gateway` | retry the uplink after `retry_backoff` |
+
+`addState()` already takes `timeoutMs` and `timeoutNext`, and codegen already
+passes `0` and `-1` for them on every single state. The runtime supports this
+and the IR simply has no field. So the model declares a `TIMER_EXPIRED` event
+and a parameter, and the C code has to own the clock, compare it against
+`fsm.getStateElapsed()` and raise the event itself — for something the runtime
+would do for free.
+
+It also fails the §0 rule in the wrong direction: a duration is *data*, not
+logic, so pushing it into C is pushing declarative content into the escape
+hatch. **Recommendation: `after: { ms, to }` on a state, in Phase 1.** It is a
+two-field addition that maps onto arguments already being emitted, and it
+removes hand-written timing from four of five projects.
+
+#### Finding 3 — There are no internal transitions
+
+`traffic_light` wants "on `WALK_REQUEST`, latch the request, stay in `go`".
+`to:` is mandatory, so it is written as a self-transition. Harmless *today*,
+because states have no entry/exit actions — the moment they do, a self
+transition will re-run them and an internal one must not.
+
+Not urgent, and it should not be fixed by making `to:` optional, which reads as
+an omission rather than a decision. **Recommendation: defer until entry/exit
+actions exist, then add `to: self` (re-enter) alongside `stay` (internal).**
+
+#### What did *not* break
+
+Worth recording, because these were the parts I expected to bend:
+
+- **The binding rule held.** Every project wanted arithmetic somewhere — a
+  speed ramp, a debounce, a flow average — and every time it landed naturally
+  in a named action or guard. Nothing tempted the model toward an expression
+  field.
+- **Bus-attached devices needed no pin.** `line_pressure` on a Modbus register
+  has no GPIO at all, and the pin checker correctly stayed quiet.
+- **Action identity held.** `start_pump` and `stop_pump` share a driver and
+  stayed distinct stubs.
+- **Guard fall-through held.** `pump_tank` has a guarded `TIMER_EXPIRED` in a
+  leaf *and* in its parent; both blocking leaves the machine exactly where it
+  was, which is what the bubbling contract promises.
+
 ---
 
 ## 5. Phase 2 — Additional domains, one at a time

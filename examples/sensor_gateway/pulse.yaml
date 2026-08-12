@@ -1,0 +1,16 @@
+# Industrial sensor gateway: read a field bus, publish upstream.
+#
+# Multi-file, because unlike the other three this one has enough hardware and
+# enough behaviour that one file would be hard to review.
+
+project:
+  name: sensor_gateway
+  version: "1.0"
+  description: Reads field sensors and republishes them to a dashboard
+
+target:
+  board: esp32
+
+imports:
+  - hardware.yaml
+  - machine.yaml

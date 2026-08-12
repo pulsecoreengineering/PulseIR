@@ -109,6 +109,14 @@ async function main() {
         const outputPath = path.resolve(outputFile);
         fs.writeFileSync(outputPath, cppCode);
         console.log(`✓ Written to ${outputPath}`);
+
+        // The sketch is one file, but the build is not: PulseHSM.cpp is
+        // compiled separately and would keep its default table sizes, silently
+        // refusing states past the eighth. The config header is what stops
+        // that, so it goes next to the sketch.
+        const configPath = path.join(path.dirname(outputPath), 'PulseHSM_config.h');
+        fs.writeFileSync(configPath, codegen.generateConfigHeader());
+        console.log(`✓ Written to ${configPath} (keep it beside PulseHSM.h)`);
       } else {
         console.log(cppCode);
       }

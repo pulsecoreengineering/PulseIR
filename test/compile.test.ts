@@ -51,6 +51,14 @@ function buildAndRun(name: string, sketch: string, driver: string): string {
 
   fs.writeFileSync(sourcePath, `${sketch}\n${driver}\n`);
 
+  // PulseHSM.cpp is a separate translation unit and never sees the sketch's
+  // #defines, so it has to get the sizes the way a real build does: from
+  // PulseHSM_config.h, which PulseHSM.h picks up. Writing it per test keeps one
+  // model's sizes out of another's.
+  const configDir = path.join(buildDir, `${name}-config`);
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, 'PulseHSM_config.h'), sizingFrom(sketch));
+
   execFileSync(
     'g++',
     [
@@ -61,6 +69,7 @@ function buildAndRun(name: string, sketch: string, driver: string): string {
       sourcePath,
       path.join(harnessDir, 'serial.cpp'),
       path.join(depsDir, 'PulseHSM.cpp'),
+      `-I${configDir}`,
       `-I${harnessDir}`,
       `-I${depsDir}`,
       '-o',
@@ -70,6 +79,17 @@ function buildAndRun(name: string, sketch: string, driver: string): string {
   );
 
   return execFileSync(binaryPath, { encoding: 'utf8' });
+}
+
+/** The sizing macros the sketch declares, as a standalone config header. */
+function sizingFrom(sketch: string): string {
+  const defines = ['PULSEHSM_MAX_STATES', 'PULSEHSM_MAX_EVENTS', 'PULSEHSM_MAX_DEPTH'].map(macro => {
+    const value = new RegExp(`#define\\s+${macro}\\s+(\\d+)`).exec(sketch)?.[1];
+    if (!value) throw new Error(`generated sketch does not size ${macro}`);
+    return `#define ${macro} ${value}`;
+  });
+
+  return `#ifndef PULSEHSM_CONFIG_H\n#define PULSEHSM_CONFIG_H\n${defines.join('\n')}\n#endif\n`;
 }
 
 function assert(condition: boolean, message: string): void {
@@ -331,7 +351,7 @@ int main() {
 
   // The header must carry declarations, and the sketch the definitions - or
   // linking two translation units against it would double-define.
-  const header = files.generated.find(f => f.path.endsWith('.h'))!.contents;
+  const header = files.generated.find(f => f.path.endsWith('_generated.h'))!.contents;
   assert(header.includes('extern PulseHSM fsm;'), 'header does not declare fsm');
   assert(!/^PulseHSM fsm;/m.test(header), 'header defines fsm instead of declaring it');
   assert(header.includes('bool guard_temp_at_setpoint(const SystemContext* ctx);'),
@@ -457,6 +477,327 @@ test('generated sketch drives the PulseHSM runtime correctly', () => {
   assert(
     !sketch.includes('fsm.transitionTo(S_RUNNING);'),
     'transitionTo() was given a composite state'
+  );
+});
+
+// ============================================================================
+// THE FIVE-PROJECT GATE (PLAN.md §4)
+//
+// Four projects from different corners of embedded work, modelled without
+// touching the schema, held to the same bar as boiler and greenhouse:
+// generated, compiled with -Werror, linked against the real runtime, run, and
+// checked against the dispatch trace they are supposed to produce.
+//
+// The point is not that they pass. It is what modelling them exposed - see the
+// GATE FINDING comments in each model, and PLAN.md §4.
+// ============================================================================
+
+test('gate: traffic light — self-transitions, a pedestrian latch and a night mode', () => {
+  const sketch = generate(path.join(repoRoot, 'examples/traffic_light.yaml'));
+
+  const driver = `${DRIVER_PRELUDE}
+int main() {
+  setup();
+  report();
+
+  // A self-transition on the current leaf: the latch runs, the phase holds.
+  step(EVENT_WALK_REQUEST);
+
+  step(EVENT_TIMER_EXPIRED);   // go -> prepare_stop
+  step(EVENT_TIMER_EXPIRED);   // prepare_stop -> stop
+
+  // Two transitions leave "stop" on the same event. The guarded one is listed
+  // first; its stub returns false, so the unguarded fallback fires instead.
+  step(EVENT_TIMER_EXPIRED);
+
+  // GO_NIGHT is declared on the composite parent, so it fires from any phase.
+  step(EVENT_GO_NIGHT);
+  step(EVENT_GO_DAY);          // back to operating, landing on its initial child
+  return 0;
+}`;
+
+  const output = buildAndRun('traffic_light', sketch, driver);
+
+  assertTrace(
+    output,
+    [
+      'operating/go',
+      'operating/go',
+      'operating/prepare_stop',
+      'operating/stop',
+      'operating/go',
+      'night',
+      'operating/go',
+    ],
+    'traffic light dispatch trace mismatch'
+  );
+
+  // A multi-action transition must run every action, in written order.
+  const clearAt = output.indexOf('Action: all_lamps_off');
+  const amberAt = output.indexOf('Action: show_amber');
+  assert(clearAt !== -1 && amberAt !== -1, 'a multi-action transition dropped an action');
+  assert(clearAt < amberAt, 'lamps were driven before being cleared');
+});
+
+test('gate: motor controller — a ramp in C, a trip from anywhere', () => {
+  const sketch = generate(path.join(repoRoot, 'examples/motor_controller.yaml'));
+
+  const driver = `${DRIVER_PRELUDE}
+int main() {
+  setup();
+  report();
+
+  step(EVENT_START);      // stopped -> running, descends to accelerating
+  step(EVENT_AT_SPEED);   // accelerating -> cruising
+  step(EVENT_REVERSE);    // cruising -> decelerating
+  step(EVENT_AT_SPEED);   // decelerating -> stopped
+
+  // Wildcard: an e-stop has to work from every state, including stopped.
+  step(EVENT_ESTOP);
+
+  // The restart delay lives in a guard, because the model cannot express
+  // "wait restart_delay". The stub returns false, so the trip latches.
+  step(EVENT_RESET);
+  return 0;
+}`;
+
+  const output = buildAndRun('motor_controller', sketch, driver);
+
+  assertTrace(
+    output,
+    [
+      'stopped',
+      'running/accelerating',
+      'running/cruising',
+      'running/decelerating',
+      'stopped',
+      'tripped',
+      'tripped',
+    ],
+    'motor controller dispatch trace mismatch'
+  );
+
+  // The ramp is arithmetic over time, so it must stay a named action the
+  // implementer writes - never something the generator tries to synthesise.
+  assert(sketch.includes('void action_begin_ramp(SystemContext* ctx)'), 'ramp action stub missing');
+  assert(!/ramp_rate\s*\*/.test(sketch), 'the generator invented ramp arithmetic');
+
+  // Input-only pins are fine as inputs; the checker must not object.
+  assert(sketch.includes('pinMode(ESTOP_PIN, INPUT);'), 'digital_input got no pinMode');
+  assert(sketch.includes('ledcSetup(DRIVE_PWM_CHANNEL'), 'pwm_output got no channel setup');
+});
+
+test('gate: pump/tank — hysteresis, dry-run and a blocked guard bubbling out', () => {
+  const sketch = generate(path.join(repoRoot, 'examples/pump_tank.yaml'));
+
+  const driver = `${DRIVER_PRELUDE}
+int main() {
+  setup();
+  report();
+
+  step(EVENT_LEVEL_LOW);    // idle -> filling, descends to priming
+  step(EVENT_NO_FLOW);      // priming -> fault/dry_run
+  step(EVENT_FAULT_RESET);  // declared on the composite "fault"
+  step(EVENT_LEVEL_LOW);    // filling again
+
+  // TIMER_EXPIRED is guarded in the leaf (flow_established) AND in the parent
+  // (fill_ran_too_long). Both stubs return false, so neither consumes it and
+  // the machine stays exactly where it was - the interesting bubbling case.
+  step(EVENT_TIMER_EXPIRED);
+
+  step(EVENT_LEVEL_HIGH);   // handled by the composite "filling"
+  return 0;
+}`;
+
+  const output = buildAndRun('pump_tank', sketch, driver);
+
+  assertTrace(
+    output,
+    [
+      'idle',
+      'filling/priming',
+      'fault/dry_run',
+      'idle',
+      'filling/priming',
+      'filling/priming',
+      'idle',
+    ],
+    'pump/tank dispatch trace mismatch'
+  );
+
+  // start_pump and stop_pump share a driver but are distinct actions; if
+  // identity ever collapses back onto the driver, one of these disappears.
+  assert(sketch.includes('void action_start_pump(SystemContext* ctx)'), 'start_pump stub missing');
+  assert(sketch.includes('void action_stop_pump(SystemContext* ctx)'), 'stop_pump stub missing');
+});
+
+test('gate: sensor gateway — multi-file, four buses, degraded operation', () => {
+  const sketch = generate(path.join(repoRoot, 'examples/sensor_gateway/pulse.yaml'));
+
+  const driver = `${DRIVER_PRELUDE}
+int main() {
+  setup();
+  report();
+
+  step(EVENT_TIMER_EXPIRED);  // starting -> connecting/joining_wifi
+  step(EVENT_LINK_UP);        // -> joining_broker
+  step(EVENT_BROKER_UP);      // -> online/polling
+  step(EVENT_POLL_DUE);       // self-transition on the leaf
+  step(EVENT_PUBLISH_DUE);    // declared on "online", so it bubbles one level
+  step(EVENT_BROKER_DOWN);    // -> degraded, where sampling continues
+  step(EVENT_RESET);          // wildcard, from anywhere
+  return 0;
+}`;
+
+  const output = buildAndRun('sensor_gateway', sketch, driver);
+
+  assertTrace(
+    output,
+    [
+      'starting',
+      'connecting/joining_wifi',
+      'connecting/joining_broker',
+      'online/polling',
+      'online/polling',
+      'online/publishing',
+      'degraded',
+      'starting',
+    ],
+    'sensor gateway dispatch trace mismatch'
+  );
+
+  // Four buses of three different kinds, all wired from the model.
+  assert(sketch.includes('Serial2.begin(FIELD_BUS_BAUD'), 'RS-485 UART not initialised');
+  assert(sketch.includes('Wire.begin(LOCAL_BUS_SDA, LOCAL_BUS_SCL);'), 'I2C not initialised');
+  assert(sketch.includes('WiFi.begin(UPLINK_SSID'), 'Wi-Fi not initialised');
+  assert(sketch.includes('broker.setServer(BROKER_HOST, BROKER_PORT);'), 'MQTT broker not configured');
+
+  // A declared third-party library reaches the sketch.
+  assert(sketch.includes('#include <ModbusMaster.h>'), 'declared library was not included');
+
+  // TLS was asked for, so the transport must be the secure one and the model
+  // must not have talked anyone into skipping verification.
+  assert(sketch.includes('WiFiClientSecure brokerTransport;'), 'tls: true did not select a secure transport');
+  assert(!sketch.includes('setInsecure()'), 'generated code disables certificate verification');
+
+  // Devices on a bus have no pin of their own, and must not invent one.
+  assert(!/#define LINE_PRESSURE_PIN/.test(sketch), 'a bus-attached device was given a pin');
+});
+
+test('gate: the runtime is sized from the model, in every translation unit', () => {
+  // Found by the gate. PulseHSM's table sizes are macros, and the sketch used
+  // to be the only place they were defined - but PulseHSM.cpp is compiled
+  // separately and kept the default of 8. The first model with more than eight
+  // states had its ninth silently refused: addState() returned -1, and the
+  // transitions targeting it did nothing. sensor_gateway has ten.
+  const project = new Parser().parseFrom(
+    path.join(repoRoot, 'examples/sensor_gateway/pulse.yaml'),
+    new FileResolver()
+  );
+  const files = new Codegen().generateFiles(project);
+
+  const config = files.generated.find(f => f.path === 'PulseHSM_config.h');
+  assert(!!config, 'no PulseHSM_config.h was generated');
+  assert(
+    /#define PULSEHSM_MAX_STATES\s+(1[2-9]|[2-9]\d)/.test(config!.contents),
+    `config header does not size the table for ten states:\n${config!.contents}`
+  );
+
+  const dir = path.join(buildDir, 'sizing');
+  fs.rmSync(dir, { recursive: true, force: true });
+  for (const file of [...files.generated, ...files.scaffolds]) {
+    const target = path.join(dir, file.path);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, file.contents);
+  }
+
+  // Every state index must be real. -1 means the runtime refused it.
+  fs.writeFileSync(path.join(dir, 'driver.cpp'), `
+#include "sensor_gateway_generated.h"
+int main() {
+  setup();
+  const int indices[] = {
+    S_ROOT, S_STARTING, S_CONNECTING, S_JOINING_WIFI, S_JOINING_BROKER,
+    S_ONLINE, S_POLLING, S_PUBLISHING, S_DEGRADED, S_FAULTED,
+  };
+  for (unsigned i = 0; i < sizeof(indices) / sizeof(indices[0]); ++i) {
+    if (indices[i] < 0) {
+      Serial.print("REFUSED: ");
+      Serial.println((int)i);
+    }
+  }
+  Serial.println("CHECKED");
+  return 0;
+}
+`);
+
+  const binary = path.join(buildDir, 'sizing-app');
+  execFileSync('g++', [
+    '-std=c++17', '-Wall', '-Wextra', '-Werror', '-x', 'c++',
+    path.join(dir, 'sensor_gateway.ino'),
+    path.join(dir, 'src/guards.cpp'),
+    path.join(dir, 'src/actions.cpp'),
+    path.join(dir, 'driver.cpp'),
+    path.join(harnessDir, 'serial.cpp'),
+    // Compiled with -I<dir> and nothing else from the model, exactly as the
+    // Arduino IDE would: PulseHSM.h finds PulseHSM_config.h on its own.
+    path.join(depsDir, 'PulseHSM.cpp'),
+    `-I${dir}`, `-I${harnessDir}`, `-I${depsDir}`,
+    '-o', binary,
+  ], { stdio: 'pipe' });
+
+  const output = execFileSync(binary, { encoding: 'utf8' });
+  assert(output.includes('CHECKED'), 'the sizing check never ran');
+  assert(!output.includes('REFUSED'), `the runtime refused a state:\n${output}`);
+
+  // Belt and braces: if the config header is ever lost, moved, or stale, the
+  // sketch has to say so rather than run a machine missing two states.
+  const sketch = files.generated.find(f => f.path.endsWith('.ino'))!.contents;
+  assert(
+    sketch.includes('FATAL: PulseHSM refused a state'),
+    'setup() does not check that every state was actually registered'
+  );
+  assert(
+    sketch.includes('S_FAULTED < 0'),
+    'the registration check does not cover the last state, which is the first to be dropped'
+  );
+
+  // The single-file path links against the same separately-compiled runtime,
+  // so it needs the same config header - `generate()` alone cannot be safe.
+  const codegen = new Codegen();
+  const single = codegen.generate(project);
+  const standalone = codegen.generateConfigHeader();
+  for (const macro of ['PULSEHSM_MAX_STATES', 'PULSEHSM_MAX_EVENTS', 'PULSEHSM_MAX_DEPTH']) {
+    const inSketch = new RegExp(`#define\\s+${macro}\\s+(\\d+)`).exec(single)?.[1];
+    const inConfig = new RegExp(`#define\\s+${macro}\\s+(\\d+)`).exec(standalone)?.[1];
+    assert(
+      !!inSketch && inSketch === inConfig,
+      `${macro} disagrees between the sketch (${inSketch}) and the config header (${inConfig})`
+    );
+  }
+});
+
+test('the vendored runtime still reads PulseHSM_config.h', () => {
+  // deps/ is a hand-copied snapshot of PulseHSM. Everything above depends on
+  // PulseHSM.h including the generated config, so re-vendoring a copy without
+  // that hook would silently reinstate the dropped-state bug - the config file
+  // would be written, ignored, and nothing would look wrong.
+  //
+  // Until the hook is upstream in PulseHSM itself, this is what notices.
+  const header = fs.readFileSync(path.join(depsDir, 'PulseHSM.h'), 'utf8');
+
+  assert(
+    header.includes('__has_include("PulseHSM_config.h")'),
+    'deps/PulseHSM.h no longer includes PulseHSM_config.h - re-apply the hook ' +
+    'above the PULSEHSM_MAX_* defaults, or the generated sizes are ignored'
+  );
+
+  // It has to come before the defaults, or #ifndef sees them already set.
+  const hookAt = header.indexOf('PulseHSM_config.h');
+  const defaultAt = header.indexOf('#ifndef PULSEHSM_MAX_STATES');
+  assert(
+    hookAt !== -1 && defaultAt !== -1 && hookAt < defaultAt,
+    'the config hook must precede the PULSEHSM_MAX_* defaults'
   );
 });
 
