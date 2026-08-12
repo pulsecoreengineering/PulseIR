@@ -395,7 +395,7 @@ machine:
 
 test('rejects a task with no interval or nothing to do', () => {
   expectReject(plain('tasks:\n  blink: {do: toggle}'), 'has no "every"', 'task without an interval');
-  expectReject(plain('tasks:\n  blink: {every: 500}'), 'has no "do"', 'task that does nothing');
+  expectReject(plain('tasks:\n  blink: {every: 500}'), 'neither "do" nor "log"', 'task that does nothing');
   expectReject(plain('tasks:\n  blink: {every: 0, do: toggle}'), 'positive whole number', 'zero interval');
   expectReject(plain('tasks:\n  blink: {every: nope, do: toggle}'), 'not a declared parameter', 'unknown parameter');
   expectReject(plain('tasks:\n  blink: {every: ratio, do: toggle}'), 'must be an int', 'float interval');
@@ -403,7 +403,36 @@ test('rejects a task with no interval or nothing to do', () => {
 
 test('rejects a command table that could never match anything', () => {
   expectReject(plain('commands:\n  source: console'), 'declares no "map"', 'no map');
-  expectReject(plain('commands:\n  map:\n    on: {}'), 'neither "do" nor "event"', 'command that does nothing');
+  expectReject(plain('commands:\n  map:\n    on: {}'), 'no "do", "event" or "log"', 'command that does nothing');
+});
+
+test('accepts a log template, and resolves its holes', () => {
+  const project = expectAccept(plain(`tasks:
+  report: {every: tick_ms, log: "tick={tick_ms} ratio={ratio}"}`), 'log template');
+
+  if (project.system.tasks?.[0].log !== 'tick={tick_ms} ratio={ratio}') {
+    throw new Error('the template was not kept verbatim');
+  }
+});
+
+test('rejects a log hole that names nothing declared', () => {
+  // A typo has to be a model error naming the alternatives, not a C++ compile
+  // error inside generated code the student never wrote.
+  expectReject(plain('tasks:\n  r: {every: 500, log: "x={nope}"}'),
+    'not a declared parameter or sensor', 'unknown hole');
+  expectReject(plain('tasks:\n  r: {every: 500, log: "x={nope}"}'),
+    'Available: tick_ms, ratio', 'lists what can be used');
+});
+
+test('rejects a template that is turning into a language', () => {
+  expectReject(plain('tasks:\n  r: {every: 500, log: "{a + b}"}'), 'is not a name', 'expression');
+  expectReject(plain('tasks:\n  r: {every: 500, log: "unclosed {x"}'), 'Unclosed', 'unclosed brace');
+  expectReject(plain('tasks:\n  r: {every: 500, log: "stray } here"}'), 'Unmatched', 'stray brace');
+  expectReject(plain('tasks:\n  r: {every: 500, log: "empty {}"}'), 'Empty', 'empty hole');
+});
+
+test('accepts braces that are meant literally', () => {
+  expectAccept(plain('tasks:\n  r: {every: 500, log: "{{literal}} and {tick_ms}"}'), 'escaped braces');
 });
 
 test('rejects a command raising an event the model never declares', () => {

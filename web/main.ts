@@ -55,6 +55,8 @@ const projectName = $<HTMLSpanElement>('project-name');
 const projectMenu = $<HTMLDivElement>('project-menu');
 const importZipInput = $<HTMLInputElement>('import-zip');
 const importFolderInput = $<HTMLInputElement>('import-folder');
+const copyYamlButton = $<HTMLButtonElement>('copy-yaml');
+const copyOutputButton = $<HTMLButtonElement>('copy-output');
 const namespaceInput = $<HTMLInputElement>('namespace');
 const staleNote = $<HTMLDivElement>('stale-note');
 
@@ -677,6 +679,70 @@ async function importFileList(list: FileList | File[], fallbackName: string): Pr
 }
 
 // ---------------------------------------------------------------------------
+// Copying
+// ---------------------------------------------------------------------------
+
+/**
+ * Put text on the clipboard and say so on the button itself.
+ *
+ * navigator.clipboard needs a secure context, which a file:// page is not, so
+ * there is a fallback - otherwise Copy would silently do nothing for anyone who
+ * opened index.html by double-clicking it.
+ */
+async function copyText(button: HTMLButtonElement, text: string): Promise<void> {
+  const done = (ok: boolean) => {
+    const original = button.textContent;
+    button.textContent = ok ? 'Copied' : 'Press Ctrl+C';
+    button.classList.toggle('copied', ok);
+    setTimeout(() => {
+      button.textContent = original;
+      button.classList.remove('copied');
+    }, 1400);
+  };
+
+  try {
+    await navigator.clipboard.writeText(text);
+    done(true);
+    return;
+  } catch {
+    // Fall through to the selection-based route below.
+  }
+
+  // Select it in a throwaway textarea so the keyboard shortcut works, and try
+  // the legacy command in case the browser still honours it.
+  const scratch = document.createElement('textarea');
+  scratch.value = text;
+  scratch.setAttribute('readonly', '');
+  scratch.style.position = 'fixed';
+  scratch.style.opacity = '0';
+  document.body.append(scratch);
+  scratch.select();
+
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  scratch.remove();
+  done(ok);
+}
+
+/** What the visible output pane is showing, as text. */
+function visibleOutput(): string {
+  if (!current) return '';
+  const showing = (Object.keys(panes) as (keyof typeof panes)[]).find(key => !panes[key].hidden);
+
+  switch (showing) {
+    case 'topics': return current.topics;
+    case 'libraries': return current.libraries;
+    // The structure pane is a rendered table, so copy what it is derived from.
+    case 'structure': return panes.structure.innerText;
+    default: return current.sketch;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Project menu
 // ---------------------------------------------------------------------------
 
@@ -808,6 +874,13 @@ function init(): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>('.tab')) {
     button.addEventListener('click', () => selectTab(button.dataset.tab as keyof typeof panes));
   }
+
+  copyYamlButton.addEventListener('click', () => {
+    void copyText(copyYamlButton, source.value);
+  });
+  copyOutputButton.addEventListener('click', () => {
+    void copyText(copyOutputButton, visibleOutput());
+  });
 
   $<HTMLButtonElement>('add-file').addEventListener('click', addFile);
   $<HTMLButtonElement>('set-entry').addEventListener('click', setEntry);

@@ -294,6 +294,11 @@ export interface Task {
   /** Milliseconds between runs: a literal, or the name of an int parameter. */
   every: number | string;
   actions: Action[];
+  /**
+   * A line to print after the actions have run, with `{name}` holes filled
+   * from declared parameters and sensors. Needs a declared console.
+   */
+  log?: string;
   description?: string;
   metadata?: Metadata;
 }
@@ -305,6 +310,8 @@ export interface Command {
   actions?: Action[];
   /** Only meaningful when the project has a state machine. */
   event?: EventRef;
+  /** A line to print in reply, with `{name}` holes. See Task.log. */
+  log?: string;
   description?: string;
 }
 

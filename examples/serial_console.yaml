@@ -37,23 +37,34 @@ actions:
   led_off:   { driver: gpio_control, params: { device: led, value: LOW } }
   fan_start: { driver: pwm_control,  params: { device: fan, duty: fan_duty } }
   fan_stop:  { driver: pwm_control,  params: { device: fan, duty: 0 } }
-  report:    { driver: console_report }
+  read_temp: { driver: adc_read,     params: { device: temp } }
   show_help: { driver: console_help }
 
 commands:
   source: console
   map:
-    on:     led_on
-    off:    led_off
-    fan:    fan_start
-    stop:   fan_stop
-    # A command may run several actions, in order.
-    status: [report, show_help]
-    help:   show_help
+    on:   led_on
+    off:  led_off
+    fan:  fan_start
+    stop: fan_stop
+    help: show_help
+
+    # `log:` prints a line, with {name} filled from a declared parameter or
+    # sensor. The text and the values both come from this file - no printf in
+    # sight, and a typo in a name is a model error, not a C++ one.
+    status:
+      do: read_temp
+      log: "temp={temp} degC  fan_duty={fan_duty}"
+
+    # A command may also just answer, without doing anything.
+    setpoint:
+      log: "reporting every {report_ms} ms"
 
 tasks:
-  # The board reports on its own too, not only when asked.
+  # The board reports on its own too, not only when asked. The log line runs
+  # after the actions, so it prints the reading just taken.
   heartbeat:
     every: report_ms
-    do: report
-    description: Print a reading even when nobody types anything
+    do: read_temp
+    log: "temp={temp} degC"
+    description: Report even when nobody types anything

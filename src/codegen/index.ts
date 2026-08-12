@@ -35,6 +35,7 @@ import type {
   Resource,
   StateRef,
 } from '../model/index.js';
+import { parseTemplate } from '../analysis/template.js';
 import { InterfaceBackend } from './interfaces.js';
 import type { ImpliedLibrary, InterfaceEmission } from './interfaces.js';
 
@@ -153,6 +154,7 @@ export class Codegen {
     this.indexActions();
     this.indexTransitions();
     this.indexInterfaces();
+    this.assertConsoleForLogs();
 
     return [
       this.generateHeader(),
@@ -193,6 +195,7 @@ export class Codegen {
     this.indexActions();
     this.indexTransitions();
     this.indexInterfaces();
+    this.assertConsoleForLogs();
 
     const base = this.sanitize(project.name);
     const headerName = `${base}_generated.h`;
@@ -1168,9 +1171,12 @@ ${machineSetup}}`;
         ? `(unsigned long)systemParameters.${this.sanitize(task.every)}`
         : `${task.every}UL`;
       const source = typeof task.every === 'string' ? `${task.every} (parameter)` : `every ${task.every}ms`;
-      const calls = task.actions
-        .map(a => `  action_${this.sanitize(a.name)}(&systemContext);`)
-        .join('\n');
+      const calls = [
+        ...task.actions.map(a => `  action_${this.sanitize(a.name)}(&systemContext);`),
+        // After the actions: a task that samples and then reports should print
+        // the reading it just took, not the one before it.
+        ...(task.log ? [this.logLines(task.log, '  ')] : []),
+      ].join('\n');
 
       return `// Task "${task.name}" - ${source}.${task.description ? `\n// ${task.description}` : ''}
 static unsigned long dueAt_${base} = 0;
@@ -1229,11 +1235,12 @@ ${blocks.join('\n\n')}`;
       const raise = command.event
         ? `    fsm.sendEvent(EVENT_${this.sanitizeUpper(command.event)});`
         : '';
+      const reply = command.log ? this.logLines(command.log, '    ') : '';
 
       return `  if (strcmp(line, ${JSON.stringify(command.match)}) == 0) {${
         command.description ? `\n    // ${command.description}` : ''
       }
-${[calls, raise].filter(Boolean).join('\n')}
+${[calls, raise, reply].filter(Boolean).join('\n')}
     return;
   }`;
     });
@@ -1318,6 +1325,57 @@ several_reset
     }
 
     return '';
+  }
+
+  /**
+   * A `log:` template as print calls.
+   *
+   * Emitted verbatim in order - one print per literal, one per value - because
+   * printf on an embedded core drags in float formatting and costs several
+   * kilobytes of flash for what is a handful of prints.
+   */
+  private logLines(template: string, indent: string): string {
+    const stream = this.consoleStream();
+    const segments = parseTemplate(template);
+    const out: string[] = [];
+
+    for (const segment of segments) {
+      if (segment.kind === 'text') {
+        out.push(`${indent}${stream}.print(${JSON.stringify(segment.value)});`);
+        continue;
+      }
+      out.push(`${indent}${stream}.print(${this.logValue(segment.name)});`);
+    }
+
+    out.push(`${indent}${stream}.println();`);
+    return out.join('\n');
+  }
+
+  /** Where a logged name lives in C. Validated by the parser, so it resolves. */
+  private logValue(name: string): string {
+    const parameter = (this.project.system.parameters || []).find(p => p.name === name);
+    if (parameter) return `systemParameters.${this.sanitize(name)}`;
+    return `systemSensors.${this.sanitize(name)}`;
+  }
+
+  /** Anything in the model that wants to print needs somewhere to print to. */
+  private assertConsoleForLogs(): void {
+    if (this.hasConsole) return;
+
+    const wants = [
+      ...(this.project.system.tasks || []).filter(t => t.log).map(t => `task "${t.name}"`),
+      ...(this.project.system.commands?.commands || [])
+        .filter(c => c.log)
+        .map(c => `command "${c.match}"`),
+    ];
+    if (wants.length === 0) return;
+
+    throw new CodegenError(
+      `${wants.join(', ')} declares "log:", but the model declares no console. Add one:\n` +
+      '  hardware:\n' +
+      '    buses:\n' +
+      '      console: { interface: uart, port: 0, baud: 115200 }'
+    );
   }
 
   /** Every action the model actually uses, wherever it was used. */

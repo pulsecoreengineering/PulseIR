@@ -3139,6 +3139,69 @@
 ${lines.join("\n")}${hint}`;
   }
 
+  // dist/src/analysis/template.js
+  var TemplateError = class extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "TemplateError";
+    }
+  };
+  function parseTemplate(template) {
+    const segments = [];
+    let text = "";
+    let at = 0;
+    const flush = () => {
+      if (text)
+        segments.push({ kind: "text", value: text });
+      text = "";
+    };
+    while (at < template.length) {
+      const ch = template[at];
+      if (ch === "{" && template[at + 1] === "{") {
+        text += "{";
+        at += 2;
+        continue;
+      }
+      if (ch === "}" && template[at + 1] === "}") {
+        text += "}";
+        at += 2;
+        continue;
+      }
+      if (ch === "}") {
+        throw new TemplateError(`Unmatched "}" in ${JSON.stringify(template)}. Write "}}" to print one.`);
+      }
+      if (ch === "{") {
+        const close = template.indexOf("}", at + 1);
+        if (close === -1) {
+          throw new TemplateError(`Unclosed "{" in ${JSON.stringify(template)}. Write "{{" to print one.`);
+        }
+        const name = template.slice(at + 1, close).trim();
+        if (!name) {
+          throw new TemplateError(`Empty "{}" in ${JSON.stringify(template)}`);
+        }
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+          throw new TemplateError(`"{${name}}" is not a name. A hole prints one declared parameter or sensor; anything else belongs in an action you write.`);
+        }
+        flush();
+        segments.push({ kind: "ref", name });
+        at = close + 1;
+        continue;
+      }
+      text += ch;
+      at += 1;
+    }
+    flush();
+    return segments;
+  }
+  function templateRefs(segments) {
+    const seen = /* @__PURE__ */ new Set();
+    for (const segment of segments) {
+      if (segment.kind === "ref")
+        seen.add(segment.name);
+    }
+    return [...seen];
+  }
+
   // dist/src/parser/index.js
   var MERGED_LISTS = [
     "events",
@@ -3432,6 +3495,7 @@ ${lines.join("\n")}${hint}`;
       this.assertBusRefs(components, resources);
       this.assertTimedTransitions(transitions, parameters || []);
       this.assertTaskIntervals(tasks, parameters || []);
+      this.assertLogRefs(tasks, commands, parameters || [], components || []);
       this.assertUsable(states, tasks, commands);
       const busNames = new Set((resources || []).map((r) => r.name));
       for (const device of components || []) {
@@ -3622,13 +3686,15 @@ For a repeating cycle, alternate between two states.`);
     ${name}: { every: 500, do: some_action }`);
         }
         const actions = this.resolveActions(def.do, catalogue, index);
-        if (!actions?.length) {
-          throw new ParseError(`Task "${name}" has no "do", so it would do nothing every ${def.every}ms`);
+        const log = this.parseLog(def.log, `Task "${name}"`);
+        if (!actions?.length && log === void 0) {
+          throw new ParseError(`Task "${name}" has neither "do" nor "log", so it would do nothing every ${def.every}ms`);
         }
         return {
           name,
           every: this.parseInterval(def.every, `Task "${name}"`),
-          actions,
+          actions: actions ?? [],
+          log,
           description: def.description
         };
       });
@@ -3668,16 +3734,31 @@ For a repeating cycle, alternate between two states.`);
           throw new ParseError(`Command "${text}" raises unknown event "${event}"`);
         }
         const actions = this.resolveActions(long ? long.do : def, catalogue, index);
-        if (!actions?.length && event === void 0) {
-          throw new ParseError(`Command "${text}" has neither "do" nor "event", so receiving it would do nothing`);
+        const log = this.parseLog(long?.log, `Command "${text}"`);
+        if (!actions?.length && event === void 0 && log === void 0) {
+          throw new ParseError(`Command "${text}" has no "do", "event" or "log", so receiving it would do nothing`);
         }
-        return { match: text, actions, event, description: long?.description };
+        return { match: text, actions, event, log, description: long?.description };
       });
       return {
         source: raw.source,
         commands,
         reportUnknown: raw.report_unknown === void 0 ? true : Boolean(raw.report_unknown)
       };
+    }
+    /** `log: "temp={temp}C"` - checked for shape here, for names later. */
+    parseLog(raw, where) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      if (typeof raw !== "string") {
+        throw new ParseError(`${where} has a "log" of type ${typeof raw}; it must be a string`);
+      }
+      try {
+        parseTemplate(raw);
+      } catch (error) {
+        throw new ParseError(`${where}: ${error instanceof TemplateError ? error.message : String(error)}`);
+      }
+      return raw;
     }
     /** Milliseconds: a positive literal, or the name of an int parameter. */
     parseInterval(raw, where) {
@@ -4102,6 +4183,36 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         }
       });
     }
+    /**
+     * Every `{name}` in a log template must name something the model declared.
+     *
+     * Checked here rather than in the backend, so a typo is a model error with
+     * the alternatives listed - not a C++ compile error in generated code.
+     */
+    assertLogRefs(tasks, commands, parameters, components) {
+      const known = /* @__PURE__ */ new Map();
+      for (const parameter of parameters)
+        known.set(parameter.name, "parameter");
+      for (const device of components) {
+        if (device.class === "sensor")
+          known.set(device.name, "sensor");
+      }
+      const check = (template, where) => {
+        if (template === void 0)
+          return;
+        for (const name of templateRefs(parseTemplate(template))) {
+          if (known.has(name))
+            continue;
+          const options = [...known.keys()];
+          throw new ParseError(`${where} logs "{${name}}", which is not a declared parameter or sensor. ` + (options.length ? `Available: ${options.join(", ")}.` : "The model declares no parameters and no sensors."));
+        }
+      };
+      for (const task of tasks)
+        check(task.log, `Task "${task.name}"`);
+      for (const command of commands?.commands || []) {
+        check(command.log, `Command "${command.match}"`);
+      }
+    }
     /** A task interval naming a parameter must name a real int one. */
     assertTaskIntervals(tasks, parameters) {
       const byName = new Map(parameters.map((p) => [p.name, p]));
@@ -4457,6 +4568,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
       this.indexActions();
       this.indexTransitions();
       this.indexInterfaces();
+      this.assertConsoleForLogs();
       return [
         this.generateHeader(),
         this.generateIncludes(),
@@ -4495,6 +4607,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
       this.indexActions();
       this.indexTransitions();
       this.indexInterfaces();
+      this.assertConsoleForLogs();
       const base = this.sanitize(project.name);
       const headerName = `${base}_generated.h`;
       const guardName = "src/guards.cpp";
@@ -5288,7 +5401,12 @@ ${machineSetup}}`;
         const base = this.sanitize(task.name);
         const interval = typeof task.every === "string" ? `(unsigned long)systemParameters.${this.sanitize(task.every)}` : `${task.every}UL`;
         const source2 = typeof task.every === "string" ? `${task.every} (parameter)` : `every ${task.every}ms`;
-        const calls = task.actions.map((a) => `  action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
+        const calls = [
+          ...task.actions.map((a) => `  action_${this.sanitize(a.name)}(&systemContext);`),
+          // After the actions: a task that samples and then reports should print
+          // the reading it just took, not the one before it.
+          ...task.log ? [this.logLines(task.log, "  ")] : []
+        ].join("\n");
         return `// Task "${task.name}" - ${source2}.${task.description ? `
 // ${task.description}` : ""}
 static unsigned long dueAt_${base} = 0;
@@ -5333,9 +5451,10 @@ ${blocks.join("\n\n")}`;
       const cases = set2.commands.map((command) => {
         const calls = (command.actions || []).map((a) => `    action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
         const raise = command.event ? `    fsm.sendEvent(EVENT_${this.sanitizeUpper(command.event)});` : "";
+        const reply = command.log ? this.logLines(command.log, "    ") : "";
         return `  if (strcmp(line, ${JSON.stringify(command.match)}) == 0) {${command.description ? `
     // ${command.description}` : ""}
-${[calls, raise].filter(Boolean).join("\n")}
+${[calls, raise, reply].filter(Boolean).join("\n")}
     return;
   }`;
       });
@@ -5416,6 +5535,49 @@ several_reset
         return pin ? `   -> ${pin}` : `   -> device "${value}"`;
       }
       return "";
+    }
+    /**
+     * A `log:` template as print calls.
+     *
+     * Emitted verbatim in order - one print per literal, one per value - because
+     * printf on an embedded core drags in float formatting and costs several
+     * kilobytes of flash for what is a handful of prints.
+     */
+    logLines(template, indent) {
+      const stream = this.consoleStream();
+      const segments = parseTemplate(template);
+      const out = [];
+      for (const segment of segments) {
+        if (segment.kind === "text") {
+          out.push(`${indent}${stream}.print(${JSON.stringify(segment.value)});`);
+          continue;
+        }
+        out.push(`${indent}${stream}.print(${this.logValue(segment.name)});`);
+      }
+      out.push(`${indent}${stream}.println();`);
+      return out.join("\n");
+    }
+    /** Where a logged name lives in C. Validated by the parser, so it resolves. */
+    logValue(name) {
+      const parameter = (this.project.system.parameters || []).find((p) => p.name === name);
+      if (parameter)
+        return `systemParameters.${this.sanitize(name)}`;
+      return `systemSensors.${this.sanitize(name)}`;
+    }
+    /** Anything in the model that wants to print needs somewhere to print to. */
+    assertConsoleForLogs() {
+      if (this.hasConsole)
+        return;
+      const wants = [
+        ...(this.project.system.tasks || []).filter((t) => t.log).map((t) => `task "${t.name}"`),
+        ...(this.project.system.commands?.commands || []).filter((c) => c.log).map((c) => `command "${c.match}"`)
+      ];
+      if (wants.length === 0)
+        return;
+      throw new CodegenError(`${wants.join(", ")} declares "log:", but the model declares no console. Add one:
+  hardware:
+    buses:
+      console: { interface: uart, port: 0, baud: 115200 }`);
     }
     /** Every action the model actually uses, wherever it was used. */
     everyUsedAction() {
@@ -6717,7 +6879,7 @@ ${implementations.join("\n\n")}`;
     "serial console \u2014 commands over the serial monitor, no state machine": {
       entry: "serial_console.yaml",
       files: {
-        "serial_console.yaml": '# A board you talk to over the serial monitor. Still no state machine.\n#\n# Two things the model owns here that are usually hand-written boilerplate:\n#\n#   1. The console\'s baud rate. `console` is a declared bus like any other, so\n#      the sketch opens it at the rate the model asks for - there is no\n#      hardcoded Serial.begin(115200) anywhere in the output.\n#   2. The command table. Reading a line without blocking, reassembling one\n#      split across loop() passes, and refusing one too long to fit are all\n#      generated. What a command *means* is your action, in C.\n\nproject:\n  name: serial_console\n  version: "1.0"\n  description: Answers commands typed into the serial monitor\n\ntarget:\n  board: esp32\n\nhardware:\n  buses:\n    # Port 0 is the USB serial monitor. Naming it as a bus is what lets the\n    # model set the baud rate.\n    console: { interface: uart, port: 0, baud: 9600 }\n\n  devices:\n    led:  { type: digital_output, pin: GPIO2 }\n    fan:  { type: pwm_output, pin: GPIO27, channel: 0, frequency: 25000 }\n    temp: { type: analog_input, pin: GPIO34, unit: degC }\n\nparameters:\n  report_ms: { type: int, default: 2000, range: [200, 60000], unit: ms }\n  fan_duty:  { type: int, default: 128,  range: [0, 255] }\n\nactions:\n  led_on:    { driver: gpio_control, params: { device: led, value: HIGH } }\n  led_off:   { driver: gpio_control, params: { device: led, value: LOW } }\n  fan_start: { driver: pwm_control,  params: { device: fan, duty: fan_duty } }\n  fan_stop:  { driver: pwm_control,  params: { device: fan, duty: 0 } }\n  report:    { driver: console_report }\n  show_help: { driver: console_help }\n\ncommands:\n  source: console\n  map:\n    on:     led_on\n    off:    led_off\n    fan:    fan_start\n    stop:   fan_stop\n    # A command may run several actions, in order.\n    status: [report, show_help]\n    help:   show_help\n\ntasks:\n  # The board reports on its own too, not only when asked.\n  heartbeat:\n    every: report_ms\n    do: report\n    description: Print a reading even when nobody types anything\n'
+        "serial_console.yaml": '# A board you talk to over the serial monitor. Still no state machine.\n#\n# Two things the model owns here that are usually hand-written boilerplate:\n#\n#   1. The console\'s baud rate. `console` is a declared bus like any other, so\n#      the sketch opens it at the rate the model asks for - there is no\n#      hardcoded Serial.begin(115200) anywhere in the output.\n#   2. The command table. Reading a line without blocking, reassembling one\n#      split across loop() passes, and refusing one too long to fit are all\n#      generated. What a command *means* is your action, in C.\n\nproject:\n  name: serial_console\n  version: "1.0"\n  description: Answers commands typed into the serial monitor\n\ntarget:\n  board: esp32\n\nhardware:\n  buses:\n    # Port 0 is the USB serial monitor. Naming it as a bus is what lets the\n    # model set the baud rate.\n    console: { interface: uart, port: 0, baud: 9600 }\n\n  devices:\n    led:  { type: digital_output, pin: GPIO2 }\n    fan:  { type: pwm_output, pin: GPIO27, channel: 0, frequency: 25000 }\n    temp: { type: analog_input, pin: GPIO34, unit: degC }\n\nparameters:\n  report_ms: { type: int, default: 2000, range: [200, 60000], unit: ms }\n  fan_duty:  { type: int, default: 128,  range: [0, 255] }\n\nactions:\n  led_on:    { driver: gpio_control, params: { device: led, value: HIGH } }\n  led_off:   { driver: gpio_control, params: { device: led, value: LOW } }\n  fan_start: { driver: pwm_control,  params: { device: fan, duty: fan_duty } }\n  fan_stop:  { driver: pwm_control,  params: { device: fan, duty: 0 } }\n  read_temp: { driver: adc_read,     params: { device: temp } }\n  show_help: { driver: console_help }\n\ncommands:\n  source: console\n  map:\n    on:   led_on\n    off:  led_off\n    fan:  fan_start\n    stop: fan_stop\n    help: show_help\n\n    # `log:` prints a line, with {name} filled from a declared parameter or\n    # sensor. The text and the values both come from this file - no printf in\n    # sight, and a typo in a name is a model error, not a C++ one.\n    status:\n      do: read_temp\n      log: "temp={temp} degC  fan_duty={fan_duty}"\n\n    # A command may also just answer, without doing anything.\n    setpoint:\n      log: "reporting every {report_ms} ms"\n\ntasks:\n  # The board reports on its own too, not only when asked. The log line runs\n  # after the actions, so it prints the reading just taken.\n  heartbeat:\n    every: report_ms\n    do: read_temp\n    log: "temp={temp} degC"\n    description: Report even when nobody types anything\n'
       }
     },
     "boiler \u2014 multi-file, hierarchical states, guards": {
@@ -6798,6 +6960,8 @@ ${implementations.join("\n\n")}`;
   var projectMenu = $("project-menu");
   var importZipInput = $("import-zip");
   var importFolderInput = $("import-folder");
+  var copyYamlButton = $("copy-yaml");
+  var copyOutputButton = $("copy-output");
   var namespaceInput = $("namespace");
   var staleNote = $("stale-note");
   var store = new ProjectStore(localStorage);
@@ -7205,6 +7369,54 @@ ${parser.warnings.join("\n")}`);
     }
     importFiles(paths, fallbackName);
   }
+  async function copyText(button, text) {
+    const done = (ok2) => {
+      const original = button.textContent;
+      button.textContent = ok2 ? "Copied" : "Press Ctrl+C";
+      button.classList.toggle("copied", ok2);
+      setTimeout(() => {
+        button.textContent = original;
+        button.classList.remove("copied");
+      }, 1400);
+    };
+    try {
+      await navigator.clipboard.writeText(text);
+      done(true);
+      return;
+    } catch {
+    }
+    const scratch = document.createElement("textarea");
+    scratch.value = text;
+    scratch.setAttribute("readonly", "");
+    scratch.style.position = "fixed";
+    scratch.style.opacity = "0";
+    document.body.append(scratch);
+    scratch.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
+    scratch.remove();
+    done(ok);
+  }
+  function visibleOutput() {
+    if (!current)
+      return "";
+    const showing = Object.keys(panes).find((key) => !panes[key].hidden);
+    switch (showing) {
+      case "topics":
+        return current.topics;
+      case "libraries":
+        return current.libraries;
+      // The structure pane is a rendered table, so copy what it is derived from.
+      case "structure":
+        return panes.structure.innerText;
+      default:
+        return current.sketch;
+    }
+  }
   function closeMenu() {
     projectMenu.hidden = true;
     projectButton.setAttribute("aria-expanded", "false");
@@ -7298,6 +7510,12 @@ ${parser.warnings.join("\n")}`);
     for (const button of document.querySelectorAll(".tab")) {
       button.addEventListener("click", () => selectTab(button.dataset.tab));
     }
+    copyYamlButton.addEventListener("click", () => {
+      void copyText(copyYamlButton, source.value);
+    });
+    copyOutputButton.addEventListener("click", () => {
+      void copyText(copyOutputButton, visibleOutput());
+    });
     $("add-file").addEventListener("click", addFile);
     $("set-entry").addEventListener("click", setEntry);
     $("download-sketch").addEventListener("click", () => {
