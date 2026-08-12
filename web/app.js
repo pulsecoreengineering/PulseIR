@@ -5717,6 +5717,218 @@ ${implementations.join("\n\n")}`;
     return entry.version ? `${entry.name}@${entry.version}` : entry.name;
   }
 
+  // dist/web/highlight.js
+  var BOOLEANS = /* @__PURE__ */ new Set(["true", "false", "yes", "no", "on", "off"]);
+  var NULLS = /* @__PURE__ */ new Set(["null", "~"]);
+  var FLOW_DELIMITERS = /* @__PURE__ */ new Set([",", "{", "}", "[", "]"]);
+  function escapeHtml(text) {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  var Emitter = class {
+    constructor() {
+      this.out = [];
+    }
+    push(kind, text) {
+      if (!text)
+        return;
+      this.out.push(kind === "plain" ? escapeHtml(text) : `<span class="y-${kind}">${escapeHtml(text)}</span>`);
+    }
+    toString() {
+      return this.out.join("");
+    }
+  };
+  function classifyScalar(text) {
+    const lower2 = text.toLowerCase();
+    if (NULLS.has(lower2))
+      return "null";
+    if (BOOLEANS.has(lower2))
+      return "boolean";
+    if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text))
+      return "number";
+    if (/^0x[0-9a-fA-F]+$/.test(text))
+      return "number";
+    return "plain";
+  }
+  function readQuoted(line, i) {
+    const quote = line[i];
+    let j = i + 1;
+    while (j < line.length) {
+      if (quote === '"' && line[j] === "\\") {
+        j += 2;
+        continue;
+      }
+      if (line[j] === quote) {
+        if (quote === "'" && line[j + 1] === "'") {
+          j += 2;
+          continue;
+        }
+        return j + 1;
+      }
+      j++;
+    }
+    return line.length;
+  }
+  function findKeyColon(line, i, inFlow) {
+    let j = i;
+    while (j < line.length) {
+      const ch = line[j];
+      if (ch === '"' || ch === "'") {
+        j = readQuoted(line, j);
+        continue;
+      }
+      if (ch === "#" && j > i && /\s/.test(line[j - 1]))
+        return -1;
+      if (inFlow && FLOW_DELIMITERS.has(ch))
+        return -1;
+      if (ch === ":") {
+        const next = line[j + 1];
+        if (next === void 0 || /\s/.test(next) || inFlow && FLOW_DELIMITERS.has(next))
+          return j;
+      }
+      j++;
+    }
+    return -1;
+  }
+  function emitValue(out, line, from, flowDepth) {
+    let i = from;
+    let depth = flowDepth;
+    while (i < line.length) {
+      const ch = line[i];
+      if (/\s/.test(ch)) {
+        const start2 = i;
+        while (i < line.length && /\s/.test(line[i]))
+          i++;
+        out.push("plain", line.slice(start2, i));
+        continue;
+      }
+      if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) {
+        out.push("comment", line.slice(i));
+        return;
+      }
+      if (ch === '"' || ch === "'") {
+        const end = readQuoted(line, i);
+        out.push("string", line.slice(i, end));
+        i = end;
+        continue;
+      }
+      if (ch === "{" || ch === "[") {
+        out.push("punct", ch);
+        depth++;
+        i++;
+        continue;
+      }
+      if (ch === "}" || ch === "]") {
+        out.push("punct", ch);
+        depth = Math.max(0, depth - 1);
+        i++;
+        continue;
+      }
+      if (ch === ",") {
+        out.push("punct", ch);
+        i++;
+        continue;
+      }
+      if (ch === "&" || ch === "*") {
+        const start2 = i++;
+        while (i < line.length && !/[\s,{}[\]]/.test(line[i]))
+          i++;
+        out.push("anchor", line.slice(start2, i));
+        continue;
+      }
+      if (ch === "!") {
+        const start2 = i++;
+        while (i < line.length && !/[\s,{}[\]]/.test(line[i]))
+          i++;
+        out.push("tag", line.slice(start2, i));
+        continue;
+      }
+      if (depth > 0) {
+        const colon = findKeyColon(line, i, true);
+        if (colon !== -1) {
+          out.push("key", line.slice(i, colon));
+          out.push("punct", ":");
+          i = colon + 1;
+          continue;
+        }
+      }
+      const start = i;
+      while (i < line.length) {
+        const c = line[i];
+        if (depth > 0 && (FLOW_DELIMITERS.has(c) || /\s/.test(c)))
+          break;
+        if (c === "#" && /\s/.test(line[i - 1] ?? " "))
+          break;
+        i++;
+      }
+      const text = line.slice(start, i);
+      out.push(depth > 0 ? classifyScalar(text) : classifyScalar(text.trimEnd()), text);
+    }
+  }
+  function highlight(source2) {
+    const lines = source2.split("\n");
+    const rendered = [];
+    let blockIndent = -1;
+    for (const line of lines) {
+      const out = new Emitter();
+      const indentLength = line.length - line.trimStart().length;
+      if (blockIndent !== -1) {
+        if (line.trim() === "" || indentLength > blockIndent) {
+          out.push("string", line);
+          rendered.push(out.toString());
+          continue;
+        }
+        blockIndent = -1;
+      }
+      if (line.trim() === "") {
+        rendered.push(escapeHtml(line));
+        continue;
+      }
+      const indent = line.slice(0, indentLength);
+      out.push("plain", indent);
+      let i = indentLength;
+      if (line.slice(i) === "---" || line.slice(i) === "...") {
+        out.push("punct", line.slice(i));
+        rendered.push(out.toString());
+        continue;
+      }
+      if (line[i] === "#") {
+        out.push("comment", line.slice(i));
+        rendered.push(out.toString());
+        continue;
+      }
+      while (line[i] === "-" && (line[i + 1] === " " || line[i + 1] === void 0)) {
+        out.push("punct", "-");
+        i++;
+        const start = i;
+        while (i < line.length && line[i] === " ")
+          i++;
+        out.push("plain", line.slice(start, i));
+      }
+      const colon = findKeyColon(line, i, false);
+      if (colon !== -1) {
+        const rawKey = line.slice(i, colon);
+        out.push(/^["']/.test(rawKey.trim()) ? "string" : "key", rawKey);
+        out.push("punct", ":");
+        i = colon + 1;
+      }
+      const rest = line.slice(i);
+      const block = /^(\s*)([|>][+-]?\d*)(\s*)(#.*)?$/.exec(rest);
+      if (block) {
+        out.push("plain", block[1]);
+        out.push("punct", block[2]);
+        out.push("plain", block[3]);
+        if (block[4])
+          out.push("comment", block[4]);
+        blockIndent = indentLength;
+        rendered.push(out.toString());
+        continue;
+      }
+      emitValue(out, line, i, 0);
+      rendered.push(out.toString());
+    }
+    return rendered.join("\n");
+  }
+
   // dist/web/examples.js
   var EXAMPLES = {
     "starter \u2014 a two-state blinker": {
@@ -5785,6 +5997,7 @@ ${implementations.join("\n\n")}`;
     return el;
   };
   var source = $("source");
+  var highlightLayer = $("highlight");
   var status = $("status");
   var fileBar = $("file-bar");
   var panes = {
@@ -5840,7 +6053,32 @@ ${implementations.join("\n\n")}`;
   function persist() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
   }
-  function escapeHtml(text) {
+  var HIGHLIGHT_LIMIT = 2e5;
+  var highlightingOn = true;
+  function paint() {
+    const text = source.value;
+    if (text.length > HIGHLIGHT_LIMIT) {
+      if (highlightingOn) {
+        highlightingOn = false;
+        source.style.color = "var(--text)";
+        highlightLayer.hidden = true;
+      }
+      return;
+    }
+    if (!highlightingOn) {
+      highlightingOn = true;
+      source.style.color = "";
+      highlightLayer.hidden = false;
+    }
+    highlightLayer.innerHTML = `<code>${highlight(text)}
+</code>`;
+    syncScroll();
+  }
+  function syncScroll() {
+    highlightLayer.scrollTop = source.scrollTop;
+    highlightLayer.scrollLeft = source.scrollLeft;
+  }
+  function escapeHtml2(text) {
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
   function setStale(stale) {
@@ -5850,7 +6088,7 @@ ${implementations.join("\n\n")}`;
   }
   function setStatus(kind, title, detail = "") {
     status.className = `status ${kind}`;
-    status.innerHTML = `<strong>${escapeHtml(title)}</strong>${detail ? `<span>${escapeHtml(detail)}</span>` : ""}`;
+    status.innerHTML = `<strong>${escapeHtml2(title)}</strong>${detail ? `<span>${escapeHtml2(detail)}</span>` : ""}`;
   }
   function renderFileBar() {
     const names = fileNames();
@@ -5858,9 +6096,9 @@ ${implementations.join("\n\n")}`;
       const isEntry = name === workspace.entry;
       const isActive = name === workspace.active;
       const badge = isEntry ? '<span class="entry-badge" title="entry file">\u25B6</span>' : "";
-      const close = !isEntry ? `<span class="close" data-close="${escapeHtml(name)}" title="Delete ${escapeHtml(name)}">\xD7</span>` : "";
-      return `<button class="filetab${isActive ? " active" : ""}" data-file="${escapeHtml(name)}"
-      title="${escapeHtml(name)} (double-click to rename)">${badge}${escapeHtml(name)}${close}</button>`;
+      const close = !isEntry ? `<span class="close" data-close="${escapeHtml2(name)}" title="Delete ${escapeHtml2(name)}">\xD7</span>` : "";
+      return `<button class="filetab${isActive ? " active" : ""}" data-file="${escapeHtml2(name)}"
+      title="${escapeHtml2(name)} (double-click to rename)">${badge}${escapeHtml2(name)}${close}</button>`;
     }).join("");
     for (const tab of fileBar.querySelectorAll(".filetab")) {
       const name = tab.dataset.file;
@@ -5884,11 +6122,11 @@ ${implementations.join("\n\n")}`;
       const targetPath = resolvePath(states, t.target);
       const leaf = targetPath ? resolveEntryLeaf(states, targetPath) : null;
       const descends = leaf && targetPath && leaf !== targetPath;
-      const target = descends ? `${escapeHtml(t.target)} <span class="arrow">\u21B3</span> <code>${escapeHtml(leaf)}</code>` : escapeHtml(t.target);
-      const guard = t.guard ? `<code>${escapeHtml(t.guard.name)}</code>` : '<span class="dim">\u2014</span>';
-      const actions = t.actions?.length ? t.actions.map((a) => `<code>${escapeHtml(a.name)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
-      const src = t.source === "*" ? '<span class="tag wild">any state</span>' : `<code>${escapeHtml(t.source)}</code>`;
-      const trigger = t.event !== void 0 ? `<code>${escapeHtml(t.event)}</code>` : `<span class="tag timer">after</span> <code>${escapeHtml(String(t.after))}</code>`;
+      const target = descends ? `${escapeHtml2(t.target)} <span class="arrow">\u21B3</span> <code>${escapeHtml2(leaf)}</code>` : escapeHtml2(t.target);
+      const guard = t.guard ? `<code>${escapeHtml2(t.guard.name)}</code>` : '<span class="dim">\u2014</span>';
+      const actions = t.actions?.length ? t.actions.map((a) => `<code>${escapeHtml2(a.name)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
+      const src = t.source === "*" ? '<span class="tag wild">any state</span>' : `<code>${escapeHtml2(t.source)}</code>`;
+      const trigger = t.event !== void 0 ? `<code>${escapeHtml2(t.event)}</code>` : `<span class="tag timer">after</span> <code>${escapeHtml2(String(t.after))}</code>`;
       return `<tr>
       <td>${src}</td>
       <td>${trigger}</td>
@@ -5898,9 +6136,9 @@ ${implementations.join("\n\n")}`;
     </tr>`;
     }).join("");
     const resources = (project.system.resources || []).map((r) => `<tr>
-      <td><code>${escapeHtml(r.name)}</code></td>
-      <td><span class="tag">${escapeHtml(String(r.interface))}</span></td>
-      <td>${Object.entries(r.binding || {}).map(([k, v]) => `<code>${escapeHtml(k)}=${escapeHtml(String(v))}</code>`).join(" ") || '<span class="dim">\u2014</span>'}</td>
+      <td><code>${escapeHtml2(r.name)}</code></td>
+      <td><span class="tag">${escapeHtml2(String(r.interface))}</span></td>
+      <td>${Object.entries(r.binding || {}).map(([k, v]) => `<code>${escapeHtml2(k)}=${escapeHtml2(String(v))}</code>`).join(" ") || '<span class="dim">\u2014</span>'}</td>
     </tr>`).join("");
     return `
     <h3>State hierarchy</h3>
@@ -5925,7 +6163,7 @@ ${implementations.join("\n\n")}`;
   function renderStateNode(path, flat) {
     const node = flat.find((s) => s.path === path);
     const children = flat.filter((s) => s.parentPath === path);
-    const label = escapeHtml(node.state.name);
+    const label = escapeHtml2(node.state.name);
     const isInitial = flat.some((s) => s.initialChildPath === path);
     const marker = isInitial ? '<span class="initial" title="initial child">\u25B8</span>' : "";
     if (node.isLeaf) {
@@ -5964,9 +6202,9 @@ ${implementations.join("\n\n")}`;
       return;
     }
     setStale(false);
-    panes.sketch.innerHTML = `<pre><code>${escapeHtml(sketch)}</code></pre>`;
-    panes.topics.innerHTML = `<pre><code>${escapeHtml(topics)}</code></pre>`;
-    panes.libraries.innerHTML = `<pre><code>${escapeHtml(libraries)}</code></pre>`;
+    panes.sketch.innerHTML = `<pre><code>${escapeHtml2(sketch)}</code></pre>`;
+    panes.topics.innerHTML = `<pre><code>${escapeHtml2(topics)}</code></pre>`;
+    panes.libraries.innerHTML = `<pre><code>${escapeHtml2(libraries)}</code></pre>`;
     panes.structure.innerHTML = renderStructure(project);
     const fileCount = Object.keys(workspace.files).length;
     const counts = [
@@ -5989,6 +6227,7 @@ ${parser.warnings.join("\n")}`);
       return;
     workspace.active = name;
     source.value = workspace.files[name];
+    paint();
     renderFileBar();
     persist();
   }
@@ -6089,11 +6328,14 @@ system:
     restore();
     source.value = workspace.files[workspace.active] ?? "";
     renderFileBar();
+    paint();
     const rerender = debounce(render, 150);
     source.addEventListener("input", () => {
       workspace.files[workspace.active] = source.value;
+      paint();
       rerender();
     });
+    source.addEventListener("scroll", syncScroll, { passive: true });
     namespaceInput.addEventListener("input", rerender);
     exampleSelect.addEventListener("change", () => {
       const example = EXAMPLES[exampleSelect.value];
@@ -6107,6 +6349,7 @@ system:
       loadExample(exampleSelect.value);
       source.value = workspace.files[workspace.active];
       renderFileBar();
+      paint();
       render();
     });
     for (const button of document.querySelectorAll(".tab")) {
@@ -6137,6 +6380,7 @@ system:
       source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
       source.selectionStart = source.selectionEnd = selectionStart + 2;
       workspace.files[workspace.active] = source.value;
+      paint();
       rerender();
     });
     selectTab(localStorage.getItem("pulseir.tab") || "sketch");

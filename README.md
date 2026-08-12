@@ -292,6 +292,12 @@ A browser editor with live output: edit the model on the left, watch the
 generated sketch, the MQTT topic manifest, the library manifest and the state
 structure update as you type.
 
+The YAML pane is syntax-highlighted — keys, strings, numbers, comments and
+flow collections — with no editor library and no network: a colour layer sits
+exactly beneath a transparent textarea. `on:` and `off:` stay keys, because in
+these models they are event and state names rather than the YAML booleans they
+look like.
+
 **Multi-file models work here too.** Each file is a tab, and the open buffers
 act as the filesystem, so `include` resolves between tabs exactly as it does on
 disk. The entry file — the only one declaring `project` — is marked ▶; use

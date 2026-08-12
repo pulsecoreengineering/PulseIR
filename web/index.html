@@ -20,6 +20,15 @@
     --warn-fg: #7a4b06;
     --code: #f3f4f6;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sel: rgba(11, 107, 203, .20);
+
+    /* Syntax colours. Keys carry the structure, so they lead; comments recede;
+       scalars sit between. Checked for contrast on both backgrounds. */
+    --y-key: #0a5ea8;
+    --y-string: #9b3b16;
+    --y-number: #7b3aa8;
+    --y-comment: #6b7280;
+    --y-anchor: #10603a;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -36,6 +45,13 @@
       --warn-bg: #2c2313;
       --warn-fg: #e9c07a;
       --code: #10131a;
+      --sel: rgba(98, 170, 245, .26);
+
+      --y-key: #7cc0ff;
+      --y-string: #e8a87c;
+      --y-number: #d3a2f0;
+      --y-comment: #7d8794;
+      --y-anchor: #7fd4a4;
     }
   }
 
@@ -103,12 +119,53 @@
   .filetab .close { color: var(--dim); font-size: 14px; line-height: 1; padding: 0 1px; }
   .filetab .close:hover { color: var(--err-fg); }
 
-  textarea {
-    flex: 1; width: 100%; resize: none; border: 0; outline: none;
-    padding: 12px 14px; background: var(--bg); color: var(--text);
-    font-family: var(--mono); font-size: 13px; line-height: 1.55;
-    tab-size: 2; white-space: pre;
+  /* The editor is a textarea with its text made transparent, laid over a <pre>
+     that draws the same text in colour. Every property that affects glyph
+     position has to be identical between the two, or the caret drifts away
+     from the characters - hence the shared .editor-text block. */
+  .editor {
+    flex: 1; position: relative; min-height: 0; background: var(--bg);
   }
+  .editor-text {
+    margin: 0; border: 0;
+    padding: 12px 14px;
+    font-family: var(--mono); font-size: 13px; line-height: 1.55;
+    tab-size: 2; white-space: pre; word-wrap: normal; overflow-wrap: normal;
+    letter-spacing: normal;
+  }
+  #source, #highlight {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    box-sizing: border-box;
+  }
+  #highlight {
+    overflow: hidden;                 /* scrolled in step with the textarea */
+    pointer-events: none;
+    color: var(--text);
+  }
+  /* The inner <code> must add nothing of its own; every metric comes from the
+     .editor-text block the textarea also uses. */
+  #highlight code {
+    display: block; font: inherit; line-height: inherit; letter-spacing: inherit;
+    white-space: inherit; tab-size: inherit; color: inherit;
+  }
+  textarea#source {
+    resize: none; outline: none; background: transparent;
+    color: transparent; caret-color: var(--text);
+    overflow: auto;
+  }
+  /* With transparent text, selection shows as a bare rectangle; the coloured
+     text underneath stays readable through it. */
+  #source::selection { background: var(--sel, rgba(120, 160, 255, .28)); }
+
+  .y-key     { color: var(--y-key); }
+  .y-string  { color: var(--y-string); }
+  .y-number  { color: var(--y-number); }
+  .y-boolean { color: var(--y-number); }
+  .y-null    { color: var(--y-number); }
+  .y-comment { color: var(--y-comment); font-style: italic; }
+  .y-punct   { color: var(--dim); }
+  .y-anchor  { color: var(--y-anchor); }
+  .y-tag     { color: var(--y-anchor); }
 
   .panes { flex: 1; overflow: auto; min-height: 0; }
   .stale-note {
@@ -120,7 +177,10 @@
   .pane { padding: 12px 14px; }
   .pane.stale { opacity: .45; }
   pre { margin: 0; }
-  pre code {
+  /* Scoped to the output panes: this used to be a bare `pre code`, which also
+     hit the editor's colour layer and shrank it out of step with the textarea
+     it has to sit exactly beneath. */
+  .pane pre code {
     display: block; font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
     white-space: pre; color: var(--text);
   }
@@ -188,8 +248,12 @@
       <button id="add-file" title="Add a file to this model">+ File</button>
       <button id="set-entry" title="Parse starting from the open file">Set entry</button>
     </div>
-    <textarea id="source" spellcheck="false" autocomplete="off"
-              aria-label="PulseIR model source"></textarea>
+    <div class="editor">
+      <pre id="highlight" class="editor-text" aria-hidden="true"><code></code></pre>
+      <textarea id="source" class="editor-text" spellcheck="false" autocomplete="off"
+                autocorrect="off" autocapitalize="off" wrap="off"
+                aria-label="PulseIR model source"></textarea>
+    </div>
   </section>
 
   <section class="side">
