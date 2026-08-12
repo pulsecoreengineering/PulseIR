@@ -35,6 +35,7 @@ const $ = <T extends HTMLElement>(id: string): T => {
 
 const source = $<HTMLTextAreaElement>('source');
 const highlightLayer = $<HTMLPreElement>('highlight');
+const gutter = $<HTMLDivElement>('gutter');
 const status = $<HTMLDivElement>('status');
 const fileBar = $<HTMLDivElement>('file-bar');
 const panes = {
@@ -142,6 +143,10 @@ let highlightingOn = true;
 function paint(): void {
   const text = source.value;
 
+  // Numbers first, and unconditionally: they stay useful on a file too big to
+  // colour, and building them is trivial next to tokenizing the whole document.
+  paintGutter();
+
   if (text.length > HIGHLIGHT_LIMIT) {
     if (highlightingOn) {
       highlightingOn = false;
@@ -149,6 +154,7 @@ function paint(): void {
       source.style.color = 'var(--text)';
       highlightLayer.hidden = true;
     }
+    syncScroll();
     return;
   }
 
@@ -168,6 +174,44 @@ function paint(): void {
 function syncScroll(): void {
   highlightLayer.scrollTop = source.scrollTop;
   highlightLayer.scrollLeft = source.scrollLeft;
+  // The gutter follows vertically only: numbers stay put while a long line
+  // scrolls sideways past them.
+  gutter.scrollTop = source.scrollTop;
+}
+
+/**
+ * Line number of a parse failure in the *open* file, or null.
+ *
+ * A model can span several files and the parser reports against whichever one
+ * failed, so a line number is only meaningful when that file is the one on
+ * screen. Marking line 12 of machine.yaml while hardware.yaml is open would be
+ * worse than marking nothing.
+ */
+let badLine: number | null = null;
+
+/** Redraw the numbers. Cheap, and only the count and the bad line can change. */
+function paintGutter(): void {
+  const lines = source.value.split('\n').length;
+
+  // Wide enough for the highest number, in a monospace font where 1ch is one
+  // character exactly. A floor of two digits stops a short file from jittering
+  // sideways as it crosses from 9 to 10 lines.
+  const digits = Math.max(2, String(lines).length);
+  document.documentElement.style.setProperty('--gutter-width', `calc(${digits}ch + 22px)`);
+
+  const numbers: string[] = [];
+  for (let n = 1; n <= lines; n++) {
+    numbers.push(`<span class="ln${n === badLine ? ' bad' : ''}">${n}</span>`);
+  }
+  gutter.innerHTML = numbers.join('');
+  gutter.scrollTop = source.scrollTop;
+}
+
+/** Mark, or clear, the line the parser objected to. */
+function setBadLine(line: number | null): void {
+  if (badLine === line) return;
+  badLine = line;
+  paintGutter();
 }
 
 // ---------------------------------------------------------------------------
@@ -338,10 +382,15 @@ function render(): void {
     project = parser.parseFrom(workspace.entry, resolver);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const where = error instanceof ParseError && error.line !== undefined
-      ? ` (line ${error.line + 1})`
-      : '';
-    setStatus('error', `Model error${where}`, message);
+    const line = error instanceof ParseError && error.line !== undefined
+      ? error.line + 1
+      : null;
+
+    // The parser reports against whichever file failed. Only mark a line when
+    // that is the file on screen - the entry file is the one it starts from.
+    setBadLine(line !== null && workspace.active === workspace.entry ? line : null);
+
+    setStatus('error', `Model error${line !== null ? ` (line ${line})` : ''}`, message);
     setStale(true);
     return;
   }
@@ -359,6 +408,7 @@ function render(): void {
     return;
   }
 
+  setBadLine(null);
   setStale(false);
 
   panes.sketch.innerHTML = `<pre><code>${escapeHtml(sketch)}</code></pre>`;

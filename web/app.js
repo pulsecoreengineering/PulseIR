@@ -5998,6 +5998,7 @@ ${implementations.join("\n\n")}`;
   };
   var source = $("source");
   var highlightLayer = $("highlight");
+  var gutter = $("gutter");
   var status = $("status");
   var fileBar = $("file-bar");
   var panes = {
@@ -6057,12 +6058,14 @@ ${implementations.join("\n\n")}`;
   var highlightingOn = true;
   function paint() {
     const text = source.value;
+    paintGutter();
     if (text.length > HIGHLIGHT_LIMIT) {
       if (highlightingOn) {
         highlightingOn = false;
         source.style.color = "var(--text)";
         highlightLayer.hidden = true;
       }
+      syncScroll();
       return;
     }
     if (!highlightingOn) {
@@ -6077,6 +6080,25 @@ ${implementations.join("\n\n")}`;
   function syncScroll() {
     highlightLayer.scrollTop = source.scrollTop;
     highlightLayer.scrollLeft = source.scrollLeft;
+    gutter.scrollTop = source.scrollTop;
+  }
+  var badLine = null;
+  function paintGutter() {
+    const lines = source.value.split("\n").length;
+    const digits = Math.max(2, String(lines).length);
+    document.documentElement.style.setProperty("--gutter-width", `calc(${digits}ch + 22px)`);
+    const numbers = [];
+    for (let n = 1; n <= lines; n++) {
+      numbers.push(`<span class="ln${n === badLine ? " bad" : ""}">${n}</span>`);
+    }
+    gutter.innerHTML = numbers.join("");
+    gutter.scrollTop = source.scrollTop;
+  }
+  function setBadLine(line) {
+    if (badLine === line)
+      return;
+    badLine = line;
+    paintGutter();
   }
   function escapeHtml2(text) {
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -6184,8 +6206,9 @@ ${implementations.join("\n\n")}`;
       project = parser.parseFrom(workspace.entry, resolver);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const where = error instanceof ParseError && error.line !== void 0 ? ` (line ${error.line + 1})` : "";
-      setStatus("error", `Model error${where}`, message);
+      const line = error instanceof ParseError && error.line !== void 0 ? error.line + 1 : null;
+      setBadLine(line !== null && workspace.active === workspace.entry ? line : null);
+      setStatus("error", `Model error${line !== null ? ` (line ${line})` : ""}`, message);
       setStale(true);
       return;
     }
@@ -6201,6 +6224,7 @@ ${implementations.join("\n\n")}`;
       setStale(true);
       return;
     }
+    setBadLine(null);
     setStale(false);
     panes.sketch.innerHTML = `<pre><code>${escapeHtml2(sketch)}</code></pre>`;
     panes.topics.innerHTML = `<pre><code>${escapeHtml2(topics)}</code></pre>`;
