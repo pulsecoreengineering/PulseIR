@@ -229,7 +229,16 @@ test('the shipped examples allocate pins cleanly', () => {
   // mistake. Parsing throws on a conflict, so this really does check them.
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-  for (const example of ['examples/boiler/pulse.yaml', 'examples/greenhouse/greenhouse.yaml']) {
+  const shipped = [
+    'examples/boiler/pulse.yaml',
+    'examples/greenhouse/greenhouse.yaml',
+    'examples/traffic_light.yaml',
+    'examples/motor_controller.yaml',
+    'examples/pump_tank.yaml',
+    'examples/sensor_gateway/pulse.yaml',
+  ];
+
+  for (const example of shipped) {
     const project = new Parser().parseFrom(path.join(repoRoot, example), new FileResolver());
     const conflicts = findPinConflicts(project);
     assert(conflicts.length === 0, `${example} has a pin conflict: ${JSON.stringify(conflicts)}`);

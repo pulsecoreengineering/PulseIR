@@ -80,6 +80,23 @@ const SOURCES = [
     dir: 'examples/greenhouse',
     entry: 'greenhouse.yaml',
   },
+  {
+    label: 'traffic light — phases, a pedestrian request and a night mode',
+    file: 'examples/traffic_light.yaml',
+  },
+  {
+    label: 'motor controller — speed phases and an overcurrent trip',
+    file: 'examples/motor_controller.yaml',
+  },
+  {
+    label: 'pump & tank — float switches, dry-run and overfill',
+    file: 'examples/pump_tank.yaml',
+  },
+  {
+    label: 'sensor gateway — a field bus, an uplink and degraded operation',
+    dir: 'examples/sensor_gateway',
+    entry: 'pulse.yaml',
+  },
 ];
 
 const examples = {};

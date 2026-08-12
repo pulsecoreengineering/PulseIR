@@ -170,6 +170,7 @@ export class Codegen {
 
     return {
       generated: [
+        { path: 'PulseHSM_config.h', contents: this.generateConfigHeader() },
         { path: headerName, contents: this.composeHeader(headerName) },
         { path: `${base}.ino`, contents: this.composeSketch(headerName) },
       ],
@@ -322,14 +323,55 @@ ${this.generateActionImplementations()}
   // HEADER
   // =========================================================================
 
+  /**
+   * How big the runtime's tables have to be for this model.
+   *
+   * These decide the layout of the PulseHSM class, so every translation unit
+   * has to see the same values - see generateConfigHeader().
+   */
+  private sizing(): { maxStates: number; maxEvents: number; levels: number } {
+    return {
+      maxStates: this.states.length + 2,      // + headroom for growth
+      maxEvents: this.nextPowerOfTwo(Math.max(8, this.project.system.events.length)),
+      levels: Math.max(1, ...this.states.map(s => s.depth + 1)),
+    };
+  }
+
+  /**
+   * PulseHSM_config.h - the sizing macros, in a file the runtime itself reads.
+   *
+   * A `#define` in the sketch is not enough. PulseHSM.cpp is its own
+   * translation unit and never sees it, so it keeps the defaults: the sketch
+   * allocates a table for N states while the runtime is compiled believing
+   * there are 8. Small models get away with it; the ninth state is silently
+   * refused and the machine is quietly wrong. PulseHSM.h includes this file,
+   * so every translation unit agrees.
+   */
+  private generateConfigHeader(): string {
+    const { maxStates, maxEvents, levels } = this.sizing();
+
+    return `/**
+ * PulseHSM sizing for ${this.project.name} - GENERATED, DO NOT EDIT.
+ *
+ * PulseHSM.h includes this file, so the runtime and the sketch are compiled
+ * against the same table sizes. Keep it next to PulseHSM.h; deleting it drops
+ * the runtime back to its defaults, which are smaller than this model needs.
+ */
+#ifndef PULSEHSM_CONFIG_H
+#define PULSEHSM_CONFIG_H
+
+#define PULSEHSM_MAX_STATES  ${maxStates}   // ${this.states.length} states + headroom
+#define PULSEHSM_MAX_EVENTS  ${maxEvents}   // ring buffer, must be a power of two
+#define PULSEHSM_MAX_DEPTH   ${levels}   // deepest nesting, including the leaf
+
+#endif  // PULSEHSM_CONFIG_H
+`;
+  }
+
   private generateHeader(): string {
     const { name, version } = this.project;
     const date = new Date().toISOString().split('T')[0];
-
-    // These three macros only take effect if they precede the include.
-    const maxStates = this.states.length + 2;      // + headroom for growth
-    const maxEvents = this.nextPowerOfTwo(Math.max(8, this.project.system.events.length));
-    const levels = Math.max(1, ...this.states.map(s => s.depth + 1));
+    const { maxStates, maxEvents, levels } = this.sizing();
 
     return `/**
  * PulseHSM Generated Code
@@ -346,7 +388,11 @@ ${this.generateActionImplementations()}
  *   void action_<name>(SystemContext* ctx)
  */
 
-// Sized from the model. These must stay above the include to take effect.
+// Sized from the model, and repeated in PulseHSM_config.h so that PulseHSM.cpp
+// - a separate translation unit that never sees this file - is compiled
+// against the same table sizes. Defining them only here would leave the
+// runtime on its defaults, and states past the eighth would be silently
+// dropped. Generate with --outdir to get that file written for you.
 #define PULSEHSM_MAX_STATES  ${maxStates}   // ${this.states.length} states + headroom
 #define PULSEHSM_MAX_EVENTS  ${maxEvents}   // ring buffer, must be a power of two
 #define PULSEHSM_MAX_DEPTH   ${levels}   // deepest nesting, including the leaf

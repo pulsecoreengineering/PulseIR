@@ -1,0 +1,111 @@
+# Traffic light with a pedestrian request.
+#
+# Single file: at this size, splitting would cost more than it saves.
+#
+# NOTE (gate finding): every transition here is driven by TIMER_EXPIRED, and
+# the model has nowhere to say how long a state lasts. The durations live in
+# `parameters` and the C code has to compare them against
+# fsm.getStateElapsed() itself. PulseHSM already supports this natively via
+# addState()'s timeoutMs/timeoutNext - the IR simply has no field for it.
+
+project:
+  name: traffic_light
+  version: "1.0"
+  description: Signalised crossing with a pedestrian phase
+
+target:
+  board: esp32
+
+hardware:
+  devices:
+    lamp_red:    { type: digital_output, pin: GPIO25 }
+    lamp_amber:  { type: digital_output, pin: GPIO26 }
+    lamp_green:  { type: digital_output, pin: GPIO27 }
+    walk_lamp:   { type: digital_output, pin: GPIO12 }
+    walk_button: { type: digital_input,  pin: GPIO14, mode: INPUT_PULLUP }
+
+parameters:
+  green_ms:  { type: int, default: 20000, range: [5000, 120000], unit: ms }
+  amber_ms:  { type: int, default: 3000,  range: [2000, 6000],   unit: ms }
+  red_ms:    { type: int, default: 15000, range: [5000, 120000], unit: ms }
+  walk_ms:   { type: int, default: 12000, range: [5000, 60000],  unit: ms }
+
+events:
+  TIMER_EXPIRED: { source: timer, description: The current phase has run its time }
+  WALK_REQUEST:  { source: external, description: Pedestrian pressed the button }
+  GO_NIGHT:      { source: external }
+  GO_DAY:        { source: external }
+
+actions:
+  show_green:  { driver: gpio_control, params: {device: lamp_green, value: HIGH} }
+  show_amber:  { driver: gpio_control, params: {device: lamp_amber, value: HIGH} }
+  show_red:    { driver: gpio_control, params: {device: lamp_red,   value: HIGH} }
+  show_walk:   { driver: gpio_control, params: {device: walk_lamp,  value: HIGH} }
+  clear_walk:  { driver: gpio_control, params: {device: walk_lamp,  value: LOW} }
+  all_lamps_off: { driver: gpio_control, params: {devices: [lamp_red, lamp_amber, lamp_green], value: LOW} }
+  latch_request: { driver: request_latch }
+  flash_amber:   { driver: gpio_control, params: {device: lamp_amber, value: TOGGLE} }
+
+machine:
+  states:
+    operating:
+      initial: go
+      states:
+        go:
+        prepare_stop:
+        stop:
+        walk:
+    night:
+
+  transitions:
+    # GATE FINDING: this wants to be an *internal* transition - handle the
+    # event, run the action, stay put. The model has no way to say that, so it
+    # is written as a self-transition. Harmless today because states have no
+    # entry/exit actions, but wrong the moment they do.
+    - from: operating/go
+      on: WALK_REQUEST
+      to: operating/go
+      do: latch_request
+
+    - from: operating/go
+      on: TIMER_EXPIRED
+      to: operating/prepare_stop
+      do: [all_lamps_off, show_amber]
+
+    - from: operating/prepare_stop
+      on: TIMER_EXPIRED
+      to: operating/stop
+      do: [all_lamps_off, show_red]
+
+    - from: operating/stop
+      on: TIMER_EXPIRED
+      guard:
+        name: walk_requested
+        description: a pedestrian pressed the button during this cycle
+      to: operating/walk
+      do: show_walk
+
+    - from: operating/stop
+      on: TIMER_EXPIRED
+      to: operating/go
+      do: [all_lamps_off, show_green]
+
+    - from: operating/walk
+      on: TIMER_EXPIRED
+      to: operating/go
+      do: [clear_walk, all_lamps_off, show_green]
+
+    - from: operating
+      on: GO_NIGHT
+      to: night
+      do: all_lamps_off
+
+    - from: night
+      on: TIMER_EXPIRED
+      to: night
+      do: flash_amber
+
+    - from: night
+      on: GO_DAY
+      to: operating
+      do: [all_lamps_off, show_green]

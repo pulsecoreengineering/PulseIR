@@ -3119,15 +3119,24 @@
         return !claims.some((other) => other.kind === "bus" && other.owner === bus);
       });
       const owners = new Set(independent.map((c) => c.owner));
-      if (owners.size > 1)
-        conflicts.push({ pin, claims: independent });
+      if (owners.size <= 1)
+        continue;
+      const busOwners = new Set(independent.filter((c) => c.kind === "bus").map((c) => c.owner));
+      const deviceOwners = new Set(independent.filter((c) => c.kind === "device").map((c) => c.owner));
+      conflicts.push({
+        pin,
+        claims: independent,
+        busDeviceOnly: busOwners.size === 1 && deviceOwners.size === 1
+      });
     }
     return conflicts;
   }
   function describePinConflict(conflict) {
     const lines = conflict.claims.map((c) => `    ${c.written} \u2014 ${c.kind} "${c.owner}" (${c.role})`);
+    const hint = conflict.busDeviceOnly ? `
+  If the device sits on that bus, say so with "bus: ${conflict.claims.find((c) => c.kind === "bus").owner}" and this stops being a clash.` : "";
     return `Pin ${conflict.pin} is claimed by ${conflict.claims.length} different things:
-${lines.join("\n")}`;
+${lines.join("\n")}${hint}`;
   }
 
   // dist/src/parser/index.js
@@ -3356,8 +3365,14 @@ ${lines.join("\n")}`;
         system
       };
       const conflicts = findPinConflicts(project);
-      if (conflicts.length > 0) {
-        throw new ParseError(conflicts.map(describePinConflict).join("\n\n"));
+      const fatal = conflicts.filter((c) => !(legacy && c.busDeviceOnly));
+      const ambiguous = conflicts.filter((c) => legacy && c.busDeviceOnly);
+      for (const conflict of ambiguous) {
+        this.warnings.push(`${describePinConflict(conflict)}
+  Reported as a warning because this model uses the retired schema, which cannot declare that a device sits on a bus.`);
+      }
+      if (fatal.length > 0) {
+        throw new ParseError(fatal.map(describePinConflict).join("\n\n"));
       }
       return project;
     }
@@ -4289,6 +4304,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
       const actionName = "src/actions.cpp";
       return {
         generated: [
+          { path: "PulseHSM_config.h", contents: this.generateConfigHeader() },
           { path: headerName, contents: this.composeHeader(headerName) },
           { path: `${base}.ino`, contents: this.composeSketch(headerName) }
         ],
@@ -4430,12 +4446,53 @@ ${this.generateActionImplementations()}
     // =========================================================================
     // HEADER
     // =========================================================================
+    /**
+     * How big the runtime's tables have to be for this model.
+     *
+     * These decide the layout of the PulseHSM class, so every translation unit
+     * has to see the same values - see generateConfigHeader().
+     */
+    sizing() {
+      return {
+        maxStates: this.states.length + 2,
+        // + headroom for growth
+        maxEvents: this.nextPowerOfTwo(Math.max(8, this.project.system.events.length)),
+        levels: Math.max(1, ...this.states.map((s) => s.depth + 1))
+      };
+    }
+    /**
+     * PulseHSM_config.h - the sizing macros, in a file the runtime itself reads.
+     *
+     * A `#define` in the sketch is not enough. PulseHSM.cpp is its own
+     * translation unit and never sees it, so it keeps the defaults: the sketch
+     * allocates a table for N states while the runtime is compiled believing
+     * there are 8. Small models get away with it; the ninth state is silently
+     * refused and the machine is quietly wrong. PulseHSM.h includes this file,
+     * so every translation unit agrees.
+     */
+    generateConfigHeader() {
+      const { maxStates, maxEvents, levels } = this.sizing();
+      return `/**
+ * PulseHSM sizing for ${this.project.name} - GENERATED, DO NOT EDIT.
+ *
+ * PulseHSM.h includes this file, so the runtime and the sketch are compiled
+ * against the same table sizes. Keep it next to PulseHSM.h; deleting it drops
+ * the runtime back to its defaults, which are smaller than this model needs.
+ */
+#ifndef PULSEHSM_CONFIG_H
+#define PULSEHSM_CONFIG_H
+
+#define PULSEHSM_MAX_STATES  ${maxStates}   // ${this.states.length} states + headroom
+#define PULSEHSM_MAX_EVENTS  ${maxEvents}   // ring buffer, must be a power of two
+#define PULSEHSM_MAX_DEPTH   ${levels}   // deepest nesting, including the leaf
+
+#endif  // PULSEHSM_CONFIG_H
+`;
+    }
     generateHeader() {
       const { name, version } = this.project;
       const date = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
-      const maxStates = this.states.length + 2;
-      const maxEvents = this.nextPowerOfTwo(Math.max(8, this.project.system.events.length));
-      const levels = Math.max(1, ...this.states.map((s) => s.depth + 1));
+      const { maxStates, maxEvents, levels } = this.sizing();
       return `/**
  * PulseHSM Generated Code
  *
@@ -4451,7 +4508,11 @@ ${this.generateActionImplementations()}
  *   void action_<name>(SystemContext* ctx)
  */
 
-// Sized from the model. These must stay above the include to take effect.
+// Sized from the model, and repeated in PulseHSM_config.h so that PulseHSM.cpp
+// - a separate translation unit that never sees this file - is compiled
+// against the same table sizes. Defining them only here would leave the
+// runtime on its defaults, and states past the eighth would be silently
+// dropped. Generate with --outdir to get that file written for you.
 #define PULSEHSM_MAX_STATES  ${maxStates}   // ${this.states.length} states + headroom
 #define PULSEHSM_MAX_EVENTS  ${maxEvents}   // ring buffer, must be a power of two
 #define PULSEHSM_MAX_DEPTH   ${levels}   // deepest nesting, including the leaf
@@ -5510,6 +5571,32 @@ ${implementations.join("\n\n")}`;
         "hardware.yaml": '# Buses, devices and third-party libraries.\n#\n# Only libraries the platform does not imply need declaring: Wire, SPI and\n# WiFi come with the interfaces below.\n\nlibraries:\n  - name: Adafruit_BME280\n    include: Adafruit_BME280.h\n    version: "^2.2"\n    source: registry\n    description: Temperature, humidity and pressure over I2C\n\nhardware:\n  buses:\n    sensor_bus:\n      interface: i2c\n      sda: GPIO21\n      scl: GPIO22\n      frequency: 400000\n      library: Adafruit_BME280\n      description: Shared I2C bus for climate sensors\n\n    card_slot:\n      interface: spi\n      sck: GPIO18\n      miso: GPIO19\n      mosi: GPIO23\n      cs: GPIO5\n      description: SD card for offline logging\n\n    gps:\n      interface: uart\n      port: 2\n      baud: 9600\n      rx: GPIO16\n      tx: GPIO17\n\n    uplink:\n      interface: wifi\n      ssid: greenhouse-ap\n      hostname: greenhouse-01\n\n    broker:\n      interface: mqtt\n      host: mqtt.example.local\n      port: 8883\n      tls: true\n\n  devices:\n    air_temp:\n      type: bme280\n      bus: sensor_bus\n      address: 0x76\n      unit: degC\n\n    humidity:\n      type: bme280\n      bus: sensor_bus\n      address: 0x76\n      unit: percent\n\n    vent:\n      type: pwm_output\n      pin: GPIO25\n      channel: 0\n      frequency: 5000\n      resolution: 8\n\n    pump:\n      type: digital_output\n      pin: GPIO26\n',
         "machine.yaml": 'events:\n  START:\n    source: external\n    description: Local start button\n  STOP:\n    source: external\n  SAMPLE_DUE:\n    source: timer\n  TOO_HOT:\n    source: sensor\n  RECOVERED:\n    source: sensor\n  SENSOR_FAULT:\n    source: internal\n  # Declaring the source as mqtt is what makes this remotely triggerable.\n  REMOTE_START:\n    source: mqtt\n    description: Start requested from the dashboard\n\nactions:\n  open_log:\n    driver: sd_log\n  start_sampling:\n    driver: scheduler\n  stop_all:\n    driver: gpio_control\n    params: {devices: [vent, pump], value: LOW}\n  read_climate:\n    driver: bme280\n  publish_climate:\n    driver: mqtt_publish\n  open_vent:\n    driver: pwm_control\n    params: {device: vent, duty: 100}\n  close_vent:\n    driver: pwm_control\n    params: {device: vent, duty: 0}\n  raise_alarm:\n    driver: mqtt_publish\n\nmachine:\n  states:\n    idle:\n      description: Powered but not regulating\n    running:\n      initial: sampling\n      states:\n        sampling:\n        venting:\n    fault:\n\n  transitions:\n    - from: idle\n      on: START\n      to: running\n      do: [open_log, start_sampling]\n\n    - from: idle\n      on: REMOTE_START\n      to: running\n      do: [open_log, start_sampling]\n\n    - from: running\n      on: STOP\n      to: idle\n      do: stop_all\n\n    - from: running/sampling\n      on: SAMPLE_DUE\n      to: running/sampling\n      do: [read_climate, publish_climate]\n\n    - from: running/sampling\n      on: TOO_HOT\n      guard:\n        name: above_temp_setpoint\n        description: air temperature is above the setpoint plus hysteresis\n      to: running/venting\n      do: open_vent\n\n    - from: running/venting\n      on: RECOVERED\n      guard: back_within_band\n      to: running/sampling\n      do: close_vent\n\n    - from: "*"\n      on: SENSOR_FAULT\n      to: fault\n      do: [stop_all, raise_alarm]\n',
         "parameters.yaml": "parameters:\n  temp_setpoint:\n    type: float\n    default: 26.0\n    range: [10.0, 40.0]\n    unit: degC\n    description: Target air temperature\n\n  hysteresis:\n    type: float\n    default: 1.5\n    range: [0.1, 5.0]\n    unit: degC\n    description: Band around the setpoint before venting\n\n  sample_interval:\n    type: int\n    default: 5000\n    range: [500, 60000]\n    unit: ms\n    description: How often to sample the climate\n"
+      }
+    },
+    "traffic light \u2014 phases, a pedestrian request and a night mode": {
+      entry: "traffic_light.yaml",
+      files: {
+        "traffic_light.yaml": '# Traffic light with a pedestrian request.\n#\n# Single file: at this size, splitting would cost more than it saves.\n#\n# NOTE (gate finding): every transition here is driven by TIMER_EXPIRED, and\n# the model has nowhere to say how long a state lasts. The durations live in\n# `parameters` and the C code has to compare them against\n# fsm.getStateElapsed() itself. PulseHSM already supports this natively via\n# addState()\'s timeoutMs/timeoutNext - the IR simply has no field for it.\n\nproject:\n  name: traffic_light\n  version: "1.0"\n  description: Signalised crossing with a pedestrian phase\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    lamp_red:    { type: digital_output, pin: GPIO25 }\n    lamp_amber:  { type: digital_output, pin: GPIO26 }\n    lamp_green:  { type: digital_output, pin: GPIO27 }\n    walk_lamp:   { type: digital_output, pin: GPIO12 }\n    walk_button: { type: digital_input,  pin: GPIO14, mode: INPUT_PULLUP }\n\nparameters:\n  green_ms:  { type: int, default: 20000, range: [5000, 120000], unit: ms }\n  amber_ms:  { type: int, default: 3000,  range: [2000, 6000],   unit: ms }\n  red_ms:    { type: int, default: 15000, range: [5000, 120000], unit: ms }\n  walk_ms:   { type: int, default: 12000, range: [5000, 60000],  unit: ms }\n\nevents:\n  TIMER_EXPIRED: { source: timer, description: The current phase has run its time }\n  WALK_REQUEST:  { source: external, description: Pedestrian pressed the button }\n  GO_NIGHT:      { source: external }\n  GO_DAY:        { source: external }\n\nactions:\n  show_green:  { driver: gpio_control, params: {device: lamp_green, value: HIGH} }\n  show_amber:  { driver: gpio_control, params: {device: lamp_amber, value: HIGH} }\n  show_red:    { driver: gpio_control, params: {device: lamp_red,   value: HIGH} }\n  show_walk:   { driver: gpio_control, params: {device: walk_lamp,  value: HIGH} }\n  clear_walk:  { driver: gpio_control, params: {device: walk_lamp,  value: LOW} }\n  all_lamps_off: { driver: gpio_control, params: {devices: [lamp_red, lamp_amber, lamp_green], value: LOW} }\n  latch_request: { driver: request_latch }\n  flash_amber:   { driver: gpio_control, params: {device: lamp_amber, value: TOGGLE} }\n\nmachine:\n  states:\n    operating:\n      initial: go\n      states:\n        go:\n        prepare_stop:\n        stop:\n        walk:\n    night:\n\n  transitions:\n    # GATE FINDING: this wants to be an *internal* transition - handle the\n    # event, run the action, stay put. The model has no way to say that, so it\n    # is written as a self-transition. Harmless today because states have no\n    # entry/exit actions, but wrong the moment they do.\n    - from: operating/go\n      on: WALK_REQUEST\n      to: operating/go\n      do: latch_request\n\n    - from: operating/go\n      on: TIMER_EXPIRED\n      to: operating/prepare_stop\n      do: [all_lamps_off, show_amber]\n\n    - from: operating/prepare_stop\n      on: TIMER_EXPIRED\n      to: operating/stop\n      do: [all_lamps_off, show_red]\n\n    - from: operating/stop\n      on: TIMER_EXPIRED\n      guard:\n        name: walk_requested\n        description: a pedestrian pressed the button during this cycle\n      to: operating/walk\n      do: show_walk\n\n    - from: operating/stop\n      on: TIMER_EXPIRED\n      to: operating/go\n      do: [all_lamps_off, show_green]\n\n    - from: operating/walk\n      on: TIMER_EXPIRED\n      to: operating/go\n      do: [clear_walk, all_lamps_off, show_green]\n\n    - from: operating\n      on: GO_NIGHT\n      to: night\n      do: all_lamps_off\n\n    - from: night\n      on: TIMER_EXPIRED\n      to: night\n      do: flash_amber\n\n    - from: night\n      on: GO_DAY\n      to: operating\n      do: [all_lamps_off, show_green]\n'
+      }
+    },
+    "motor controller \u2014 speed phases and an overcurrent trip": {
+      entry: "motor_controller.yaml",
+      files: {
+        "motor_controller.yaml": '# Brushed DC motor with direction, speed ramp and overcurrent trip.\n#\n# GATE FINDING: the ramp itself (accelerate at N rpm/s) is arithmetic over\n# time, so it belongs in C - the model only says *which phase* the motor is\n# in. That is the escape hatch working exactly as intended.\n\nproject:\n  name: motor_controller\n  version: "1.0"\n  description: Speed-controlled DC motor with overcurrent protection\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    drive_pwm:   { type: pwm_output,    pin: GPIO25, channel: 0, frequency: 20000, resolution: 10 }\n    dir_forward: { type: digital_output, pin: GPIO26 }\n    dir_reverse: { type: digital_output, pin: GPIO27 }\n    # GPIO34/35 are input-only on this part, which suits a sense input.\n    current_sense: { type: analog_input, pin: GPIO34, unit: A }\n    estop:         { type: digital_input, pin: GPIO35 }\n\nparameters:\n  target_rpm:     { type: int,   default: 1200, range: [0, 3000],   unit: rpm }\n  ramp_rate:      { type: int,   default: 300,  range: [10, 2000],  unit: rpm_per_s }\n  trip_current:   { type: float, default: 4.5,  range: [0.5, 20.0], unit: A }\n  restart_delay:  { type: int,   default: 5000, range: [0, 60000],  unit: ms }\n\nevents:\n  START:       { source: external }\n  STOP:        { source: external }\n  REVERSE:     { source: external }\n  AT_SPEED:    { source: internal, description: Ramp reached the target }\n  OVERCURRENT: { source: sensor }\n  ESTOP:       { source: external }\n  RESET:       { source: external }\n  TIMER_EXPIRED: { source: timer }\n\nactions:\n  engage_forward: { driver: gpio_control, params: {device: dir_forward, value: HIGH} }\n  engage_reverse: { driver: gpio_control, params: {device: dir_reverse, value: HIGH} }\n  release_drive:  { driver: pwm_control,  params: {device: drive_pwm, duty: 0} }\n  begin_ramp:     { driver: ramp }\n  hold_speed:     { driver: pwm_control }\n  begin_coast:    { driver: ramp, params: {to: 0} }\n  latch_fault:    { driver: fault_latch }\n  clear_fault:    { driver: fault_latch, params: {clear: true} }\n\nmachine:\n  states:\n    stopped:\n    running:\n      initial: accelerating\n      states:\n        accelerating:\n        cruising:\n        decelerating:\n    tripped:\n\n  transitions:\n    - from: stopped\n      on: START\n      to: running\n      do: [engage_forward, begin_ramp]\n\n    - from: running/accelerating\n      on: AT_SPEED\n      to: running/cruising\n      do: hold_speed\n\n    - from: running\n      on: STOP\n      to: running/decelerating\n      do: begin_coast\n\n    - from: running/decelerating\n      on: AT_SPEED\n      to: stopped\n      do: release_drive\n\n    - from: running/cruising\n      on: REVERSE\n      to: running/decelerating\n      do: begin_coast\n\n    # Overcurrent and e-stop must work from any phase of running, and from\n    # stopped too - a shorted output can trip with the drive released.\n    - from: "*"\n      on: OVERCURRENT\n      guard:\n        name: over_trip_current\n        description: sensed current exceeded trip_current for the debounce window\n      to: tripped\n      do: [release_drive, latch_fault]\n\n    - from: "*"\n      on: ESTOP\n      to: tripped\n      do: [release_drive, latch_fault]\n\n    # GATE FINDING: this should be "wait restart_delay, then allow reset".\n    # With no timeout in the model, restart_delay is a parameter the C code\n    # has to enforce inside the guard.\n    - from: tripped\n      on: RESET\n      guard:\n        name: restart_delay_elapsed\n        description: restart_delay has passed since the trip\n      to: stopped\n      do: clear_fault\n'
+      }
+    },
+    "pump & tank \u2014 float switches, dry-run and overfill": {
+      entry: "pump_tank.yaml",
+      files: {
+        "pump_tank.yaml": '# Tank level control with dry-run protection.\n#\n# Float switches are the classic hysteresis case: fill until the high float\n# closes, then wait for the low float to open before filling again.\n\nproject:\n  name: pump_tank\n  version: "1.0"\n  description: Tank fill control with dry-run and overflow protection\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    pump:        { type: digital_output, pin: GPIO25 }\n    inlet_valve: { type: digital_output, pin: GPIO26 }\n    alarm:       { type: digital_output, pin: GPIO27 }\n    float_low:   { type: digital_input,  pin: GPIO34, mode: INPUT }\n    float_high:  { type: digital_input,  pin: GPIO35, mode: INPUT }\n    flow_sense:  { type: digital_input,  pin: GPIO14, mode: INPUT_PULLUP }\n\nparameters:\n  dry_run_ms:    { type: int, default: 8000,  range: [1000, 60000], unit: ms }\n  settle_ms:     { type: int, default: 2000,  range: [200, 30000],  unit: ms }\n  max_fill_ms:   { type: int, default: 600000, range: [10000, 3600000], unit: ms }\n\nevents:\n  LEVEL_LOW:     { source: sensor, description: Low float opened }\n  LEVEL_HIGH:    { source: sensor, description: High float closed }\n  NO_FLOW:       { source: sensor, description: Flow sensor saw nothing while pumping }\n  FAULT_RESET:   { source: external }\n  TIMER_EXPIRED: { source: timer }\n\nactions:\n  start_pump:  { driver: gpio_control, params: {device: pump, value: HIGH} }\n  stop_pump:   { driver: gpio_control, params: {device: pump, value: LOW} }\n  open_inlet:  { driver: gpio_control, params: {device: inlet_valve, value: HIGH} }\n  close_inlet: { driver: gpio_control, params: {device: inlet_valve, value: LOW} }\n  raise_alarm: { driver: gpio_control, params: {device: alarm, value: HIGH} }\n  clear_alarm: { driver: gpio_control, params: {device: alarm, value: LOW} }\n\nmachine:\n  states:\n    idle:\n      description: Level is fine; waiting for the low float\n    filling:\n      initial: priming\n      states:\n        priming:\n          description: Pump on, waiting to see flow before trusting it\n        pumping:\n    fault:\n      initial: dry_run\n      states:\n        dry_run:\n        overfill:\n\n  transitions:\n    - from: idle\n      on: LEVEL_LOW\n      to: filling\n      do: [open_inlet, start_pump]\n\n    # GATE FINDING: "if no flow within dry_run_ms, trip" is a timeout on the\n    # priming state. Written as an event the C code has to raise itself.\n    - from: filling/priming\n      on: NO_FLOW\n      to: fault/dry_run\n      do: [stop_pump, close_inlet, raise_alarm]\n\n    - from: filling/priming\n      on: TIMER_EXPIRED\n      guard:\n        name: flow_established\n        description: the flow sensor has been pulsing for settle_ms\n      to: filling/pumping\n\n    - from: filling\n      on: LEVEL_HIGH\n      to: idle\n      do: [stop_pump, close_inlet]\n\n    # Overfill: the high float should have stopped us. If we are still filling\n    # past max_fill_ms, something is stuck.\n    - from: filling\n      on: TIMER_EXPIRED\n      guard:\n        name: fill_ran_too_long\n        description: filling has continued past max_fill_ms\n      to: fault/overfill\n      do: [stop_pump, close_inlet, raise_alarm]\n\n    - from: fault\n      on: FAULT_RESET\n      to: idle\n      do: clear_alarm\n'
+      }
+    },
+    "sensor gateway \u2014 a field bus, an uplink and degraded operation": {
+      entry: "pulse.yaml",
+      files: {
+        "hardware.yaml": 'libraries:\n  - name: ModbusMaster\n    include: ModbusMaster.h\n    version: "^2.0"\n    source: registry\n    description: Modbus RTU over RS-485\n\nhardware:\n  buses:\n    field_bus:\n      interface: uart\n      port: 2\n      baud: 19200\n      rx: GPIO16\n      tx: GPIO17\n      library: ModbusMaster\n      description: RS-485 to the field devices\n\n    local_bus:\n      interface: i2c\n      sda: GPIO21\n      scl: GPIO22\n      frequency: 100000\n\n    uplink:\n      interface: wifi\n      ssid: plant-scada\n      hostname: gateway-01\n\n    broker:\n      interface: mqtt\n      host: mqtt.plant.local\n      port: 8883\n      tls: true\n\n  devices:\n    cabinet_temp: { type: bme280, bus: local_bus, address: 0x76, unit: degC }\n    cabinet_rh:   { type: bme280, bus: local_bus, address: 0x76, unit: percent }\n    # Field readings arrive over Modbus, so they have no pin of their own.\n    line_pressure: { type: modbus_input, class: sensor, bus: field_bus, register: 30001, unit: bar }\n    line_flow:     { type: modbus_input, class: sensor, bus: field_bus, register: 30003, unit: lpm }\n    status_led:    { type: digital_output, pin: GPIO2 }\n    fault_relay:   { type: digital_output, pin: GPIO26 }\n',
+        "machine.yaml": 'parameters:\n  poll_interval:  { type: int, default: 2000,  range: [200, 60000],  unit: ms }\n  publish_every:  { type: int, default: 5000,  range: [1000, 300000], unit: ms }\n  retry_backoff:  { type: int, default: 5000,  range: [1000, 120000], unit: ms }\n  max_retries:    { type: int, default: 5,     range: [1, 100] }\n\nevents:\n  LINK_UP:       { source: internal }\n  LINK_DOWN:     { source: internal }\n  BROKER_UP:     { source: internal }\n  BROKER_DOWN:   { source: internal }\n  POLL_DUE:      { source: timer }\n  PUBLISH_DUE:   { source: timer }\n  FIELD_TIMEOUT: { source: internal, description: A field device stopped answering }\n  RESET:         { source: mqtt, description: Remote reset from the dashboard }\n  TIMER_EXPIRED: { source: timer }\n\nactions:\n  begin_wifi:      { driver: wifi_connect }\n  begin_broker:    { driver: mqtt_connect }\n  poll_field:      { driver: modbus_poll }\n  publish_batch:   { driver: mqtt_publish }\n  buffer_batch:    { driver: ring_buffer, params: {on_full: drop_oldest} }\n  drain_buffer:    { driver: ring_buffer, params: {drain: true} }\n  show_ok:         { driver: gpio_control, params: {device: status_led, value: HIGH} }\n  show_degraded:   { driver: gpio_control, params: {device: status_led, value: TOGGLE} }\n  trip_fault:      { driver: gpio_control, params: {device: fault_relay, value: HIGH} }\n  clear_fault:     { driver: gpio_control, params: {device: fault_relay, value: LOW} }\n\nmachine:\n  states:\n    starting:\n    connecting:\n      initial: joining_wifi\n      states:\n        joining_wifi:\n        joining_broker:\n    online:\n      initial: polling\n      states:\n        polling:\n        publishing:\n    # Keep sampling with no uplink: the point of a gateway is not to lose data.\n    degraded:\n    faulted:\n\n  transitions:\n    - from: starting\n      on: TIMER_EXPIRED\n      to: connecting\n      do: begin_wifi\n\n    - from: connecting/joining_wifi\n      on: LINK_UP\n      to: connecting/joining_broker\n      do: begin_broker\n\n    - from: connecting/joining_broker\n      on: BROKER_UP\n      to: online\n      do: [show_ok, drain_buffer]\n\n    # GATE FINDING: retry_backoff wants to be a timeout on connecting. With no\n    # timeout in the model the C code owns the retry clock and raises the event.\n    - from: connecting\n      on: TIMER_EXPIRED\n      guard:\n        name: backoff_elapsed\n        description: retry_backoff has passed since the last attempt\n      to: connecting\n      do: begin_wifi\n\n    - from: online/polling\n      on: POLL_DUE\n      to: online/polling\n      do: poll_field\n\n    - from: online\n      on: PUBLISH_DUE\n      to: online/publishing\n      do: publish_batch\n\n    - from: online/publishing\n      on: POLL_DUE\n      to: online/polling\n      do: poll_field\n\n    - from: online\n      on: BROKER_DOWN\n      to: degraded\n      do: show_degraded\n\n    - from: online\n      on: LINK_DOWN\n      to: degraded\n      do: show_degraded\n\n    # Degraded still samples; readings queue until the uplink returns.\n    - from: degraded\n      on: POLL_DUE\n      to: degraded\n      do: [poll_field, buffer_batch]\n\n    - from: degraded\n      on: TIMER_EXPIRED\n      guard:\n        name: backoff_elapsed\n        description: retry_backoff has passed since the last attempt\n      to: connecting\n      do: begin_wifi\n\n    - from: "*"\n      on: FIELD_TIMEOUT\n      guard:\n        name: retries_exhausted\n        description: a field device missed max_retries consecutive polls\n      to: faulted\n      do: trip_fault\n\n    - from: "*"\n      on: RESET\n      to: starting\n      do: clear_fault\n',
+        "pulse.yaml": '# Industrial sensor gateway: read a field bus, publish upstream.\n#\n# Multi-file, because unlike the other three this one has enough hardware and\n# enough behaviour that one file would be hard to review.\n\nproject:\n  name: sensor_gateway\n  version: "1.0"\n  description: Reads field sensors and republishes them to a dashboard\n\ntarget:\n  board: esp32\n\nimports:\n  - hardware.yaml\n  - machine.yaml\n'
       }
     }
   };

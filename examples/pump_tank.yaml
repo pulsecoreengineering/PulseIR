@@ -1,0 +1,97 @@
+# Tank level control with dry-run protection.
+#
+# Float switches are the classic hysteresis case: fill until the high float
+# closes, then wait for the low float to open before filling again.
+
+project:
+  name: pump_tank
+  version: "1.0"
+  description: Tank fill control with dry-run and overflow protection
+
+target:
+  board: esp32
+
+hardware:
+  devices:
+    pump:        { type: digital_output, pin: GPIO25 }
+    inlet_valve: { type: digital_output, pin: GPIO26 }
+    alarm:       { type: digital_output, pin: GPIO27 }
+    float_low:   { type: digital_input,  pin: GPIO34, mode: INPUT }
+    float_high:  { type: digital_input,  pin: GPIO35, mode: INPUT }
+    flow_sense:  { type: digital_input,  pin: GPIO14, mode: INPUT_PULLUP }
+
+parameters:
+  dry_run_ms:    { type: int, default: 8000,  range: [1000, 60000], unit: ms }
+  settle_ms:     { type: int, default: 2000,  range: [200, 30000],  unit: ms }
+  max_fill_ms:   { type: int, default: 600000, range: [10000, 3600000], unit: ms }
+
+events:
+  LEVEL_LOW:     { source: sensor, description: Low float opened }
+  LEVEL_HIGH:    { source: sensor, description: High float closed }
+  NO_FLOW:       { source: sensor, description: Flow sensor saw nothing while pumping }
+  FAULT_RESET:   { source: external }
+  TIMER_EXPIRED: { source: timer }
+
+actions:
+  start_pump:  { driver: gpio_control, params: {device: pump, value: HIGH} }
+  stop_pump:   { driver: gpio_control, params: {device: pump, value: LOW} }
+  open_inlet:  { driver: gpio_control, params: {device: inlet_valve, value: HIGH} }
+  close_inlet: { driver: gpio_control, params: {device: inlet_valve, value: LOW} }
+  raise_alarm: { driver: gpio_control, params: {device: alarm, value: HIGH} }
+  clear_alarm: { driver: gpio_control, params: {device: alarm, value: LOW} }
+
+machine:
+  states:
+    idle:
+      description: Level is fine; waiting for the low float
+    filling:
+      initial: priming
+      states:
+        priming:
+          description: Pump on, waiting to see flow before trusting it
+        pumping:
+    fault:
+      initial: dry_run
+      states:
+        dry_run:
+        overfill:
+
+  transitions:
+    - from: idle
+      on: LEVEL_LOW
+      to: filling
+      do: [open_inlet, start_pump]
+
+    # GATE FINDING: "if no flow within dry_run_ms, trip" is a timeout on the
+    # priming state. Written as an event the C code has to raise itself.
+    - from: filling/priming
+      on: NO_FLOW
+      to: fault/dry_run
+      do: [stop_pump, close_inlet, raise_alarm]
+
+    - from: filling/priming
+      on: TIMER_EXPIRED
+      guard:
+        name: flow_established
+        description: the flow sensor has been pulsing for settle_ms
+      to: filling/pumping
+
+    - from: filling
+      on: LEVEL_HIGH
+      to: idle
+      do: [stop_pump, close_inlet]
+
+    # Overfill: the high float should have stopped us. If we are still filling
+    # past max_fill_ms, something is stuck.
+    - from: filling
+      on: TIMER_EXPIRED
+      guard:
+        name: fill_ran_too_long
+        description: filling has continued past max_fill_ms
+      to: fault/overfill
+      do: [stop_pump, close_inlet, raise_alarm]
+
+    - from: fault
+      on: FAULT_RESET
+      to: idle
+      do: clear_alarm

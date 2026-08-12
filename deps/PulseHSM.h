@@ -3,7 +3,20 @@
 
 #include <Arduino.h>
 
-// Compile-time configuration
+// Compile-time configuration.
+//
+// These sizes decide the layout of PulseHSM, so *every* translation unit has
+// to agree on them. A #define in the .ino cannot do that: PulseHSM.cpp is
+// compiled separately and would keep the defaults, producing two different
+// classes with the same name. Put the values in PulseHSM_config.h beside this
+// header instead - it is picked up here, so every TU sees the same sizes.
+// PulseIR generates that file for you.
+#if defined(__has_include)
+#  if __has_include("PulseHSM_config.h")
+#    include "PulseHSM_config.h"
+#  endif
+#endif
+
 #ifndef PULSEHSM_MAX_STATES
 #define PULSEHSM_MAX_STATES 8
 #endif

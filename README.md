@@ -183,7 +183,25 @@ imports:
 - Only the entry file may declare `project`.
 - Import cycles and missing files are reported, naming the file that asked.
 
-See `examples/boiler/` and `examples/greenhouse/`.
+See `examples/boiler/` and `examples/sensor_gateway/`.
+
+## Examples
+
+Six worked models, each generated, compiled, linked against the real runtime
+and run by the test suite. They double as the acceptance gate for the schema
+(PLAN.md §4) — every one is written in the schema as it stands, with no
+special cases.
+
+| Model | Shows |
+|---|---|
+| `traffic_light.yaml` | Phases, a pedestrian request, a night mode on the parent state |
+| `motor_controller.yaml` | Speed phases with the ramp arithmetic left in C, wildcard trip |
+| `pump_tank.yaml` | Float-switch hysteresis, dry-run and overfill protection |
+| `boiler/` | Multi-file, hierarchy, guards |
+| `greenhouse/` | Interfaces, third-party libraries, MQTT |
+| `sensor_gateway/` | Four buses, TLS uplink, keeps sampling with the link down |
+
+They open in the web editor from the dropdown, unchanged.
 
 ## Interfaces
 
@@ -289,11 +307,19 @@ node dist/src/cli.js examples/boiler/pulse.yaml --outdir build/boiler
 build/boiler/
 ├── boiler_control.ino            regenerated every run - do not edit
 ├── boiler_control_generated.h    regenerated every run - do not edit
+├── PulseHSM_config.h             runtime table sizes, from the model
 ├── PulseHSM.h / .cpp             the runtime, vendored so it just builds
 └── src/
     ├── guards.cpp                YOURS - written once, never overwritten
     └── actions.cpp               YOURS - written once, never overwritten
 ```
+
+`PulseHSM_config.h` is how the runtime learns how big your machine is.
+`PulseHSM.h` includes it, so the sketch and `PulseHSM.cpp` — separate
+translation units — are compiled against the same table sizes. Defining those
+sizes in the sketch alone is not enough: `PulseHSM.cpp` never sees it, keeps its
+default of eight states, and silently refuses the ninth. Keep the file next to
+`PulseHSM.h`.
 
 Fill in the stubs in `src/`, then regenerate as often as you like: the sketch
 and header are rewritten, and your implementations are left alone. The folder
