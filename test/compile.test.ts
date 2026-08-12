@@ -749,6 +749,32 @@ int main() {
   const output = execFileSync(binary, { encoding: 'utf8' });
   assert(output.includes('CHECKED'), 'the sizing check never ran');
   assert(!output.includes('REFUSED'), `the runtime refused a state:\n${output}`);
+
+  // Belt and braces: if the config header is ever lost, moved, or stale, the
+  // sketch has to say so rather than run a machine missing two states.
+  const sketch = files.generated.find(f => f.path.endsWith('.ino'))!.contents;
+  assert(
+    sketch.includes('FATAL: PulseHSM refused a state'),
+    'setup() does not check that every state was actually registered'
+  );
+  assert(
+    sketch.includes('S_FAULTED < 0'),
+    'the registration check does not cover the last state, which is the first to be dropped'
+  );
+
+  // The single-file path links against the same separately-compiled runtime,
+  // so it needs the same config header - `generate()` alone cannot be safe.
+  const codegen = new Codegen();
+  const single = codegen.generate(project);
+  const standalone = codegen.generateConfigHeader();
+  for (const macro of ['PULSEHSM_MAX_STATES', 'PULSEHSM_MAX_EVENTS', 'PULSEHSM_MAX_DEPTH']) {
+    const inSketch = new RegExp(`#define\\s+${macro}\\s+(\\d+)`).exec(single)?.[1];
+    const inConfig = new RegExp(`#define\\s+${macro}\\s+(\\d+)`).exec(standalone)?.[1];
+    assert(
+      !!inSketch && inSketch === inConfig,
+      `${macro} disagrees between the sketch (${inSketch}) and the config header (${inConfig})`
+    );
+  }
 });
 
 // ============================================================================

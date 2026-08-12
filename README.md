@@ -326,7 +326,12 @@ and header are rewritten, and your implementations are left alone. The folder
 opens directly in the Arduino IDE with nothing to install.
 
 `--output <file>` still emits one self-contained sketch, which is handy for a
-quick look but **loses your edits on the next run**.
+quick look but **loses your edits on the next run**. It writes
+`PulseHSM_config.h` alongside, because the sketch is one file but the build is
+not — `PulseHSM.cpp` is compiled separately and needs the same sizes.
+
+If that header ever goes missing, `setup()` says so on the serial port rather
+than running a machine that is quietly missing states.
 
 ## What the Compiler Catches
 

@@ -4469,6 +4469,9 @@ ${this.generateActionImplementations()}
      * there are 8. Small models get away with it; the ninth state is silently
      * refused and the machine is quietly wrong. PulseHSM.h includes this file,
      * so every translation unit agrees.
+     *
+     * Public because `--output` needs it too: a single-file sketch still links
+     * against a separately compiled PulseHSM.cpp. Call it after generate().
      */
     generateConfigHeader() {
       const { maxStates, maxEvents, levels } = this.sizing();
@@ -4992,12 +4995,33 @@ void setup() {
   // Register states. Parents are registered before their children.
 ${registrations}
 
+${this.registrationCheck()}
   // begin() must be given a leaf state.
   fsm.begin(${this.states[startIndex].symbol});
 
   Serial.print("Initial state: ");
   Serial.println(fsm.getCurrentName());
 }`;
+    }
+    /**
+     * Catch a runtime compiled against a smaller state table than this model
+     * needs.
+     *
+     * addState() returns -1 when the table is full, and a transition to -1 does
+     * nothing at all - the machine ignores states it appears to have. That is
+     * exactly what happens when PulseHSM.cpp cannot see PulseHSM_config.h, and
+     * it is silent, so the sketch says so itself.
+     */
+    registrationCheck() {
+      const test = this.states.map((s) => `${s.symbol} < 0`).join(" ||\n      ");
+      return `  // A negative index means the runtime ran out of state slots, which happens
+  // when PulseHSM.cpp was compiled without seeing PulseHSM_config.h. Silent
+  // otherwise: transitions to a dropped state simply do nothing.
+  if (${test}) {
+    Serial.println("FATAL: PulseHSM refused a state - its table is too small.");
+    Serial.println("       Keep PulseHSM_config.h beside PulseHSM.h and rebuild.");
+  }
+`;
     }
     // =========================================================================
     // LOOP

@@ -222,9 +222,18 @@ getting away with it.
 
 Fixed by moving the sizes into a generated `PulseHSM_config.h` that
 `PulseHSM.h` picks up via `__has_include`, so every translation unit is
-compiled against the same numbers. `--outdir` writes it beside the runtime it
-vendors. A regression test builds `sensor_gateway` the way the Arduino IDE
-would and asserts no state index came back negative.
+compiled against the same numbers. Both output paths write it: `--outdir`
+beside the runtime it vendors, and `--output` beside the sketch — a single-file
+sketch still links against a separately compiled `PulseHSM.cpp`, so it had the
+identical bug.
+
+Belt and braces, since a config header can still be moved or go stale:
+`setup()` now checks that every `addState()` came back with a real index and
+prints a `FATAL` line if not. The failure was silent, which was the worst part
+of it; now it is not.
+
+A regression test builds `sensor_gateway` the way the Arduino IDE would and
+asserts no state index came back negative.
 
 This is the clearest evidence so far for the project's own argument: a
 hand-written version of this firmware would have had the same bug, with nothing
