@@ -190,6 +190,64 @@ A device declares what it *is*, so the machine refers to `pump` rather than to
 GPIO25. `type` implies a class and a driver for the common cases; anything
 unfamiliar must state its `class` rather than be guessed at.
 
+## Nothing Appears That You Did Not Declare
+
+The generator will not open, configure or write to a peripheral the model never
+mentioned. A blink that declares one LED produces a sketch with **no `Serial`
+in it at all** — no `Serial.begin(115200)`, no boot banner, no "initial state"
+line. It is not only untidiness: on an AVR, printing to a `Serial` that was
+never begun fills the TX buffer and blocks forever.
+
+So if you want the board to talk, say so:
+
+```yaml
+hardware:
+  buses:
+    console: { interface: uart, port: 0, baud: 115200 }
+```
+
+With that declared, the action stubs trace themselves, the state machine
+reports its initial state, and `commands:` has somewhere to read from. Without
+it, none of that is generated — and `commands:` is an error that tells you the
+two lines to add.
+
+A test asserts this against every shipped model: every serial port the sketch
+touches has to be one the model declared.
+
+## What an Action Can Read
+
+An action is handed a `SystemContext*`, and the generated stub names everything
+on it rather than leaving you to find it in a header:
+
+```c
+void action_fan_start(SystemContext* ctx) {
+  // Declared params for this action (documentation only):
+  //   device: "fan"        -> FAN_PIN
+  //   duty: "fan_duty"     -> ctx->parameters->fan_duty
+  //
+  // Available on ctx:
+  //   ctx->parameters->report_ms   (int, ms)
+  //   ctx->parameters->fan_duty    (int)
+  //   ctx->sensors->temp           (float, degC) - you fill this in
+  //
+  // TODO: Implement the hardware calls for this action.
+}
+```
+
+**Every declared sensor gets a field on `SystemSensors`.** Declaring
+`temp: { type: analog_input, unit: degC }` gives you `ctx->sensors->temp`.
+Reading the hardware into it is your code — usually a task:
+
+```yaml
+tasks:
+  poll: { every: poll_ms, do: read_sensors }
+```
+
+`params:` stays **documentation**: the generator resolves each value to the C
+name it corresponds to and stops there. Turning `duty: fan_duty` into a
+`ledcWrite` call would mean the model deciding how a driver works, which is the
+line in FUNCTION_CONTRACT.md §6.
+
 ## Not Everything Is a State Machine
 
 PulseHSM is **one tenant** of this IR, not its foundation. A model with no

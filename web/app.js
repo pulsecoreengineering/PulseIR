@@ -5221,10 +5221,10 @@ ${registrations}
 ${this.registrationCheck()}
   // begin() must be given a leaf state.
   fsm.begin(${this.states[startIndex].symbol});
-
-  Serial.print("Initial state: ");
-  Serial.println(fsm.getCurrentName());
-`;
+${this.hasConsole ? `
+  ${this.consoleStream()}.print("Initial state: ");
+  ${this.consoleStream()}.println(fsm.getCurrentName());
+` : ""}`;
       return `// ============================================================================
 // SETUP
 // ============================================================================
@@ -5232,8 +5232,8 @@ ${this.registrationCheck()}
 ${componentComments}
 
 void setup() {
-${this.consoleSetup()}
-  // Buses and peripherals declared as resources
+  // Buses and peripherals declared as resources. Nothing else is opened: a
+  // peripheral the model did not declare has no business appearing here.
   setupInterfaces();
 
   // Wire up the context handed to every action
@@ -5248,46 +5248,36 @@ ${machineSetup}}`;
     // table is a lookup, so both are configuration, and both belong to projects
     // that never declare a state at all.
     // =========================================================================
-    /** The declared UART that owns the console, if the model declares one. */
-    consoleResource() {
+    /**
+     * The declared UART that owns the console, or undefined.
+     *
+     * Never invents one. The generator must not open, configure or write to a
+     * peripheral the model did not ask for - a model that says nothing about a
+     * serial port should produce a sketch that says nothing about one either.
+     */
+    declaredConsole() {
       const named = this.project.system.commands?.source;
       const buses = this.project.system.resources || [];
       if (named) {
         const found = buses.find((r) => r.name === named);
         if (!found) {
-          throw new CodegenError(`commands.source is "${named}", which is not a declared bus. Declare it under hardware.buses, or drop the line to use the default console.`);
+          throw new CodegenError(`commands.source is "${named}", which is not a declared bus. Declare it under hardware.buses.`);
         }
         return found;
       }
       return buses.find((r) => String(r.interface) === "uart" && Number(r.binding?.port ?? 1) === 0);
     }
+    /** True when the model declares somewhere for generated code to print. */
+    get hasConsole() {
+      return this.declaredConsole() !== void 0;
+    }
     /** The C expression naming the console stream, e.g. `Serial`. */
     consoleStream() {
-      const resource = this.consoleResource();
+      const resource = this.declaredConsole();
       if (!resource)
         return "Serial";
       const port = Number(resource.binding?.port ?? 1);
       return port === 0 ? "Serial" : `Serial${port}`;
-    }
-    /**
-     * Opening the console.
-     *
-     * A declared uart on port 0 already emits its own `Serial.begin(baud)` in
-     * setupInterfaces(), so opening it again here at a hardcoded 115200 would
-     * quietly override the baud rate the model asked for.
-     */
-    consoleSetup() {
-      const declared = this.consoleResource();
-      const banner = `  ${this.consoleStream()}.println("\\n\\n=== ${this.project.name} v${this.project.version} ===");`;
-      if (declared && Number(declared.binding?.port ?? 1) === 0) {
-        return `  // ${declared.name} opens the console; setupInterfaces() sets its baud rate.
-  setupInterfaces();
-${banner}
-`;
-      }
-      return `  Serial.begin(115200);
-${banner}
-`;
     }
     /** `enteredAt`-style globals and the loop body for `tasks:`. */
     generateTasks() {
@@ -5336,6 +5326,9 @@ ${blocks.join("\n\n")}`;
       const set2 = this.project.system.commands;
       if (!set2)
         return "";
+      if (!this.hasConsole) {
+        throw new CodegenError('commands: needs a console to read from, and the model declares none. Add one:\n  hardware:\n    buses:\n      console: { interface: uart, port: 0, baud: 115200 }\nand name it with "source: console" if you have more than one UART.');
+      }
       const stream = this.consoleStream();
       const cases = set2.commands.map((command) => {
         const calls = (command.actions || []).map((a) => `    action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
@@ -5402,6 +5395,64 @@ several_reset
     commandLine[commandLength++] = (char)next;
   }
 }`.replace(/several_reset/g, "        commandLength = 0;\n        commandOverflow = false;");
+    }
+    /**
+     * Where a declared param value can be found in C.
+     *
+     * `params:` is documentation - the generator never turns it into code - but
+     * documentation that says `duty: "fan_duty"` leaves the reader to work out
+     * that fan_duty is a parameter and what it is called in the generated
+     * struct. Naming the C expression closes that gap without writing the body.
+     */
+    resolveParamHint(value) {
+      if (typeof value !== "string")
+        return "";
+      const parameter = (this.project.system.parameters || []).find((p) => p.name === value);
+      if (parameter)
+        return `   -> ctx->parameters->${this.sanitize(value)}`;
+      const device = (this.project.system.components || []).find((c) => c.name === value);
+      if (device) {
+        const pin = device.config?.pin !== void 0 ? `${this.sanitizeUpper(value)}_PIN` : null;
+        return pin ? `   -> ${pin}` : `   -> device "${value}"`;
+      }
+      return "";
+    }
+    /** Every action the model actually uses, wherever it was used. */
+    everyUsedAction() {
+      return [
+        ...this.project.system.transitions.flatMap((t) => t.actions || []),
+        ...(this.project.system.tasks || []).flatMap((t) => t.actions),
+        ...(this.project.system.commands?.commands || []).flatMap((c) => c.actions || [])
+      ];
+    }
+    /**
+     * What a guard or action can read, listed by name in the stub.
+     *
+     * This is the answer to "my action needs a sensor reading - where does it
+     * come from". Everything the model declares is already on the context; the
+     * stub says so rather than leaving it to be discovered in a header.
+     */
+    contextDoc() {
+      const lines = [];
+      for (const parameter of this.project.system.parameters || []) {
+        const unit = parameter.unit ? `, ${parameter.unit}` : "";
+        lines.push(`  //   ctx->parameters->${this.sanitize(parameter.name)}   (${parameter.type}${unit})`);
+      }
+      const sensors = (this.project.system.components || []).filter((c) => c.class === "sensor");
+      for (const sensor of sensors) {
+        const unit = sensor.config?.unit ? `, ${sensor.config.unit}` : "";
+        lines.push(`  //   ctx->sensors->${this.sanitize(sensor.name)}   (float${unit}) - you fill this in`);
+      }
+      if (this.hasMachine) {
+        lines.push("  //   ctx->currentState, ctx->previousState   (compare with S_*)");
+        lines.push("  //   ctx->eventData   (payload of the event being dispatched)");
+      }
+      if (lines.length === 0)
+        return "";
+      return `  //
+  // Available on ctx:
+${lines.join("\n")}
+`;
     }
     /** The two C names a state with timed transitions needs. */
     timerNames(flat) {
@@ -5499,13 +5550,21 @@ ${blocks.join("\n\n")}`;
      * it is silent, so the sketch says so itself.
      */
     registrationCheck() {
+      if (!this.hasConsole) {
+        return `  // No console is declared, so this cannot be reported at runtime. If states
+  // seem to be missing - a transition that does nothing - check that
+  // PulseHSM_config.h sits beside PulseHSM.h, and declare a console to have
+  // the sketch say so itself.
+`;
+      }
       const test = this.states.map((s) => `${s.symbol} < 0`).join(" ||\n      ");
+      const stream = this.consoleStream();
       return `  // A negative index means the runtime ran out of state slots, which happens
   // when PulseHSM.cpp was compiled without seeing PulseHSM_config.h. Silent
   // otherwise: transitions to a dropped state simply do nothing.
   if (${test}) {
-    Serial.println("FATAL: PulseHSM refused a state - its table is too small.");
-    Serial.println("       Keep PulseHSM_config.h beside PulseHSM.h and rebuild.");
+    ${stream}.println("FATAL: PulseHSM refused a state - its table is too small.");
+    ${stream}.println("       Keep PulseHSM_config.h beside PulseHSM.h and rebuild.");
   }
 `;
     }
@@ -5588,13 +5647,14 @@ ${implementations}`;
 // No actions defined`;
       }
       const implementations = Array.from(this.actionNames).map((name) => {
-        const action = this.project.system.transitions.flatMap((t) => t.actions || []).find((a) => a.name === name);
-        const paramDoc = action?.params ? Object.entries(action.params).map(([k, v]) => `  //   ${k}: ${JSON.stringify(v)}`).join("\n") : "  //   (none)";
+        const action = this.everyUsedAction().find((a) => a.name === name);
+        const paramDoc = action?.params ? Object.entries(action.params).map(([k, v]) => `  //   ${k}: ${JSON.stringify(v)}${this.resolveParamHint(v)}`).join("\n") : "  //   (none)";
+        const trace = this.hasConsole ? `  ${this.consoleStream()}.println("  -> Action: ${name}");
+` : "";
         return `void action_${this.sanitize(name)}(SystemContext* ctx) {
-  Serial.println("  -> Action: ${name}");
-  // Parameters declared in the model (documentation only):
+${trace}  // Declared params for this action (documentation only):
 ${paramDoc}
-  //
+${this.contextDoc()}  //
   // TODO: Implement the hardware calls for this action.
   (void)ctx;
 }`;
