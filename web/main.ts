@@ -65,6 +65,7 @@ const boardSelect = $<HTMLSelectElement>('board');
 const staleNote = $<HTMLDivElement>('stale-note');
 const downloadButton = $<HTMLButtonElement>('download-button');
 const downloadMenu = $<HTMLDivElement>('download-menu');
+const themeButton = $<HTMLButtonElement>('theme-button');
 
 // ---------------------------------------------------------------------------
 // Model state
@@ -285,19 +286,35 @@ function setDownloadReady(ready: boolean): void {
  * with actionable next steps.
  */
 function showGuide(): void {
+  // Monochromatic SVG icons — use currentColor so they follow the card's text colour.
+  const machineIcon = `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="5" cy="11" r="3.5"/>
+    <circle cx="17" cy="11" r="3.5"/>
+    <path d="M8.5 11h5"/>
+    <path d="M12 8.5l2.5 2.5-2.5 2.5"/>
+  </svg>`;
+  const tasksIcon = `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M18 11A7 7 0 1 1 11 4"/>
+    <path d="M11 1.5l3.5 3.5-3.5 3.5"/>
+  </svg>`;
+  const commandsIcon = `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <polyline points="4 6 10 11 4 16"/>
+    <line x1="13" y1="16" x2="18" y2="16"/>
+  </svg>`;
+
   const cards: { icon: string; label: string; desc: string }[] = [
     {
-      icon: '🔀',
+      icon: machineIcon,
       label: 'machine:',
       desc: 'State machine — define states and the events that move between them. Use Insert ▾ → Logic → State machine.',
     },
     {
-      icon: '⏱',
+      icon: tasksIcon,
       label: 'tasks:',
       desc: 'Repeating background work — read a sensor, blink an LED, publish MQTT. Use Insert ▾ → Logic → Task.',
     },
     {
-      icon: '📡',
+      icon: commandsIcon,
       label: 'commands:',
       desc: 'Serial command dispatch — map text commands arriving over UART to actions. Use Insert ▾ → Logic → Command table.',
     },
@@ -306,7 +323,7 @@ function showGuide(): void {
   const cardHtml = cards.map(c => `
     <div class="guide-card">
       <div class="guide-card-icon">${c.icon}</div>
-      <div class="guide-card-label">${escapeHtml(c.label)}</div>
+      <div class="guide-card-label"><code>${escapeHtml(c.label)}</code></div>
       <p class="guide-card-desc">${escapeHtml(c.desc)}</p>
     </div>`).join('');
 
@@ -549,6 +566,60 @@ function render(): void {
 function syncBoard(board: string): void {
   boardSelect.value = board;
   boardSelect.classList.toggle('unset', board === '');
+}
+
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+type Theme = 'auto' | 'light' | 'dark';
+
+const THEME_KEY = 'pulseir.theme';
+
+const THEME_ICONS: Record<Theme, string> = {
+  auto: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+    <path d="M8 2v12M2 8h12" opacity=".35"/>
+    <path fill="currentColor" stroke="none" d="M8 2a6 6 0 0 1 0 12V2z"/>
+    <circle cx="8" cy="8" r="6"/>
+  </svg>`,
+  light: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+    <circle cx="8" cy="8" r="3"/>
+    <line x1="8" y1="1" x2="8" y2="2.5"/>
+    <line x1="8" y1="13.5" x2="8" y2="15"/>
+    <line x1="1" y1="8" x2="2.5" y2="8"/>
+    <line x1="13.5" y1="8" x2="15" y2="8"/>
+    <line x1="3.05" y1="3.05" x2="4.1" y2="4.1"/>
+    <line x1="11.9" y1="11.9" x2="12.95" y2="12.95"/>
+    <line x1="12.95" y1="3.05" x2="11.9" y2="4.1"/>
+    <line x1="4.1" y1="11.9" x2="3.05" y2="12.95"/>
+  </svg>`,
+  dark: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+    <path d="M13.5 10A6 6 0 0 1 6 2.5a5.5 5.5 0 1 0 7.5 7.5z"/>
+  </svg>`,
+};
+
+const THEME_LABELS: Record<Theme, string> = {
+  auto: 'Theme: auto (follows system)',
+  light: 'Theme: light',
+  dark: 'Theme: dark',
+};
+
+function applyTheme(theme: Theme): void {
+  const root = document.documentElement;
+  if (theme === 'auto') {
+    root.removeAttribute('data-theme');
+  } else {
+    root.setAttribute('data-theme', theme);
+  }
+  themeButton.innerHTML = THEME_ICONS[theme];
+  themeButton.title = THEME_LABELS[theme];
+}
+
+function cycleTheme(): void {
+  const current = (localStorage.getItem(THEME_KEY) as Theme | null) ?? 'auto';
+  const next: Theme = current === 'auto' ? 'light' : current === 'light' ? 'dark' : 'auto';
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
 }
 
 /**
@@ -1161,6 +1232,10 @@ function selectTab(name: keyof typeof panes): void {
 }
 
 function init(): void {
+  // Apply saved theme before anything renders to avoid a flash of wrong colours.
+  applyTheme((localStorage.getItem(THEME_KEY) as Theme | null) ?? 'auto');
+  themeButton.addEventListener('click', cycleTheme);
+
   for (const key of Object.keys(EXAMPLES)) {
     const option = document.createElement('option');
     option.value = key;

@@ -33,31 +33,41 @@
     --header-h: 46px;
     --bar-h: 36px;
   }
+  /* Dark vars shared between the media query and the explicit data-theme toggle */
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #14171c;
-      --panel: #1b1f26;
-      --border: #2c323c;
-      --text: #e6e8eb;
-      --dim: #98a1ae;
-      --accent: #62aaf5;
-      --ok-bg: #12281d;
-      --ok-fg: #7fd4a4;
-      --err-bg: #2e1618;
-      --err-fg: #f6a6a2;
-      --warn-bg: #2c2313;
-      --warn-fg: #e9c07a;
-      --code: #10131a;
-      --info-bg: #1a2640;
-      --info-fg: #89b4f8;
-      --sel: rgba(98, 170, 245, .26);
-
-      --y-key: #7cc0ff;
-      --y-string: #e8a87c;
-      --y-number: #d3a2f0;
-      --y-comment: #7d8794;
-      --y-anchor: #7fd4a4;
+    :root:not([data-theme="light"]) {
+      --bg: #14171c; --panel: #1b1f26; --border: #2c323c;
+      --text: #e6e8eb; --dim: #98a1ae; --accent: #62aaf5;
+      --ok-bg: #12281d; --ok-fg: #7fd4a4;
+      --err-bg: #2e1618; --err-fg: #f6a6a2;
+      --warn-bg: #2c2313; --warn-fg: #e9c07a;
+      --info-bg: #1a2640; --info-fg: #89b4f8;
+      --code: #10131a; --sel: rgba(98, 170, 245, .26);
+      --y-key: #7cc0ff; --y-string: #e8a87c; --y-number: #d3a2f0;
+      --y-comment: #7d8794; --y-anchor: #7fd4a4;
     }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14171c; --panel: #1b1f26; --border: #2c323c;
+    --text: #e6e8eb; --dim: #98a1ae; --accent: #62aaf5;
+    --ok-bg: #12281d; --ok-fg: #7fd4a4;
+    --err-bg: #2e1618; --err-fg: #f6a6a2;
+    --warn-bg: #2c2313; --warn-fg: #e9c07a;
+    --info-bg: #1a2640; --info-fg: #89b4f8;
+    --code: #10131a; --sel: rgba(98, 170, 245, .26);
+    --y-key: #7cc0ff; --y-string: #e8a87c; --y-number: #d3a2f0;
+    --y-comment: #7d8794; --y-anchor: #7fd4a4;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff; --panel: #f6f7f9; --border: #d9dde3;
+    --text: #16191d; --dim: #6b7280; --accent: #0b6bcb;
+    --ok-bg: #e7f5ec; --ok-fg: #10603a;
+    --err-bg: #fdeaea; --err-fg: #97231f;
+    --warn-bg: #fdf3e2; --warn-fg: #7a4b06;
+    --info-bg: #eef3fb; --info-fg: #1a4fa0;
+    --code: #f3f4f6; --sel: rgba(11, 107, 203, .20);
+    --y-key: #0a5ea8; --y-string: #9b3b16; --y-number: #7b3aa8;
+    --y-comment: #6b7280; --y-anchor: #10603a;
   }
 
   * { box-sizing: border-box; }
@@ -111,6 +121,18 @@
 
   /* Board selector glows amber when unset — impossible to miss */
   #board.unset { border-color: var(--warn-fg); color: var(--warn-fg); }
+
+  /* Theme toggle — icon-only button, no border at rest */
+  #theme-button {
+    display: flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; padding: 0;
+    border-color: transparent; background: transparent; border-radius: 6px;
+    color: var(--dim); flex-shrink: 0;
+  }
+  #theme-button:hover:not(:disabled) {
+    border-color: var(--border); color: var(--text);
+  }
+  #theme-button svg { display: block; }
 
   /* Project / example selectors */
   #project-button {
@@ -321,9 +343,11 @@
     align-items: start;
   }
   .guide-card-icon {
-    font-size: 22px; line-height: 1.2; grid-row: 1 / 3;
-    align-self: center;
+    grid-row: 1 / 3; align-self: center;
+    color: var(--dim);
+    width: 22px; height: 22px; flex-shrink: 0;
   }
+  .guide-card-icon svg { display: block; }
   .guide-card-label {
     font-family: var(--mono); font-size: 13px; font-weight: 600;
     color: var(--text); margin: 0 0 2px;
@@ -447,6 +471,15 @@
   <!-- Examples -->
   <label for="example">Load example</label>
   <select id="example"><option value="">— choose —</option></select>
+
+  <!-- Theme toggle: cycles auto → light → dark → auto -->
+  <button id="theme-button" title="Toggle theme (auto / light / dark)" aria-label="Toggle theme">
+    <!-- icon is replaced by JS -->
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+      <circle cx="8" cy="8" r="6"/>
+      <path d="M8 2v12M2 8h12" opacity=".4"/>
+    </svg>
+  </button>
 </header>
 
 <!-- Hidden file inputs driven from the project menu -->

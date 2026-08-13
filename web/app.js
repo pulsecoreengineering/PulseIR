@@ -7034,6 +7034,7 @@ ${implementations.join("\n\n")}`;
   var staleNote = $("stale-note");
   var downloadButton = $("download-button");
   var downloadMenu = $("download-menu");
+  var themeButton = $("theme-button");
   var store = new ProjectStore(localStorage);
   var workspace = { id: "", name: "", files: {}, entry: "", active: "", updatedAt: 0 };
   var current = null;
@@ -7143,19 +7144,33 @@ target:
     downloadButton.classList.toggle("ready", ready);
   }
   function showGuide() {
+    const machineIcon = `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="5" cy="11" r="3.5"/>
+    <circle cx="17" cy="11" r="3.5"/>
+    <path d="M8.5 11h5"/>
+    <path d="M12 8.5l2.5 2.5-2.5 2.5"/>
+  </svg>`;
+    const tasksIcon = `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M18 11A7 7 0 1 1 11 4"/>
+    <path d="M11 1.5l3.5 3.5-3.5 3.5"/>
+  </svg>`;
+    const commandsIcon = `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <polyline points="4 6 10 11 4 16"/>
+    <line x1="13" y1="16" x2="18" y2="16"/>
+  </svg>`;
     const cards = [
       {
-        icon: "\u{1F500}",
+        icon: machineIcon,
         label: "machine:",
         desc: "State machine \u2014 define states and the events that move between them. Use Insert \u25BE \u2192 Logic \u2192 State machine."
       },
       {
-        icon: "\u23F1",
+        icon: tasksIcon,
         label: "tasks:",
         desc: "Repeating background work \u2014 read a sensor, blink an LED, publish MQTT. Use Insert \u25BE \u2192 Logic \u2192 Task."
       },
       {
-        icon: "\u{1F4E1}",
+        icon: commandsIcon,
         label: "commands:",
         desc: "Serial command dispatch \u2014 map text commands arriving over UART to actions. Use Insert \u25BE \u2192 Logic \u2192 Command table."
       }
@@ -7163,7 +7178,7 @@ target:
     const cardHtml = cards.map((c) => `
     <div class="guide-card">
       <div class="guide-card-icon">${c.icon}</div>
-      <div class="guide-card-label">${escapeHtml2(c.label)}</div>
+      <div class="guide-card-label"><code>${escapeHtml2(c.label)}</code></div>
       <p class="guide-card-desc">${escapeHtml2(c.desc)}</p>
     </div>`).join("");
     panes.sketch.innerHTML = `
@@ -7331,6 +7346,49 @@ ${parser.warnings.join("\n")}`);
   function syncBoard(board) {
     boardSelect.value = board;
     boardSelect.classList.toggle("unset", board === "");
+  }
+  var THEME_KEY = "pulseir.theme";
+  var THEME_ICONS = {
+    auto: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+    <path d="M8 2v12M2 8h12" opacity=".35"/>
+    <path fill="currentColor" stroke="none" d="M8 2a6 6 0 0 1 0 12V2z"/>
+    <circle cx="8" cy="8" r="6"/>
+  </svg>`,
+    light: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+    <circle cx="8" cy="8" r="3"/>
+    <line x1="8" y1="1" x2="8" y2="2.5"/>
+    <line x1="8" y1="13.5" x2="8" y2="15"/>
+    <line x1="1" y1="8" x2="2.5" y2="8"/>
+    <line x1="13.5" y1="8" x2="15" y2="8"/>
+    <line x1="3.05" y1="3.05" x2="4.1" y2="4.1"/>
+    <line x1="11.9" y1="11.9" x2="12.95" y2="12.95"/>
+    <line x1="12.95" y1="3.05" x2="11.9" y2="4.1"/>
+    <line x1="4.1" y1="11.9" x2="3.05" y2="12.95"/>
+  </svg>`,
+    dark: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+    <path d="M13.5 10A6 6 0 0 1 6 2.5a5.5 5.5 0 1 0 7.5 7.5z"/>
+  </svg>`
+  };
+  var THEME_LABELS = {
+    auto: "Theme: auto (follows system)",
+    light: "Theme: light",
+    dark: "Theme: dark"
+  };
+  function applyTheme(theme) {
+    const root = document.documentElement;
+    if (theme === "auto") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.setAttribute("data-theme", theme);
+    }
+    themeButton.innerHTML = THEME_ICONS[theme];
+    themeButton.title = THEME_LABELS[theme];
+  }
+  function cycleTheme() {
+    const current2 = localStorage.getItem(THEME_KEY) ?? "auto";
+    const next = current2 === "auto" ? "light" : current2 === "light" ? "dark" : "auto";
+    localStorage.setItem(THEME_KEY, next);
+    applyTheme(next);
   }
   function applyBoardToYaml(board) {
     let text = source.value;
@@ -7811,6 +7869,8 @@ machine:
     localStorage.setItem("pulseir.tab", name);
   }
   function init() {
+    applyTheme(localStorage.getItem(THEME_KEY) ?? "auto");
+    themeButton.addEventListener("click", cycleTheme);
     for (const key of Object.keys(EXAMPLES)) {
       const option = document.createElement("option");
       option.value = key;
