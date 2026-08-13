@@ -1437,16 +1437,55 @@ function init(): void {
     download('libraries.json', current.libraries, 'application/json');
   });
 
-  // Tab in a textarea should indent, not escape to the next control.
+  // Tab and Enter — keep the editor from escaping focus and add auto-indent.
   source.addEventListener('keydown', event => {
-    if (event.key !== 'Tab') return;
-    event.preventDefault();
     const { selectionStart, selectionEnd, value } = source;
-    source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
-    source.selectionStart = source.selectionEnd = selectionStart + 2;
-    workspace.files[workspace.active] = source.value;
-    paint();
-    rerender();
+
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      if (selectionStart === selectionEnd) {
+        // No selection: insert two spaces at the cursor.
+        source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
+        source.selectionStart = source.selectionEnd = selectionStart + 2;
+      } else {
+        // Selection: indent every touched line by two spaces.
+        const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
+        const block = value.slice(lineStart, selectionEnd);
+        const indented = block.replace(/^/gm, '  ');
+        source.value = value.slice(0, lineStart) + indented + value.slice(selectionEnd);
+        source.selectionStart = lineStart;
+        source.selectionEnd = lineStart + indented.length;
+      }
+      workspace.files[workspace.active] = source.value;
+      paint();
+      rerender();
+      return;
+    }
+
+    // Enter: auto-indent to match the current line, deepening by two spaces
+    // when the line ends with ':' (block key with no inline value).
+    // Shift+Enter inserts a plain newline — useful to escape auto-indent.
+    if (event.key === 'Enter' && !event.shiftKey) {
+      if (selectionStart !== selectionEnd) return; // let default handle range selections
+
+      const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
+      const currentLine = value.slice(lineStart, selectionStart);
+
+      // Leading whitespace of the current line.
+      const indent = /^[ \t]*/.exec(currentLine)![0];
+
+      // Deepen when the text up to the cursor ends with ':' — a block mapping
+      // key with nothing after it yet. Covers `hardware:`, `buses:`, etc.
+      const deeper = /:\s*$/.test(currentLine);
+
+      event.preventDefault();
+      const insertion = '\n' + indent + (deeper ? '  ' : '');
+      source.value = value.slice(0, selectionStart) + insertion + value.slice(selectionEnd);
+      source.selectionStart = source.selectionEnd = selectionStart + insertion.length;
+      workspace.files[workspace.active] = source.value;
+      paint();
+      rerender();
+    }
   });
 
   projectButton.addEventListener('click', event => {

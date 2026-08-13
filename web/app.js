@@ -8123,15 +8123,40 @@ machine:
       download("libraries.json", current.libraries, "application/json");
     });
     source.addEventListener("keydown", (event) => {
-      if (event.key !== "Tab")
-        return;
-      event.preventDefault();
       const { selectionStart, selectionEnd, value } = source;
-      source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
-      source.selectionStart = source.selectionEnd = selectionStart + 2;
-      workspace.files[workspace.active] = source.value;
-      paint();
-      rerender();
+      if (event.key === "Tab") {
+        event.preventDefault();
+        if (selectionStart === selectionEnd) {
+          source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
+          source.selectionStart = source.selectionEnd = selectionStart + 2;
+        } else {
+          const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
+          const block = value.slice(lineStart, selectionEnd);
+          const indented = block.replace(/^/gm, "  ");
+          source.value = value.slice(0, lineStart) + indented + value.slice(selectionEnd);
+          source.selectionStart = lineStart;
+          source.selectionEnd = lineStart + indented.length;
+        }
+        workspace.files[workspace.active] = source.value;
+        paint();
+        rerender();
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey) {
+        if (selectionStart !== selectionEnd)
+          return;
+        const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
+        const currentLine = value.slice(lineStart, selectionStart);
+        const indent = /^[ \t]*/.exec(currentLine)[0];
+        const deeper = /:\s*$/.test(currentLine);
+        event.preventDefault();
+        const insertion = "\n" + indent + (deeper ? "  " : "");
+        source.value = value.slice(0, selectionStart) + insertion + value.slice(selectionEnd);
+        source.selectionStart = source.selectionEnd = selectionStart + insertion.length;
+        workspace.files[workspace.active] = source.value;
+        paint();
+        rerender();
+      }
     });
     projectButton.addEventListener("click", (event) => {
       event.stopPropagation();
