@@ -879,6 +879,37 @@ function applyBoardToYaml(board: string): void {
   paint();
 }
 
+/**
+ * Splice `filename` into the entry file's `imports:` list.
+ *
+ * Three cases:
+ *   1. `imports:` list already exists → append a new item.
+ *   2. No list but `project:` block exists → insert `imports:` after it.
+ *   3. Neither → prepend at the top.
+ *
+ * Text-manipulation only — comments and formatting are preserved.
+ */
+function addImportToYaml(text: string, filename: string): string {
+  const entry = `  - ${filename}`;
+
+  // Case 1: existing imports block — append after the last item in the list.
+  const block = /^([ \t]*imports:[ \t]*\n(?:[ \t]+-[^\n]*\n)*)/m.exec(text);
+  if (block) {
+    const at = block.index + block[0].length;
+    return text.slice(0, at) + entry + '\n' + text.slice(at);
+  }
+
+  // Case 2: no imports block — add one after the project: block.
+  const proj = /^project:[^\n]*\n(?:[ \t]+[^\n]*\n?)*/m.exec(text);
+  if (proj) {
+    const at = proj.index + proj[0].length;
+    return text.slice(0, at) + `\nimports:\n${entry}\n` + text.slice(at);
+  }
+
+  // Case 3: prepend.
+  return `imports:\n${entry}\n\n` + text;
+}
+
 // ---------------------------------------------------------------------------
 // File actions
 // ---------------------------------------------------------------------------
@@ -906,12 +937,15 @@ function addFile(): void {
     return;
   }
 
-  workspace.files[clean] = `# ${clean}
-#
-# Add this to the entry file's import list:
-#   imports:
-#     - ${clean}
-`;
+  workspace.files[clean] = `# ${clean}\n`;
+
+  // Automatically wire the new file into the entry file's imports list so
+  // the parser can reach it without the user having to edit it manually.
+  const entryText = workspace.files[workspace.entry] ?? '';
+  const wired = addImportToYaml(entryText, clean);
+  workspace.files[workspace.entry] = wired;
+  if (workspace.active === workspace.entry) source.value = wired;
+
   selectFile(clean);
   render();
 }
@@ -1227,6 +1261,11 @@ function visibleOutput(): string {
 interface Snippet { label: string; group: string; yaml: string; }
 
 const SNIPPETS: Snippet[] = [
+  // ── Project ───────────────────────────────────────────────────────────────
+  { group: 'Project', label: 'Import another file',
+    yaml: `imports:\n  - part.yaml`
+  },
+
   // ── Serial ───────────────────────────────────────────────────────────────
   { group: 'Serial', label: 'Console (UART 0 — USB serial monitor)',
     yaml:

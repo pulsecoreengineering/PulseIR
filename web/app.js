@@ -7908,6 +7908,26 @@ target:
     workspace.files[workspace.active] = text;
     paint();
   }
+  function addImportToYaml(text, filename) {
+    const entry = `  - ${filename}`;
+    const block = /^([ \t]*imports:[ \t]*\n(?:[ \t]+-[^\n]*\n)*)/m.exec(text);
+    if (block) {
+      const at = block.index + block[0].length;
+      return text.slice(0, at) + entry + "\n" + text.slice(at);
+    }
+    const proj = /^project:[^\n]*\n(?:[ \t]+[^\n]*\n?)*/m.exec(text);
+    if (proj) {
+      const at = proj.index + proj[0].length;
+      return text.slice(0, at) + `
+imports:
+${entry}
+` + text.slice(at);
+    }
+    return `imports:
+${entry}
+
+` + text;
+  }
   function selectFile(name) {
     if (workspace.files[name] === void 0)
       return;
@@ -7931,11 +7951,12 @@ target:
       return;
     }
     workspace.files[clean] = `# ${clean}
-#
-# Add this to the entry file's import list:
-#   imports:
-#     - ${clean}
 `;
+    const entryText = workspace.files[workspace.entry] ?? "";
+    const wired = addImportToYaml(entryText, clean);
+    workspace.files[workspace.entry] = wired;
+    if (workspace.active === workspace.entry)
+      source.value = wired;
     selectFile(clean);
     render();
   }
@@ -8157,6 +8178,13 @@ ${libSection}
     }
   }
   var SNIPPETS = [
+    // ── Project ───────────────────────────────────────────────────────────────
+    {
+      group: "Project",
+      label: "Import another file",
+      yaml: `imports:
+  - part.yaml`
+    },
     // ── Serial ───────────────────────────────────────────────────────────────
     {
       group: "Serial",
