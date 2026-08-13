@@ -378,6 +378,9 @@ export interface PulseProject {
   version: string;
   description?: string;
 
+  /** Parsed from the top-level `pulseir:` field. Absent when not declared. */
+  schemaVersion?: number;
+
   target?: Target;
 
   // The system

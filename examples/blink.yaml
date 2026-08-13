@@ -8,6 +8,8 @@
 # the interval is a declared parameter with a range, and `toggle_led` arrives
 # as a stub with the right signature.
 
+pulseir: "1"
+
 project:
   name: blink
   version: "1.0"

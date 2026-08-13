@@ -3213,6 +3213,7 @@ ${lines.join("\n")}${hint}`;
     "libraries"
   ];
   var MAX_INCLUDE_DEPTH = 32;
+  var SCHEMA_VERSION = 1;
   var ParseError = class extends Error {
     constructor(message, line, column) {
       super(message);
@@ -3420,10 +3421,12 @@ ${lines.join("\n")}${hint}`;
         this.warnings.push('This model uses the retired "system:" block. Split it into the top-level domains (target, hardware, parameters, events, machine, actions) - see PLAN.md. Support will be removed in the next release.');
       }
       const system = legacy ? this.parseSystem(raw.system) : this.parseDomains(raw);
+      const schemaVersion = this.parseSchemaVersion(raw.pulseir);
       const project = {
         name: projectRaw.name || "unnamed",
         version: projectRaw.version || "0.1.0",
         description: projectRaw.description,
+        schemaVersion,
         target: this.parseTarget(raw.target),
         system
       };
@@ -3438,6 +3441,18 @@ ${lines.join("\n")}${hint}`;
         throw new ParseError(fatal.map(describePinConflict).join("\n\n"));
       }
       return project;
+    }
+    parseSchemaVersion(raw) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      const ver = typeof raw === "number" ? Math.floor(raw) : typeof raw === "string" ? parseInt(raw, 10) : NaN;
+      if (isNaN(ver) || ver < 1) {
+        throw new ParseError(`"pulseir" must be a positive schema version number (e.g. pulseir: "1"), got ${JSON.stringify(raw)}`);
+      }
+      if (ver > SCHEMA_VERSION) {
+        this.warnings.push(`This model declares pulseir: "${ver}" but this toolchain only understands schema version ${SCHEMA_VERSION}. Some fields may be ignored. Update the toolchain, or remove the version declaration to silence this warning.`);
+      }
+      return ver;
     }
     parseTarget(raw) {
       if (raw === void 0 || raw === null)
@@ -5541,6 +5556,45 @@ several_reset
       return "";
     }
     /**
+     * Board-aware hint for the PWM write call, shown in action stubs when an
+     * action references a pwm_output device.
+     *
+     * The function name differs by board and by ESP32 core version, so this
+     * comment is the difference between a student calling the wrong API and
+     * getting a compile error they cannot diagnose.
+     */
+    pwmWriteHint(action) {
+      if (action.driver !== "pwm_control")
+        return "";
+      const deviceName = String(action.params?.device ?? "");
+      const device = (this.project.system.components || []).find((c) => c.name === deviceName);
+      if (!device)
+        return "";
+      const pinMacro = `${this.sanitizeUpper(deviceName)}_PIN`;
+      const channelMacro = `${this.sanitizeUpper(deviceName)}_CHANNEL`;
+      const dutyRaw = action.params?.duty;
+      const dutyParam = (this.project.system.parameters || []).find((p) => p.name === String(dutyRaw));
+      const dutyExpr = dutyParam ? `ctx->parameters->${this.sanitize(String(dutyRaw))}` : dutyRaw !== void 0 ? String(dutyRaw) : "0";
+      const board = (this.project.target?.board ?? "").toLowerCase();
+      const isEsp32 = /esp32/.test(board);
+      const isAvr = /avr|uno|mega|nano|atmega|leonardo/.test(board);
+      const isRp = /rp2040|pico/.test(board);
+      if (isEsp32) {
+        return "\n  // PWM write (target: " + board + `):
+  //   core 3.x: ledcWrite(${pinMacro}, ${dutyExpr});
+  //   core 2.x: ledcWrite(${channelMacro}, ${dutyExpr});`;
+      }
+      if (isAvr || isRp) {
+        return "\n  // PWM write (target: " + board + `):
+  //   analogWrite(${pinMacro}, ${dutyExpr});`;
+      }
+      return `
+  // PWM write:
+  //   ESP32 core 3.x: ledcWrite(${pinMacro}, ${dutyExpr});
+  //   ESP32 core 2.x: ledcWrite(${channelMacro}, ${dutyExpr});
+  //   AVR / RP2040:   analogWrite(${pinMacro}, ${dutyExpr});`;
+    }
+    /**
      * A `log:` template as print calls.
      *
      * Emitted verbatim in order - one print per literal, one per value - because
@@ -5817,11 +5871,12 @@ ${implementations}`;
         const paramDoc = action?.params ? Object.entries(action.params).map(([k, v]) => `  //   ${k}: ${JSON.stringify(v)}${this.resolveParamHint(v)}`).join("\n") : "  //   (none)";
         const trace = this.hasConsole ? `  ${this.consoleStream()}.println("  -> Action: ${name}");
 ` : "";
+        const pwmHint = action ? this.pwmWriteHint(action) : "";
         return `void action_${this.sanitize(name)}(SystemContext* ctx) {
 ${trace}  // Declared params for this action (documentation only):
 ${paramDoc}
 ${this.contextDoc()}  //
-  // TODO: Implement the hardware calls for this action.
+  // TODO: Implement the hardware calls for this action.${pwmHint}
   (void)ctx;
 }`;
       });
@@ -6877,13 +6932,13 @@ ${implementations.join("\n\n")}`;
     "blink \u2014 no state machine at all, just a task": {
       entry: "blink.yaml",
       files: {
-        "blink.yaml": '# The smallest useful thing a board can do, with no state machine at all.\n#\n# PulseHSM is one tenant of this IR, not its foundation. A blink is scheduling,\n# not behaviour worth a state chart, so it is a `task:` - and the generated\n# sketch contains no PulseHSM, no fsm, and no event enum. It is plain Arduino.\n#\n# What the model still buys you: the pin is named, its pinMode is generated,\n# the interval is a declared parameter with a range, and `toggle_led` arrives\n# as a stub with the right signature.\n\nproject:\n  name: blink\n  version: "1.0"\n  description: One LED, one interval\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    led: { type: digital_output, pin: GPIO2 }\n\nparameters:\n  # Read on every pass, so changing it at runtime takes effect immediately.\n  blink_ms: { type: int, default: 500, range: [50, 10000], unit: ms }\n\ntasks:\n  blink:\n    every: blink_ms\n    do: toggle_led\n    description: Flip the LED over\n\n# Implementing toggle_led:\n#\n#   static bool lit = false;\n#   lit = !lit;\n#   digitalWrite(LED_PIN, lit ? HIGH : LOW);\n#\n# Hold the state; do not read the pin back with\n# `digitalWrite(LED_PIN, !digitalRead(LED_PIN))`. On an ESP32 `pinMode(OUTPUT)`\n# leaves the input buffer off, so digitalRead returns 0 whatever the pin is\n# driving - the LED goes on once and stays on. It happens to work on an AVR,\n# which is why the idiom is so common. Holding the state is also one register\n# write instead of a read and a write, and works on every board.\n'
+        "blink.yaml": '# The smallest useful thing a board can do, with no state machine at all.\n#\n# PulseHSM is one tenant of this IR, not its foundation. A blink is scheduling,\n# not behaviour worth a state chart, so it is a `task:` - and the generated\n# sketch contains no PulseHSM, no fsm, and no event enum. It is plain Arduino.\n#\n# What the model still buys you: the pin is named, its pinMode is generated,\n# the interval is a declared parameter with a range, and `toggle_led` arrives\n# as a stub with the right signature.\n\npulseir: "1"\n\nproject:\n  name: blink\n  version: "1.0"\n  description: One LED, one interval\n\ntarget:\n  board: esp32\n\nhardware:\n  devices:\n    led: { type: digital_output, pin: GPIO2 }\n\nparameters:\n  # Read on every pass, so changing it at runtime takes effect immediately.\n  blink_ms: { type: int, default: 500, range: [50, 10000], unit: ms }\n\ntasks:\n  blink:\n    every: blink_ms\n    do: toggle_led\n    description: Flip the LED over\n\n# Implementing toggle_led:\n#\n#   static bool lit = false;\n#   lit = !lit;\n#   digitalWrite(LED_PIN, lit ? HIGH : LOW);\n#\n# Hold the state; do not read the pin back with\n# `digitalWrite(LED_PIN, !digitalRead(LED_PIN))`. On an ESP32 `pinMode(OUTPUT)`\n# leaves the input buffer off, so digitalRead returns 0 whatever the pin is\n# driving - the LED goes on once and stays on. It happens to work on an AVR,\n# which is why the idiom is so common. Holding the state is also one register\n# write instead of a read and a write, and works on every board.\n'
       }
     },
     "serial console \u2014 commands over the serial monitor, no state machine": {
       entry: "serial_console.yaml",
       files: {
-        "serial_console.yaml": '# A board you talk to over the serial monitor. Still no state machine.\n#\n# Two things the model owns here that are usually hand-written boilerplate:\n#\n#   1. The console\'s baud rate. `console` is a declared bus like any other, so\n#      the sketch opens it at the rate the model asks for - there is no\n#      hardcoded Serial.begin(115200) anywhere in the output.\n#   2. The command table. Reading a line without blocking, reassembling one\n#      split across loop() passes, and refusing one too long to fit are all\n#      generated. What a command *means* is your action, in C.\n\nproject:\n  name: serial_console\n  version: "1.0"\n  description: Answers commands typed into the serial monitor\n\ntarget:\n  board: esp32\n\nhardware:\n  buses:\n    # Port 0 is the USB serial monitor. Naming it as a bus is what lets the\n    # model set the baud rate.\n    console: { interface: uart, port: 0, baud: 9600 }\n\n  devices:\n    led:  { type: digital_output, pin: GPIO2 }\n    fan:  { type: pwm_output, pin: GPIO27, channel: 0, frequency: 25000 }\n    temp: { type: analog_input, pin: GPIO34, unit: degC }\n\nparameters:\n  report_ms: { type: int, default: 2000, range: [200, 60000], unit: ms }\n  fan_duty:  { type: int, default: 128,  range: [0, 255] }\n\nactions:\n  led_on:    { driver: gpio_control, params: { device: led, value: HIGH } }\n  led_off:   { driver: gpio_control, params: { device: led, value: LOW } }\n  fan_start: { driver: pwm_control,  params: { device: fan, duty: fan_duty } }\n  fan_stop:  { driver: pwm_control,  params: { device: fan, duty: 0 } }\n  read_temp: { driver: adc_read,     params: { device: temp } }\n  show_help: { driver: console_help }\n\ncommands:\n  source: console\n  map:\n    on:   led_on\n    off:  led_off\n    fan:  fan_start\n    stop: fan_stop\n    help: show_help\n\n    # `log:` prints a line, with {name} filled from a declared parameter or\n    # sensor. The text and the values both come from this file - no printf in\n    # sight, and a typo in a name is a model error, not a C++ one.\n    status:\n      do: read_temp\n      log: "temp={temp} degC  fan_duty={fan_duty}"\n\n    # A command may also just answer, without doing anything.\n    setpoint:\n      log: "reporting every {report_ms} ms"\n\ntasks:\n  # The board reports on its own too, not only when asked. The log line runs\n  # after the actions, so it prints the reading just taken.\n  heartbeat:\n    every: report_ms\n    do: read_temp\n    log: "temp={temp} degC"\n    description: Report even when nobody types anything\n'
+        "serial_console.yaml": '# A board you talk to over the serial monitor. Still no state machine.\n#\n# Two things the model owns here that are usually hand-written boilerplate:\n#\n#   1. The console\'s baud rate. `console` is a declared bus like any other, so\n#      the sketch opens it at the rate the model asks for - there is no\n#      hardcoded Serial.begin(115200) anywhere in the output.\n#   2. The command table. Reading a line without blocking, reassembling one\n#      split across loop() passes, and refusing one too long to fit are all\n#      generated. What a command *means* is your action, in C.\n\npulseir: "1"\n\nproject:\n  name: serial_console\n  version: "1.0"\n  description: Answers commands typed into the serial monitor\n\ntarget:\n  board: esp32\n\nhardware:\n  buses:\n    # Port 0 is the USB serial monitor. Naming it as a bus is what lets the\n    # model set the baud rate.\n    console: { interface: uart, port: 0, baud: 9600 }\n\n  devices:\n    led:  { type: digital_output, pin: GPIO2 }\n    fan:  { type: pwm_output, pin: GPIO27, channel: 0, frequency: 25000 }\n    temp: { type: analog_input, pin: GPIO34, unit: degC }\n\nparameters:\n  report_ms: { type: int, default: 2000, range: [200, 60000], unit: ms }\n  fan_duty:  { type: int, default: 128,  range: [0, 255] }\n\nactions:\n  led_on:    { driver: gpio_control, params: { device: led, value: HIGH } }\n  led_off:   { driver: gpio_control, params: { device: led, value: LOW } }\n  fan_start: { driver: pwm_control,  params: { device: fan, duty: fan_duty } }\n  fan_stop:  { driver: pwm_control,  params: { device: fan, duty: 0 } }\n  read_temp: { driver: adc_read,     params: { device: temp } }\n  show_help: { driver: console_help }\n\ncommands:\n  source: console\n  map:\n    on:   led_on\n    off:  led_off\n    fan:  fan_start\n    stop: fan_stop\n    help: show_help\n\n    # `log:` prints a line, with {name} filled from a declared parameter or\n    # sensor. The text and the values both come from this file - no printf in\n    # sight, and a typo in a name is a model error, not a C++ one.\n    status:\n      do: read_temp\n      log: "temp={temp} degC  fan_duty={fan_duty}"\n\n    # A command may also just answer, without doing anything.\n    setpoint:\n      log: "reporting every {report_ms} ms"\n\ntasks:\n  # The board reports on its own too, not only when asked. The log line runs\n  # after the actions, so it prints the reading just taken.\n  heartbeat:\n    every: report_ms\n    do: read_temp\n    log: "temp={temp} degC"\n    description: Report even when nobody types anything\n'
       }
     },
     "boiler \u2014 multi-file, hierarchical states, guards": {
