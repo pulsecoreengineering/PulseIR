@@ -6660,6 +6660,257 @@ ${implementations.join("\n\n")}`;
     return rendered.join("\n");
   }
 
+  // dist/web/highlight-cpp.js
+  var CPP_KEYWORDS = /* @__PURE__ */ new Set([
+    "auto",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "constexpr",
+    "continue",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "explicit",
+    "extern",
+    "false",
+    "for",
+    "friend",
+    "goto",
+    "if",
+    "inline",
+    "namespace",
+    "new",
+    "nullptr",
+    "operator",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "sizeof",
+    "static",
+    "struct",
+    "switch",
+    "template",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typedef",
+    "typename",
+    "union",
+    "using",
+    "virtual",
+    "void",
+    "volatile",
+    "while",
+    // Arduino / AVR constants that behave like keywords
+    "HIGH",
+    "LOW",
+    "INPUT",
+    "OUTPUT",
+    "INPUT_PULLUP",
+    "INPUT_PULLDOWN",
+    "NULL",
+    "PROGMEM",
+    "ISR",
+    "F"
+  ]);
+  var CPP_TYPES = /* @__PURE__ */ new Set([
+    "bool",
+    "char",
+    "double",
+    "float",
+    "int",
+    "long",
+    "short",
+    "signed",
+    "unsigned",
+    "wchar_t",
+    // Fixed-width integer types
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "int8_t",
+    "int16_t",
+    "int32_t",
+    "int64_t",
+    "size_t",
+    "ptrdiff_t",
+    "uintptr_t",
+    "intptr_t",
+    // Arduino / C++ stdlib types
+    "String",
+    "boolean",
+    "byte",
+    "word"
+  ]);
+  function escapeCpp(text) {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  var CppEmitter = class {
+    constructor() {
+      this.out = [];
+    }
+    push(kind, text) {
+      if (!text)
+        return;
+      this.out.push(kind === "plain" ? escapeCpp(text) : `<span class="c-${kind}">${escapeCpp(text)}</span>`);
+    }
+    toString() {
+      return this.out.join("");
+    }
+  };
+  function highlightCpp(source2) {
+    const lines = source2.split("\n");
+    const rendered = [];
+    let inBlockComment = false;
+    for (const line of lines) {
+      const out = new CppEmitter();
+      let i = 0;
+      if (inBlockComment) {
+        const end = line.indexOf("*/");
+        if (end === -1) {
+          out.push("comment", line);
+          rendered.push(out.toString());
+          continue;
+        }
+        out.push("comment", line.slice(0, end + 2));
+        i = end + 2;
+        inBlockComment = false;
+      }
+      if (line.slice(i).trim() === "") {
+        out.push("plain", line.slice(i));
+        rendered.push(out.toString());
+        continue;
+      }
+      let isInclude = false;
+      const ppMatch = /^(\s*)(#\s*[a-z]+)/i.exec(line.slice(i));
+      if (ppMatch) {
+        out.push("plain", ppMatch[1]);
+        out.push("preproc", ppMatch[2]);
+        i += ppMatch[0].length;
+        isInclude = ppMatch[2].replace(/\s/g, "") === "#include";
+      }
+      while (i < line.length) {
+        const ch = line[i];
+        if (ch === " " || ch === "	") {
+          const start = i;
+          while (i < line.length && (line[i] === " " || line[i] === "	"))
+            i++;
+          out.push("plain", line.slice(start, i));
+          continue;
+        }
+        if (ch === "/" && line[i + 1] === "/") {
+          out.push("comment", line.slice(i));
+          i = line.length;
+          continue;
+        }
+        if (ch === "/" && line[i + 1] === "*") {
+          const end = line.indexOf("*/", i + 2);
+          if (end === -1) {
+            out.push("comment", line.slice(i));
+            i = line.length;
+            inBlockComment = true;
+          } else {
+            out.push("comment", line.slice(i, end + 2));
+            i = end + 2;
+          }
+          continue;
+        }
+        if (ch === '"') {
+          let j = i + 1;
+          while (j < line.length && line[j] !== '"') {
+            if (line[j] === "\\")
+              j++;
+            j++;
+          }
+          out.push("string", line.slice(i, j + 1));
+          i = j + 1;
+          continue;
+        }
+        if (ch === "'") {
+          let j = i + 1;
+          while (j < line.length && line[j] !== "'") {
+            if (line[j] === "\\")
+              j++;
+            j++;
+          }
+          out.push("string", line.slice(i, j + 1));
+          i = j + 1;
+          continue;
+        }
+        if (isInclude && ch === "<") {
+          const end = line.indexOf(">", i + 1);
+          if (end !== -1) {
+            out.push("string", line.slice(i, end + 1));
+            i = end + 1;
+            continue;
+          }
+        }
+        if (/\d/.test(ch) || ch === "." && /\d/.test(line[i + 1] ?? "")) {
+          const start = i;
+          if (ch === "0" && /[xX]/.test(line[i + 1] ?? "")) {
+            i += 2;
+            while (i < line.length && /[0-9a-fA-F]/.test(line[i]))
+              i++;
+          } else if (ch === "0" && /[bB]/.test(line[i + 1] ?? "")) {
+            i += 2;
+            while (i < line.length && /[01]/.test(line[i]))
+              i++;
+          } else {
+            while (i < line.length && /\d/.test(line[i]))
+              i++;
+            if (line[i] === "." && /\d/.test(line[i + 1] ?? "")) {
+              i++;
+              while (i < line.length && /\d/.test(line[i]))
+                i++;
+            }
+            if (/[eE]/.test(line[i] ?? "")) {
+              i++;
+              if (/[+\-]/.test(line[i] ?? ""))
+                i++;
+              while (i < line.length && /\d/.test(line[i]))
+                i++;
+            }
+          }
+          while (i < line.length && /[uUlLfF]/.test(line[i]))
+            i++;
+          out.push("number", line.slice(start, i));
+          continue;
+        }
+        if (/[a-zA-Z_]/.test(ch)) {
+          const start = i;
+          while (i < line.length && /[a-zA-Z0-9_]/.test(line[i]))
+            i++;
+          const word = line.slice(start, i);
+          if (CPP_KEYWORDS.has(word)) {
+            out.push("keyword", word);
+          } else if (CPP_TYPES.has(word)) {
+            out.push("type", word);
+          } else {
+            out.push("plain", word);
+          }
+          continue;
+        }
+        if (/[{}()[\];,.<>=!&|+\-*/%^~?:]/.test(ch)) {
+          out.push("punct", ch);
+          i++;
+          continue;
+        }
+        out.push("plain", ch);
+        i++;
+      }
+      rendered.push(out.toString());
+    }
+    return rendered.join("\n");
+  }
+
   // dist/web/projects.js
   var PROJECTS_KEY = "pulseir.projects";
   var CURRENT_KEY = "pulseir.currentProject";
@@ -7476,7 +7727,7 @@ target:
     }
     setBadLine(null);
     setStale(false);
-    panes.sketch.innerHTML = `<pre><code>${escapeHtml2(sketch)}</code></pre>`;
+    panes.sketch.innerHTML = `<pre><code>${highlightCpp(sketch)}</code></pre>`;
     panes.topics.innerHTML = `<pre><code>${escapeHtml2(topics)}</code></pre>`;
     panes.libraries.innerHTML = `<pre><code>${escapeHtml2(libraries)}</code></pre>`;
     panes.structure.innerHTML = renderStructure(project);

@@ -20,6 +20,7 @@ import { TopicEmitter } from '../src/emit/topics.js';
 import { LibraryEmitter } from '../src/emit/libraries.js';
 import { flattenStates, resolveEntryLeaf, resolvePath } from '../src/analysis/states.js';
 import { highlight, DEFAULT_KEYWORDS } from './highlight.js';
+import { highlightCpp } from './highlight-cpp.js';
 import { ProjectStore, foldImport, findEntry, importedName, nameFromModel } from './projects.js';
 import type { Project } from './projects.js';
 import { zip, unzip, ZipError } from './zip.js';
@@ -622,7 +623,7 @@ function render(): void {
   setBadLine(null);
   setStale(false);
 
-  panes.sketch.innerHTML = `<pre><code>${escapeHtml(sketch)}</code></pre>`;
+  panes.sketch.innerHTML = `<pre><code>${highlightCpp(sketch)}</code></pre>`;
   panes.topics.innerHTML = `<pre><code>${escapeHtml(topics)}</code></pre>`;
   panes.libraries.innerHTML = `<pre><code>${escapeHtml(libraries)}</code></pre>`;
   panes.structure.innerHTML = renderStructure(project);
