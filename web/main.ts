@@ -96,6 +96,7 @@ function openProject(project: Project): void {
   projectName.textContent = project.name;
   renderFileBar();
   paint();
+  clearOutput();
   render();
 }
 
@@ -263,6 +264,12 @@ function setStale(stale: boolean): void {
   for (const pane of Object.values(panes)) pane.classList.toggle('stale', stale);
 }
 
+function clearOutput(): void {
+  current = null;
+  for (const pane of Object.values(panes)) pane.innerHTML = '';
+  setStale(false);
+}
+
 function setStatus(kind: 'ok' | 'warn' | 'error', title: string, detail = ''): void {
   status.className = `status ${kind}`;
   status.innerHTML = `<strong>${escapeHtml(title)}</strong>${
@@ -419,7 +426,7 @@ function render(): void {
     setBadLine(line !== null && workspace.active === workspace.entry ? line : null);
 
     setStatus('error', `Model error${line !== null ? ` (line ${line})` : ''}`, message);
-    setStale(true);
+    if (current !== null) setStale(true);
     return;
   }
 
@@ -432,7 +439,7 @@ function render(): void {
     libraries = new LibraryEmitter().toJSON(project);
   } catch (error) {
     setStatus('error', 'Generation error', error instanceof Error ? error.message : String(error));
-    setStale(true);
+    if (current !== null) setStale(true);
     return;
   }
 
