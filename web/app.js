@@ -7027,8 +7027,11 @@ ${implementations.join("\n\n")}`;
   var snippetButton = $("snippet-button");
   var snippetMenu = $("snippet-menu");
   var namespaceInput = $("namespace");
+  var namespaceLabel = $("namespace-label");
   var boardSelect = $("board");
   var staleNote = $("stale-note");
+  var downloadButton = $("download-button");
+  var downloadMenu = $("download-menu");
   var store = new ProjectStore(localStorage);
   var workspace = { id: "", name: "", files: {}, entry: "", active: "", updatedAt: 0 };
   var current = null;
@@ -7131,6 +7134,11 @@ target:
     for (const pane of Object.values(panes))
       pane.innerHTML = "";
     setStale(false);
+    setDownloadReady(false);
+  }
+  function setDownloadReady(ready) {
+    downloadButton.disabled = !ready;
+    downloadButton.classList.toggle("ready", ready);
   }
   function setStatus(kind, title, detail = "") {
     status.className = `status ${kind}`;
@@ -7271,6 +7279,7 @@ ${parser.warnings.join("\n")}`);
       setStatus("ok", project.name, counts);
     }
     current = { project, sketch, topics, libraries };
+    setDownloadReady(true);
     syncBoard(project.target?.board ?? "");
   }
   function syncBoard(board) {
@@ -7735,6 +7744,9 @@ machine:
     for (const button of document.querySelectorAll(".tab")) {
       button.classList.toggle("active", button.dataset.tab === name);
     }
+    const showNs = name === "topics";
+    namespaceInput.hidden = !showNs;
+    namespaceLabel.hidden = !showNs;
     localStorage.setItem("pulseir.tab", name);
   }
   function init() {
@@ -7774,17 +7786,33 @@ machine:
     });
     $("add-file").addEventListener("click", addFile);
     $("set-entry").addEventListener("click", setEntry);
+    function closeDownloadMenu() {
+      downloadMenu.hidden = true;
+      downloadButton.setAttribute("aria-expanded", "false");
+    }
+    downloadButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (downloadMenu.hidden) {
+        downloadMenu.hidden = false;
+        downloadButton.setAttribute("aria-expanded", "true");
+      } else {
+        closeDownloadMenu();
+      }
+    });
     $("download-sketch").addEventListener("click", () => {
+      closeDownloadMenu();
       if (!current)
         return;
       download(`${current.project.name}.ino`, current.sketch, "text/plain");
     });
     $("download-topics").addEventListener("click", () => {
+      closeDownloadMenu();
       if (!current)
         return;
       download("topics.json", current.topics, "application/json");
     });
     $("download-libraries").addEventListener("click", () => {
+      closeDownloadMenu();
       if (!current)
         return;
       download("libraries.json", current.libraries, "application/json");
@@ -7819,12 +7847,16 @@ machine:
         closeMenu();
       if (!snippetMenu.hidden && !snippetMenu.contains(event.target))
         closeSnippetMenu();
+      if (!downloadMenu.hidden && !downloadMenu.contains(event.target) && event.target !== downloadButton)
+        closeDownloadMenu();
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !projectMenu.hidden)
         closeMenu();
       if (event.key === "Escape" && !snippetMenu.hidden)
         closeSnippetMenu();
+      if (event.key === "Escape" && !downloadMenu.hidden)
+        closeDownloadMenu();
     });
     importZipInput.addEventListener("change", () => {
       const file = importZipInput.files?.[0];
