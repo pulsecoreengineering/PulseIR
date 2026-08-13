@@ -3465,7 +3465,7 @@ ${lines.join("\n")}${hint}`;
       const obj = raw;
       return {
         board: obj.board,
-        debug: obj.debug === void 0 ? void 0 : Boolean(obj.debug),
+        verbose: obj.verbose === void 0 ? void 0 : Boolean(obj.verbose),
         description: obj.description
       };
     }
@@ -5359,7 +5359,7 @@ ${registrations}
 ${this.registrationCheck()}
   // begin() must be given a leaf state.
   fsm.begin(${this.states[startIndex].symbol});
-${this.hasConsole && this.isDebug ? `
+${this.hasConsole && this.isVerbose ? `
   ${this.consoleStream()}.print("Initial state: ");
   ${this.consoleStream()}.println(fsm.getCurrentName());
 ` : ""}`;
@@ -5410,8 +5410,8 @@ ${machineSetup}}`;
       return this.declaredConsole() !== void 0;
     }
     /** True when action-trace println calls should be emitted. */
-    get isDebug() {
-      return this.project.target?.debug ?? true;
+    get isVerbose() {
+      return this.project.target?.verbose ?? true;
     }
     /** The C expression naming the console stream, e.g. `Serial`. */
     consoleStream() {
@@ -5879,7 +5879,7 @@ ${implementations}`;
       const implementations = Array.from(this.actionNames).map((name) => {
         const action = this.everyUsedAction().find((a) => a.name === name);
         const paramDoc = action?.params ? Object.entries(action.params).map(([k, v]) => `  //   ${k}: ${JSON.stringify(v)}${this.resolveParamHint(v)}`).join("\n") : "  //   (none)";
-        const trace = this.hasConsole && this.isDebug ? `  ${this.consoleStream()}.println("  -> Action: ${name}");
+        const trace = this.hasConsole && this.isVerbose ? `  ${this.consoleStream()}.println("  -> Action: ${name}");
 ` : "";
         const pwmHint = action ? this.pwmWriteHint(action) : "";
         return `void action_${this.sanitize(name)}(SystemContext* ctx) {
@@ -6385,7 +6385,7 @@ ${implementations.join("\n\n")}`;
     "description",
     // target:
     "board",
-    "debug",
+    "verbose",
     "drivers",
     // hardware / buses / devices - structure
     "interface",

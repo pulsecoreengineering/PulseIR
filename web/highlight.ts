@@ -48,7 +48,7 @@ export const DEFAULT_KEYWORDS: readonly string[] = [
   // project:
   'name', 'version', 'pulseir', 'description',
   // target:
-  'board', 'debug', 'drivers',
+  'board', 'verbose', 'drivers',
   // hardware / buses / devices - structure
   'interface', 'type', 'class', 'bus', 'driver', 'params', 'unit',
   // pin / channel descriptors

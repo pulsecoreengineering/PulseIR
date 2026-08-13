@@ -374,7 +374,7 @@ export interface Target {
    * Defaults to true so existing models keep their traces. Set to false
    * before production to strip all diagnostic prints from action stubs.
    */
-  debug?: boolean;
+  verbose?: boolean;
   description?: string;
   metadata?: Metadata;
 }

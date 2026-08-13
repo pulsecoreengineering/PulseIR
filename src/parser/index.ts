@@ -450,7 +450,7 @@ export class Parser {
     const obj = raw as Record<string, unknown>;
     return {
       board: obj.board as string | undefined,
-      debug: obj.debug === undefined ? undefined : Boolean(obj.debug),
+      verbose: obj.verbose === undefined ? undefined : Boolean(obj.verbose),
       description: obj.description as string | undefined,
     };
   }

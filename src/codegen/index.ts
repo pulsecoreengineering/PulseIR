@@ -1091,7 +1091,7 @@ ${registrations}
 ${this.registrationCheck()}
   // begin() must be given a leaf state.
   fsm.begin(${this.states[startIndex].symbol});
-${this.hasConsole && this.isDebug ? `
+${this.hasConsole && this.isVerbose ? `
   ${this.consoleStream()}.print("Initial state: ");
   ${this.consoleStream()}.println(fsm.getCurrentName());
 ` : ''}`;
@@ -1153,8 +1153,8 @@ ${machineSetup}}`;
   }
 
   /** True when action-trace println calls should be emitted. */
-  private get isDebug(): boolean {
-    return this.project.target?.debug ?? true;
+  private get isVerbose(): boolean {
+    return this.project.target?.verbose ?? true;
   }
 
   /** The C expression naming the console stream, e.g. `Serial`. */
@@ -1736,7 +1736,7 @@ ${implementations}`;
       // Printing to a port the model never declared would be the generator
       // reaching for a peripheral nobody asked for. Also suppressed when
       // target.debug is false (production builds).
-      const trace = this.hasConsole && this.isDebug
+      const trace = this.hasConsole && this.isVerbose
         ? `  ${this.consoleStream()}.println("  -> Action: ${name}");\n`
         : '';
 
