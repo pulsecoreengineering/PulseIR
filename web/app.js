@@ -8034,6 +8034,38 @@ target:
     }
     download(`${folder}.zip`, zip(entries), "application/zip");
   }
+  function generatePlatformioIni(project) {
+    const board = project.target?.board ?? "";
+    const BOARD_MAP = {
+      esp32: ["espressif32", "esp32dev"],
+      esp32s3: ["espressif32", "esp32-s3-devkitc-1"],
+      esp32c3: ["espressif32", "esp32-c3-devkitm-1"],
+      esp8266: ["espressif8266", "nodemcuv2"],
+      uno: ["atmelavr", "uno"],
+      mega: ["atmelavr", "megaatmega2560"],
+      nano: ["atmelavr", "nanoatmega328"],
+      nano33ble: ["nordicnrf52", "nano33ble"],
+      rp2040: ["raspberrypi", "rpipico"],
+      teensy41: ["teensy", "teensy41"]
+    };
+    const [platform, boardId] = BOARD_MAP[board] ?? ["# unknown platform", board || "# set board in target:"];
+    const libs = project.system.libraries ?? [];
+    const libDeps = libs.map((lib) => {
+      if (lib.source === "git" && lib.url)
+        return lib.url;
+      if (lib.version)
+        return `${lib.name}@${lib.version}`;
+      return lib.name;
+    });
+    const libSection = libDeps.length > 0 ? `lib_deps =
+${libDeps.map((l) => `    ${l}`).join("\n")}` : "# lib_deps =";
+    return `[env:${boardId}]
+platform = ${platform}
+board     = ${boardId}
+framework = arduino
+${libSection}
+`;
+  }
   function safeFolderName(name) {
     const clean = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
     return clean || "model";
@@ -8453,6 +8485,12 @@ machine:
       if (!current)
         return;
       download("libraries.json", current.libraries, "application/json");
+    });
+    $("download-platformio").addEventListener("click", () => {
+      closeDownloadMenu();
+      if (!current)
+        return;
+      download("platformio.ini", generatePlatformioIni(current.project), "text/plain");
     });
     source.addEventListener("keydown", (event) => {
       const { selectionStart, selectionEnd, value } = source;
