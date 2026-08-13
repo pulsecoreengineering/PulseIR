@@ -31,8 +31,9 @@ import { EXAMPLES } from './examples.js';
  * Auto-correct the common typo of omitting the space after a colon in a
  * mapping entry, e.g. `board:esp32` → `board: esp32`.
  *
- * Applied to source before parsing only — the textarea content is never
- * touched, so cursor position and undo history are preserved.
+ * Applied both to the textarea (so the user sees the correction) and before
+ * parsing. Cursor position is restored by measuring how many spaces were
+ * inserted before the selection endpoints.
  *
  * Safe guards:
  *  - Only matches `letter/underscore word : non-space` (keys can't start
@@ -1475,6 +1476,18 @@ function init(): void {
   const rerender = debounce(render, 150);
 
   source.addEventListener('input', () => {
+    const raw = source.value;
+    const fixed = normalizeYaml(raw);
+    if (fixed !== raw) {
+      // Preserve cursor: count how many spaces were inserted before each end
+      // of the selection by normalizing only the text up to that point.
+      const ss = source.selectionStart ?? raw.length;
+      const se = source.selectionEnd ?? raw.length;
+      const shiftStart = normalizeYaml(raw.slice(0, ss)).length - ss;
+      const shiftEnd   = normalizeYaml(raw.slice(0, se)).length - se;
+      source.value = fixed;
+      source.setSelectionRange(ss + shiftStart, se + shiftEnd);
+    }
     workspace.files[workspace.active] = source.value;
     paint();
     rerender();
