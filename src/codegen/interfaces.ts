@@ -137,19 +137,39 @@ export class InterfaceBackend {
         break;
       }
 
-      case 'pwm':
+      case 'pwm': {
         // ledc is ESP32-only; elsewhere analogWrite needs no setup.
+        //
+        // Core 3.x replaced the channel-addressed LEDC API (ledcSetup +
+        // ledcAttachPin, then ledcWrite(channel, duty)) with a pin-addressed
+        // one (ledcAttach, then ledcWrite(pin, duty)) and dropped the old
+        // functions outright - so a model built against one core fails to
+        // compile on the other unless both paths are emitted. Gated on
+        // ESP_ARDUINO_VERSION_MAJOR, which esp32-hal-version.h has defined
+        // since core 2.0.1; cores too old to define it only ever had the
+        // channel-addressed API, so the #else is also their only path.
         if (has('pin') && has('channel')) {
+          const freq = has('frequency') ? ref('frequency') : '5000';
+          const resolution = has('resolution') ? ref('resolution') : '8';
           out.init.push(
             '#ifdef ARDUINO_ARCH_ESP32',
-            `  ledcSetup(${ref('channel')}, ${has('frequency') ? ref('frequency') : '5000'}, ${has('resolution') ? ref('resolution') : '8'});`,
+            '#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3',
+            `  ledcAttach(${ref('pin')}, ${freq}, ${resolution});`,
+            '#else',
+            `  ledcSetup(${ref('channel')}, ${freq}, ${resolution});`,
             `  ledcAttachPin(${ref('pin')}, ${ref('channel')});`,
+            '#endif',
             '#endif'
+          );
+          out.todos.push(
+            `${resource.name}: write duty with ledcWrite(${ref('pin')}, duty) on core 3.x, ` +
+            `or ledcWrite(${ref('channel')}, duty) before it`
           );
         } else if (has('pin')) {
           out.init.push(`pinMode(${ref('pin')}, OUTPUT);`);
         }
         break;
+      }
 
       case 'adc':
         if (has('pin')) out.init.push(`pinMode(${ref('pin')}, INPUT);`);
