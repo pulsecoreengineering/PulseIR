@@ -60,8 +60,11 @@ const copyOutputButton = $<HTMLButtonElement>('copy-output');
 const snippetButton = $<HTMLButtonElement>('snippet-button');
 const snippetMenu = $<HTMLDivElement>('snippet-menu');
 const namespaceInput = $<HTMLInputElement>('namespace');
+const namespaceLabel = $<HTMLLabelElement>('namespace-label');
 const boardSelect = $<HTMLSelectElement>('board');
 const staleNote = $<HTMLDivElement>('stale-note');
+const downloadButton = $<HTMLButtonElement>('download-button');
+const downloadMenu = $<HTMLDivElement>('download-menu');
 
 // ---------------------------------------------------------------------------
 // Model state
@@ -268,6 +271,12 @@ function clearOutput(): void {
   current = null;
   for (const pane of Object.values(panes)) pane.innerHTML = '';
   setStale(false);
+  setDownloadReady(false);
+}
+
+function setDownloadReady(ready: boolean): void {
+  downloadButton.disabled = !ready;
+  downloadButton.classList.toggle('ready', ready);
 }
 
 function setStatus(kind: 'ok' | 'warn' | 'error', title: string, detail = ''): void {
@@ -467,6 +476,7 @@ function render(): void {
   }
 
   current = { project, sketch, topics, libraries };
+  setDownloadReady(true);
 
   // Keep the board selector in sync with what the model actually declares.
   syncBoard(project.target?.board ?? '');
@@ -1057,6 +1067,10 @@ function selectTab(name: keyof typeof panes): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>('.tab')) {
     button.classList.toggle('active', button.dataset.tab === name);
   }
+  // MQTT namespace input is only meaningful for the Topics pane.
+  const showNs = name === 'topics';
+  namespaceInput.hidden = !showNs;
+  namespaceLabel.hidden = !showNs;
   localStorage.setItem('pulseir.tab', name);
 }
 
@@ -1108,15 +1122,34 @@ function init(): void {
   $<HTMLButtonElement>('add-file').addEventListener('click', addFile);
   $<HTMLButtonElement>('set-entry').addEventListener('click', setEntry);
 
+  // Download dropdown
+  function closeDownloadMenu(): void {
+    downloadMenu.hidden = true;
+    downloadButton.setAttribute('aria-expanded', 'false');
+  }
+
+  downloadButton.addEventListener('click', event => {
+    event.stopPropagation();
+    if (downloadMenu.hidden) {
+      downloadMenu.hidden = false;
+      downloadButton.setAttribute('aria-expanded', 'true');
+    } else {
+      closeDownloadMenu();
+    }
+  });
+
   $<HTMLButtonElement>('download-sketch').addEventListener('click', () => {
+    closeDownloadMenu();
     if (!current) return;
     download(`${current.project.name}.ino`, current.sketch, 'text/plain');
   });
   $<HTMLButtonElement>('download-topics').addEventListener('click', () => {
+    closeDownloadMenu();
     if (!current) return;
     download('topics.json', current.topics, 'application/json');
   });
   $<HTMLButtonElement>('download-libraries').addEventListener('click', () => {
+    closeDownloadMenu();
     if (!current) return;
     download('libraries.json', current.libraries, 'application/json');
   });
@@ -1145,14 +1178,17 @@ function init(): void {
     else closeSnippetMenu();
   });
 
-  // Clicking anywhere else, or pressing Escape, dismisses both menus.
+  // Clicking anywhere else, or pressing Escape, dismisses all menus.
   document.addEventListener('click', event => {
     if (!projectMenu.hidden && !projectMenu.contains(event.target as Node)) closeMenu();
     if (!snippetMenu.hidden && !snippetMenu.contains(event.target as Node)) closeSnippetMenu();
+    if (!downloadMenu.hidden && !downloadMenu.contains(event.target as Node) &&
+        event.target !== downloadButton) closeDownloadMenu();
   });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && !projectMenu.hidden) closeMenu();
     if (event.key === 'Escape' && !snippetMenu.hidden) closeSnippetMenu();
+    if (event.key === 'Escape' && !downloadMenu.hidden) closeDownloadMenu();
   });
 
   importZipInput.addEventListener('change', () => {
