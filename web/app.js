@@ -6360,6 +6360,86 @@ ${implementations.join("\n\n")}`;
   }
 
   // dist/web/highlight.js
+  var KEYWORDS = /* @__PURE__ */ new Set([
+    // Top-level blocks
+    "project",
+    "target",
+    "hardware",
+    "buses",
+    "devices",
+    "machine",
+    "tasks",
+    "commands",
+    "imports",
+    "events",
+    "resources",
+    // project:
+    "name",
+    "version",
+    "pulseir",
+    "description",
+    // target:
+    "board",
+    "drivers",
+    // hardware / buses / devices - structure
+    "interface",
+    "type",
+    "class",
+    "bus",
+    "driver",
+    "params",
+    "unit",
+    // pin / channel descriptors
+    "pin",
+    "channel",
+    "sda",
+    "scl",
+    "miso",
+    "mosi",
+    "sck",
+    "cs",
+    "address",
+    "mode",
+    "speed",
+    // serial / SPI / I2C / MQTT / etc.
+    "port",
+    "baud",
+    "frequency",
+    "resolution",
+    "bits",
+    "host",
+    "ssid",
+    "password",
+    "prefix",
+    "topic",
+    // machine:
+    "initial",
+    "states",
+    "transitions",
+    "entry",
+    "exit",
+    "from",
+    "on",
+    "to",
+    "do",
+    "guard",
+    "after",
+    "log",
+    // tasks:
+    "every",
+    "parameters",
+    "actions",
+    "condition",
+    "default",
+    // commands / actions
+    "source",
+    "map",
+    // parameter / value descriptors
+    "min",
+    "max",
+    "range",
+    "value"
+  ]);
   var BOOLEANS = /* @__PURE__ */ new Set(["true", "false", "yes", "no", "on", "off"]);
   var NULLS = /* @__PURE__ */ new Set(["null", "~"]);
   var FLOW_DELIMITERS = /* @__PURE__ */ new Set([",", "{", "}", "[", "]"]);
@@ -6487,7 +6567,8 @@ ${implementations.join("\n\n")}`;
       if (depth > 0) {
         const colon = findKeyColon(line, i, true);
         if (colon !== -1) {
-          out.push("key", line.slice(i, colon));
+          const rawKey = line.slice(i, colon);
+          out.push(KEYWORDS.has(rawKey.trim()) ? "key" : "identifier", rawKey);
           out.push("punct", ":");
           i = colon + 1;
           continue;
@@ -6549,7 +6630,13 @@ ${implementations.join("\n\n")}`;
       const colon = findKeyColon(line, i, false);
       if (colon !== -1) {
         const rawKey = line.slice(i, colon);
-        out.push(/^["']/.test(rawKey.trim()) ? "string" : "key", rawKey);
+        let keyKind;
+        if (/^["']/.test(rawKey.trim())) {
+          keyKind = "string";
+        } else {
+          keyKind = KEYWORDS.has(rawKey.trim()) ? "key" : "identifier";
+        }
+        out.push(keyKind, rawKey);
         out.push("punct", ":");
         i = colon + 1;
       }

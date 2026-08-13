@@ -23,6 +23,7 @@
 export type TokenKind =
   | 'plain'
   | 'key'
+  | 'identifier'
   | 'string'
   | 'number'
   | 'boolean'
@@ -31,6 +32,38 @@ export type TokenKind =
   | 'punct'
   | 'anchor'
   | 'tag';
+
+/**
+ * Every key that PulseIR's schema defines. Keys NOT in this set are
+ * user-defined names (bus names, action names, event names, etc.) and get the
+ * 'identifier' token so they look visually distinct from schema keywords.
+ */
+const KEYWORDS = new Set([
+  // Top-level blocks
+  'project', 'target', 'hardware', 'buses', 'devices', 'machine', 'tasks',
+  'commands', 'imports', 'events', 'resources',
+  // project:
+  'name', 'version', 'pulseir', 'description',
+  // target:
+  'board', 'drivers',
+  // hardware / buses / devices - structure
+  'interface', 'type', 'class', 'bus', 'driver', 'params', 'unit',
+  // pin / channel descriptors
+  'pin', 'channel', 'sda', 'scl', 'miso', 'mosi', 'sck', 'cs',
+  'address', 'mode', 'speed',
+  // serial / SPI / I2C / MQTT / etc.
+  'port', 'baud', 'frequency', 'resolution', 'bits',
+  'host', 'ssid', 'password', 'prefix', 'topic',
+  // machine:
+  'initial', 'states', 'transitions', 'entry', 'exit',
+  'from', 'on', 'to', 'do', 'guard', 'after', 'log',
+  // tasks:
+  'every', 'parameters', 'actions', 'condition', 'default',
+  // commands / actions
+  'source', 'map',
+  // parameter / value descriptors
+  'min', 'max', 'range', 'value',
+]);
 
 const BOOLEANS = new Set(['true', 'false', 'yes', 'no', 'on', 'off']);
 const NULLS = new Set(['null', '~']);
@@ -207,7 +240,8 @@ function emitValue(out: Emitter, line: string, from: number, flowDepth: number):
     if (depth > 0) {
       const colon = findKeyColon(line, i, true);
       if (colon !== -1) {
-        out.push('key', line.slice(i, colon));
+        const rawKey = line.slice(i, colon);
+        out.push(KEYWORDS.has(rawKey.trim()) ? 'key' : 'identifier', rawKey);
         out.push('punct', ':');
         i = colon + 1;
         continue;
@@ -295,8 +329,13 @@ export function highlight(source: string): string {
     const colon = findKeyColon(line, i, false);
     if (colon !== -1) {
       const rawKey = line.slice(i, colon);
-      // A quoted key keeps its string colour; anything else reads as a key.
-      out.push(/^["']/.test(rawKey.trim()) ? 'string' : 'key', rawKey);
+      let keyKind: TokenKind;
+      if (/^["']/.test(rawKey.trim())) {
+        keyKind = 'string';
+      } else {
+        keyKind = KEYWORDS.has(rawKey.trim()) ? 'key' : 'identifier';
+      }
+      out.push(keyKind, rawKey);
       out.push('punct', ':');
       i = colon + 1;
     }

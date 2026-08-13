@@ -25,6 +25,7 @@
     --sel: rgba(11, 107, 203, .20);
 
     --y-key: #0a5ea8;
+    --y-ident: #0e7c7b;
     --y-string: #9b3b16;
     --y-number: #7b3aa8;
     --y-comment: #6b7280;
@@ -43,7 +44,7 @@
       --warn-bg: #2c2313; --warn-fg: #e9c07a;
       --info-bg: #1a2640; --info-fg: #89b4f8;
       --code: #10131a; --sel: rgba(98, 170, 245, .26);
-      --y-key: #7cc0ff; --y-string: #e8a87c; --y-number: #d3a2f0;
+      --y-key: #7cc0ff; --y-ident: #56d4d4; --y-string: #e8a87c; --y-number: #d3a2f0;
       --y-comment: #7d8794; --y-anchor: #7fd4a4;
     }
   }
@@ -55,7 +56,7 @@
     --warn-bg: #2c2313; --warn-fg: #e9c07a;
     --info-bg: #1a2640; --info-fg: #89b4f8;
     --code: #10131a; --sel: rgba(98, 170, 245, .26);
-    --y-key: #7cc0ff; --y-string: #e8a87c; --y-number: #d3a2f0;
+    --y-key: #7cc0ff; --y-ident: #56d4d4; --y-string: #e8a87c; --y-number: #d3a2f0;
     --y-comment: #7d8794; --y-anchor: #7fd4a4;
   }
   :root[data-theme="light"] {
@@ -66,7 +67,7 @@
     --warn-bg: #fdf3e2; --warn-fg: #7a4b06;
     --info-bg: #eef3fb; --info-fg: #1a4fa0;
     --code: #f3f4f6; --sel: rgba(11, 107, 203, .20);
-    --y-key: #0a5ea8; --y-string: #9b3b16; --y-number: #7b3aa8;
+    --y-key: #0a5ea8; --y-ident: #0e7c7b; --y-string: #9b3b16; --y-number: #7b3aa8;
     --y-comment: #6b7280; --y-anchor: #10603a;
   }
 
@@ -291,15 +292,16 @@
   #source::selection { background: var(--sel, rgba(120,160,255,.28)); }
 
   /* Syntax colours */
-  .y-key     { color: var(--y-key); }
-  .y-string  { color: var(--y-string); }
-  .y-number  { color: var(--y-number); }
-  .y-boolean { color: var(--y-number); }
-  .y-null    { color: var(--y-number); }
-  .y-comment { color: var(--y-comment); font-style: italic; }
-  .y-punct   { color: var(--dim); }
-  .y-anchor  { color: var(--y-anchor); }
-  .y-tag     { color: var(--y-anchor); }
+  .y-key        { color: var(--y-key); }
+  .y-identifier { color: var(--y-ident); font-style: italic; }
+  .y-string     { color: var(--y-string); }
+  .y-number     { color: var(--y-number); }
+  .y-boolean    { color: var(--y-number); }
+  .y-null       { color: var(--y-number); }
+  .y-comment    { color: var(--y-comment); font-style: italic; }
+  .y-punct      { color: var(--dim); }
+  .y-anchor     { color: var(--y-anchor); }
+  .y-tag        { color: var(--y-anchor); }
 
   /* ── Output panes ───────────────────────────────────────────────────────── */
   .panes { flex: 1; overflow: auto; min-height: 0; }
