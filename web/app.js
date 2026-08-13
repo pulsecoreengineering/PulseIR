@@ -6360,7 +6360,7 @@ ${implementations.join("\n\n")}`;
   }
 
   // dist/web/highlight.js
-  var KEYWORDS = /* @__PURE__ */ new Set([
+  var DEFAULT_KEYWORDS = [
     // Top-level blocks
     "project",
     "target",
@@ -6439,7 +6439,8 @@ ${implementations.join("\n\n")}`;
     "max",
     "range",
     "value"
-  ]);
+  ];
+  var KEYWORD_SET = new Set(DEFAULT_KEYWORDS);
   var BOOLEANS = /* @__PURE__ */ new Set(["true", "false", "yes", "no", "on", "off"]);
   var NULLS = /* @__PURE__ */ new Set(["null", "~"]);
   var FLOW_DELIMITERS = /* @__PURE__ */ new Set([",", "{", "}", "[", "]"]);
@@ -6511,7 +6512,7 @@ ${implementations.join("\n\n")}`;
     }
     return -1;
   }
-  function emitValue(out, line, from, flowDepth) {
+  function emitValue(out, line, from, flowDepth, keywords) {
     let i = from;
     let depth = flowDepth;
     while (i < line.length) {
@@ -6568,7 +6569,7 @@ ${implementations.join("\n\n")}`;
         const colon = findKeyColon(line, i, true);
         if (colon !== -1) {
           const rawKey = line.slice(i, colon);
-          out.push(KEYWORDS.has(rawKey.trim()) ? "key" : "identifier", rawKey);
+          out.push(keywords.has(rawKey.trim()) ? "key" : "identifier", rawKey);
           out.push("punct", ":");
           i = colon + 1;
           continue;
@@ -6587,7 +6588,8 @@ ${implementations.join("\n\n")}`;
       out.push(depth > 0 ? classifyScalar(text) : classifyScalar(text.trimEnd()), text);
     }
   }
-  function highlight(source2) {
+  function highlight(source2, keywords) {
+    const kw = keywords ?? KEYWORD_SET;
     const lines = source2.split("\n");
     const rendered = [];
     let blockIndent = -1;
@@ -6634,7 +6636,7 @@ ${implementations.join("\n\n")}`;
         if (/^["']/.test(rawKey.trim())) {
           keyKind = "string";
         } else {
-          keyKind = KEYWORDS.has(rawKey.trim()) ? "key" : "identifier";
+          keyKind = kw.has(rawKey.trim()) ? "key" : "identifier";
         }
         out.push(keyKind, rawKey);
         out.push("punct", ":");
@@ -6652,7 +6654,7 @@ ${implementations.join("\n\n")}`;
         rendered.push(out.toString());
         continue;
       }
-      emitValue(out, line, i, 0);
+      emitValue(out, line, i, 0, kw);
       rendered.push(out.toString());
     }
     return rendered.join("\n");
@@ -7123,6 +7125,10 @@ ${implementations.join("\n\n")}`;
   var downloadMenu = $("download-menu");
   var themeButton = $("theme-button");
   var mqttTab = $("tab-topics");
+  var settingsButton = $("settings-button");
+  var settingsModal = $("settings-modal");
+  var keywordChips = $("keyword-chips");
+  var keywordInput = $("keyword-input");
   var store = new ProjectStore(localStorage);
   var workspace = { id: "", name: "", files: {}, entry: "", active: "", updatedAt: 0 };
   var current = null;
@@ -7185,7 +7191,7 @@ target:
       source.style.color = "";
       highlightLayer.hidden = false;
     }
-    highlightCode.innerHTML = `${highlight(text)}
+    highlightCode.innerHTML = `${highlight(text, activeKeywords)}
 `;
     syncScroll();
   }
@@ -7490,6 +7496,66 @@ ${parser.warnings.join("\n")}`);
     const next = current2 === "auto" ? "light" : current2 === "light" ? "dark" : "auto";
     localStorage.setItem(THEME_KEY, next);
     applyTheme(next);
+  }
+  var KEYWORD_STORAGE_KEY = "pulseir.keywords";
+  function loadKeywords() {
+    const raw = localStorage.getItem(KEYWORD_STORAGE_KEY);
+    if (!raw)
+      return new Set(DEFAULT_KEYWORDS);
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+        return new Set(parsed);
+      }
+    } catch {
+    }
+    return new Set(DEFAULT_KEYWORDS);
+  }
+  function saveKeywords() {
+    localStorage.setItem(KEYWORD_STORAGE_KEY, JSON.stringify([...activeKeywords].sort()));
+  }
+  var activeKeywords = loadKeywords();
+  function renderKeywordChips() {
+    keywordChips.replaceChildren();
+    for (const word of [...activeKeywords].sort()) {
+      const chip = document.createElement("span");
+      chip.className = "keyword-chip";
+      const label = document.createElement("code");
+      label.textContent = word;
+      const remove = document.createElement("button");
+      remove.className = "chip-remove";
+      remove.title = `Remove '${word}'`;
+      remove.setAttribute("aria-label", `Remove ${word}`);
+      remove.textContent = "\xD7";
+      remove.addEventListener("click", () => {
+        activeKeywords.delete(word);
+        saveKeywords();
+        renderKeywordChips();
+        paint();
+      });
+      chip.append(label, remove);
+      keywordChips.append(chip);
+    }
+  }
+  function addKeyword() {
+    const word = keywordInput.value.trim();
+    if (!word)
+      return;
+    activeKeywords.add(word);
+    saveKeywords();
+    renderKeywordChips();
+    keywordInput.value = "";
+    keywordInput.focus();
+    paint();
+  }
+  function openSettings() {
+    renderKeywordChips();
+    settingsModal.hidden = false;
+    keywordInput.value = "";
+    keywordInput.focus();
+  }
+  function closeSettings() {
+    settingsModal.hidden = true;
   }
   function applyBoardToYaml(board) {
     let text = source.value;
@@ -7972,6 +8038,23 @@ machine:
   function init() {
     applyTheme(localStorage.getItem(THEME_KEY) ?? "auto");
     themeButton.addEventListener("click", cycleTheme);
+    settingsButton.addEventListener("click", openSettings);
+    $("settings-close").addEventListener("click", closeSettings);
+    $("keyword-add-btn").addEventListener("click", addKeyword);
+    keywordInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter")
+        addKeyword();
+    });
+    $("keyword-reset-btn").addEventListener("click", () => {
+      activeKeywords = new Set(DEFAULT_KEYWORDS);
+      saveKeywords();
+      renderKeywordChips();
+      paint();
+    });
+    settingsModal.addEventListener("click", (event) => {
+      if (event.target === settingsModal)
+        closeSettings();
+    });
     for (const key of Object.keys(EXAMPLES)) {
       const option = document.createElement("option");
       option.value = key;
@@ -8040,15 +8123,40 @@ machine:
       download("libraries.json", current.libraries, "application/json");
     });
     source.addEventListener("keydown", (event) => {
-      if (event.key !== "Tab")
-        return;
-      event.preventDefault();
       const { selectionStart, selectionEnd, value } = source;
-      source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
-      source.selectionStart = source.selectionEnd = selectionStart + 2;
-      workspace.files[workspace.active] = source.value;
-      paint();
-      rerender();
+      if (event.key === "Tab") {
+        event.preventDefault();
+        if (selectionStart === selectionEnd) {
+          source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
+          source.selectionStart = source.selectionEnd = selectionStart + 2;
+        } else {
+          const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
+          const block = value.slice(lineStart, selectionEnd);
+          const indented = block.replace(/^/gm, "  ");
+          source.value = value.slice(0, lineStart) + indented + value.slice(selectionEnd);
+          source.selectionStart = lineStart;
+          source.selectionEnd = lineStart + indented.length;
+        }
+        workspace.files[workspace.active] = source.value;
+        paint();
+        rerender();
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey) {
+        if (selectionStart !== selectionEnd)
+          return;
+        const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
+        const currentLine = value.slice(lineStart, selectionStart);
+        const indent = /^[ \t]*/.exec(currentLine)[0];
+        const deeper = /:\s*$/.test(currentLine);
+        event.preventDefault();
+        const insertion = "\n" + indent + (deeper ? "  " : "");
+        source.value = value.slice(0, selectionStart) + insertion + value.slice(selectionEnd);
+        source.selectionStart = source.selectionEnd = selectionStart + insertion.length;
+        workspace.files[workspace.active] = source.value;
+        paint();
+        rerender();
+      }
     });
     projectButton.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -8079,6 +8187,8 @@ machine:
         closeSnippetMenu();
       if (event.key === "Escape" && !downloadMenu.hidden)
         closeDownloadMenu();
+      if (event.key === "Escape" && !settingsModal.hidden)
+        closeSettings();
     });
     importZipInput.addEventListener("change", () => {
       const file = importZipInput.files?.[0];

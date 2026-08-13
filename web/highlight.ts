@@ -37,8 +37,11 @@ export type TokenKind =
  * Every key that PulseIR's schema defines. Keys NOT in this set are
  * user-defined names (bus names, action names, event names, etc.) and get the
  * 'identifier' token so they look visually distinct from schema keywords.
+ *
+ * Exported so callers can persist and restore a user-edited copy via the
+ * settings panel, then pass their own Set<string> to highlight().
  */
-const KEYWORDS = new Set([
+export const DEFAULT_KEYWORDS: readonly string[] = [
   // Top-level blocks
   'project', 'target', 'hardware', 'buses', 'devices', 'machine', 'tasks',
   'commands', 'imports', 'events', 'resources',
@@ -63,7 +66,9 @@ const KEYWORDS = new Set([
   'source', 'map',
   // parameter / value descriptors
   'min', 'max', 'range', 'value',
-]);
+];
+
+const KEYWORD_SET = new Set(DEFAULT_KEYWORDS);
 
 const BOOLEANS = new Set(['true', 'false', 'yes', 'no', 'on', 'off']);
 const NULLS = new Set(['null', '~']);
@@ -177,7 +182,7 @@ function findKeyColon(line: string, i: number, inFlow: boolean): number {
  * `flowDepth` tracks nesting in `{}`/`[]`, because `{a: 1}` contains keys and a
  * bare `a: 1` at top level has already been handled by the caller.
  */
-function emitValue(out: Emitter, line: string, from: number, flowDepth: number): void {
+function emitValue(out: Emitter, line: string, from: number, flowDepth: number, keywords: ReadonlySet<string>): void {
   let i = from;
   let depth = flowDepth;
 
@@ -241,7 +246,7 @@ function emitValue(out: Emitter, line: string, from: number, flowDepth: number):
       const colon = findKeyColon(line, i, true);
       if (colon !== -1) {
         const rawKey = line.slice(i, colon);
-        out.push(KEYWORDS.has(rawKey.trim()) ? 'key' : 'identifier', rawKey);
+        out.push(keywords.has(rawKey.trim()) ? 'key' : 'identifier', rawKey);
         out.push('punct', ':');
         i = colon + 1;
         continue;
@@ -269,7 +274,8 @@ function emitValue(out: Emitter, line: string, from: number, flowDepth: number):
  * Line-based, with one piece of carried state: whether we are inside a block
  * scalar, whose body must be left as text.
  */
-export function highlight(source: string): string {
+export function highlight(source: string, keywords?: ReadonlySet<string>): string {
+  const kw = keywords ?? KEYWORD_SET;
   const lines = source.split('\n');
   const rendered: string[] = [];
 
@@ -333,7 +339,7 @@ export function highlight(source: string): string {
       if (/^["']/.test(rawKey.trim())) {
         keyKind = 'string';
       } else {
-        keyKind = KEYWORDS.has(rawKey.trim()) ? 'key' : 'identifier';
+        keyKind = kw.has(rawKey.trim()) ? 'key' : 'identifier';
       }
       out.push(keyKind, rawKey);
       out.push('punct', ':');
@@ -353,7 +359,7 @@ export function highlight(source: string): string {
       continue;
     }
 
-    emitValue(out, line, i, 0);
+    emitValue(out, line, i, 0, kw);
     rendered.push(out.toString());
   }
 

@@ -19,7 +19,7 @@ import { Codegen } from '../src/codegen/index.js';
 import { TopicEmitter } from '../src/emit/topics.js';
 import { LibraryEmitter } from '../src/emit/libraries.js';
 import { flattenStates, resolveEntryLeaf, resolvePath } from '../src/analysis/states.js';
-import { highlight } from './highlight.js';
+import { highlight, DEFAULT_KEYWORDS } from './highlight.js';
 import { ProjectStore, foldImport, findEntry, importedName, nameFromModel } from './projects.js';
 import type { Project } from './projects.js';
 import { zip, unzip, ZipError } from './zip.js';
@@ -67,6 +67,10 @@ const downloadButton = $<HTMLButtonElement>('download-button');
 const downloadMenu = $<HTMLDivElement>('download-menu');
 const themeButton = $<HTMLButtonElement>('theme-button');
 const mqttTab = $<HTMLButtonElement>('tab-topics');
+const settingsButton = $<HTMLButtonElement>('settings-button');
+const settingsModal = $<HTMLDivElement>('settings-modal');
+const keywordChips = $<HTMLDivElement>('keyword-chips');
+const keywordInput = $<HTMLInputElement>('keyword-input');
 
 // ---------------------------------------------------------------------------
 // Model state
@@ -189,7 +193,7 @@ function paint(): void {
 
   // A trailing newline needs a line to sit on, or the last line of a
   // scrolled-to-the-bottom document has nothing beneath the caret.
-  highlightCode.innerHTML = `${highlight(text)}\n`;
+  highlightCode.innerHTML = `${highlight(text, activeKeywords)}\n`;
   syncScroll();
 }
 
@@ -649,6 +653,79 @@ function cycleTheme(): void {
   const next: Theme = current === 'auto' ? 'light' : current === 'light' ? 'dark' : 'auto';
   localStorage.setItem(THEME_KEY, next);
   applyTheme(next);
+}
+
+// ---------------------------------------------------------------------------
+// Keyword registry
+// ---------------------------------------------------------------------------
+
+const KEYWORD_STORAGE_KEY = 'pulseir.keywords';
+
+function loadKeywords(): Set<string> {
+  const raw = localStorage.getItem(KEYWORD_STORAGE_KEY);
+  if (!raw) return new Set(DEFAULT_KEYWORDS);
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every(x => typeof x === 'string')) {
+      return new Set(parsed as string[]);
+    }
+  } catch { /* fall through */ }
+  return new Set(DEFAULT_KEYWORDS);
+}
+
+function saveKeywords(): void {
+  localStorage.setItem(KEYWORD_STORAGE_KEY, JSON.stringify([...activeKeywords].sort()));
+}
+
+let activeKeywords: Set<string> = loadKeywords();
+
+// ---------------------------------------------------------------------------
+// Settings modal
+// ---------------------------------------------------------------------------
+
+function renderKeywordChips(): void {
+  keywordChips.replaceChildren();
+  for (const word of [...activeKeywords].sort()) {
+    const chip = document.createElement('span');
+    chip.className = 'keyword-chip';
+    const label = document.createElement('code');
+    label.textContent = word;
+    const remove = document.createElement('button');
+    remove.className = 'chip-remove';
+    remove.title = `Remove '${word}'`;
+    remove.setAttribute('aria-label', `Remove ${word}`);
+    remove.textContent = '×';
+    remove.addEventListener('click', () => {
+      activeKeywords.delete(word);
+      saveKeywords();
+      renderKeywordChips();
+      paint();
+    });
+    chip.append(label, remove);
+    keywordChips.append(chip);
+  }
+}
+
+function addKeyword(): void {
+  const word = keywordInput.value.trim();
+  if (!word) return;
+  activeKeywords.add(word);
+  saveKeywords();
+  renderKeywordChips();
+  keywordInput.value = '';
+  keywordInput.focus();
+  paint();
+}
+
+function openSettings(): void {
+  renderKeywordChips();
+  settingsModal.hidden = false;
+  keywordInput.value = '';
+  keywordInput.focus();
+}
+
+function closeSettings(): void {
+  settingsModal.hidden = true;
 }
 
 /**
@@ -1265,6 +1342,22 @@ function init(): void {
   applyTheme((localStorage.getItem(THEME_KEY) as Theme | null) ?? 'auto');
   themeButton.addEventListener('click', cycleTheme);
 
+  settingsButton.addEventListener('click', openSettings);
+  $<HTMLButtonElement>('settings-close').addEventListener('click', closeSettings);
+  $<HTMLButtonElement>('keyword-add-btn').addEventListener('click', addKeyword);
+  keywordInput.addEventListener('keydown', event => {
+    if (event.key === 'Enter') addKeyword();
+  });
+  $<HTMLButtonElement>('keyword-reset-btn').addEventListener('click', () => {
+    activeKeywords = new Set(DEFAULT_KEYWORDS);
+    saveKeywords();
+    renderKeywordChips();
+    paint();
+  });
+  settingsModal.addEventListener('click', event => {
+    if (event.target === settingsModal) closeSettings();
+  });
+
   for (const key of Object.keys(EXAMPLES)) {
     const option = document.createElement('option');
     option.value = key;
@@ -1344,16 +1437,55 @@ function init(): void {
     download('libraries.json', current.libraries, 'application/json');
   });
 
-  // Tab in a textarea should indent, not escape to the next control.
+  // Tab and Enter — keep the editor from escaping focus and add auto-indent.
   source.addEventListener('keydown', event => {
-    if (event.key !== 'Tab') return;
-    event.preventDefault();
     const { selectionStart, selectionEnd, value } = source;
-    source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
-    source.selectionStart = source.selectionEnd = selectionStart + 2;
-    workspace.files[workspace.active] = source.value;
-    paint();
-    rerender();
+
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      if (selectionStart === selectionEnd) {
+        // No selection: insert two spaces at the cursor.
+        source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
+        source.selectionStart = source.selectionEnd = selectionStart + 2;
+      } else {
+        // Selection: indent every touched line by two spaces.
+        const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
+        const block = value.slice(lineStart, selectionEnd);
+        const indented = block.replace(/^/gm, '  ');
+        source.value = value.slice(0, lineStart) + indented + value.slice(selectionEnd);
+        source.selectionStart = lineStart;
+        source.selectionEnd = lineStart + indented.length;
+      }
+      workspace.files[workspace.active] = source.value;
+      paint();
+      rerender();
+      return;
+    }
+
+    // Enter: auto-indent to match the current line, deepening by two spaces
+    // when the line ends with ':' (block key with no inline value).
+    // Shift+Enter inserts a plain newline — useful to escape auto-indent.
+    if (event.key === 'Enter' && !event.shiftKey) {
+      if (selectionStart !== selectionEnd) return; // let default handle range selections
+
+      const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
+      const currentLine = value.slice(lineStart, selectionStart);
+
+      // Leading whitespace of the current line.
+      const indent = /^[ \t]*/.exec(currentLine)![0];
+
+      // Deepen when the text up to the cursor ends with ':' — a block mapping
+      // key with nothing after it yet. Covers `hardware:`, `buses:`, etc.
+      const deeper = /:\s*$/.test(currentLine);
+
+      event.preventDefault();
+      const insertion = '\n' + indent + (deeper ? '  ' : '');
+      source.value = value.slice(0, selectionStart) + insertion + value.slice(selectionEnd);
+      source.selectionStart = source.selectionEnd = selectionStart + insertion.length;
+      workspace.files[workspace.active] = source.value;
+      paint();
+      rerender();
+    }
   });
 
   projectButton.addEventListener('click', event => {
@@ -1379,6 +1511,7 @@ function init(): void {
     if (event.key === 'Escape' && !projectMenu.hidden) closeMenu();
     if (event.key === 'Escape' && !snippetMenu.hidden) closeSnippetMenu();
     if (event.key === 'Escape' && !downloadMenu.hidden) closeDownloadMenu();
+    if (event.key === 'Escape' && !settingsModal.hidden) closeSettings();
   });
 
   importZipInput.addEventListener('change', () => {
