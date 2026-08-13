@@ -7043,6 +7043,7 @@ ${implementations.join("\n\n")}`;
     projectName.textContent = project.name;
     renderFileBar();
     paint();
+    clearOutput();
     render();
   }
   function restore() {
@@ -7124,6 +7125,12 @@ target:
     staleNote.hidden = !stale;
     for (const pane of Object.values(panes))
       pane.classList.toggle("stale", stale);
+  }
+  function clearOutput() {
+    current = null;
+    for (const pane of Object.values(panes))
+      pane.innerHTML = "";
+    setStale(false);
   }
   function setStatus(kind, title, detail = "") {
     status.className = `status ${kind}`;
@@ -7226,7 +7233,8 @@ target:
       const line = error instanceof ParseError && error.line !== void 0 ? error.line + 1 : null;
       setBadLine(line !== null && workspace.active === workspace.entry ? line : null);
       setStatus("error", `Model error${line !== null ? ` (line ${line})` : ""}`, message);
-      setStale(true);
+      if (current !== null)
+        setStale(true);
       return;
     }
     let sketch;
@@ -7238,7 +7246,8 @@ target:
       libraries = new LibraryEmitter().toJSON(project);
     } catch (error) {
       setStatus("error", "Generation error", error instanceof Error ? error.message : String(error));
-      setStale(true);
+      if (current !== null)
+        setStale(true);
       return;
     }
     setBadLine(null);
