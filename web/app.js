@@ -7325,50 +7325,100 @@ target:
     }
   }
   function renderStructure(project) {
-    const states = project.system.states;
-    const flat = flattenStates(states);
-    const tree = flat.filter((s) => s.depth === 0).map((s) => renderStateNode(s.path, flat)).join("");
-    const rows = project.system.transitions.map((t) => {
-      const targetPath = resolvePath(states, t.target);
-      const leaf = targetPath ? resolveEntryLeaf(states, targetPath) : null;
-      const descends = leaf && targetPath && leaf !== targetPath;
-      const target = descends ? `${escapeHtml2(t.target)} <span class="arrow">\u21B3</span> <code>${escapeHtml2(leaf)}</code>` : escapeHtml2(t.target);
-      const guard = t.guard ? `<code>${escapeHtml2(t.guard.name)}</code>` : '<span class="dim">\u2014</span>';
-      const actions = t.actions?.length ? t.actions.map((a) => `<code>${escapeHtml2(a.name)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
-      const src = t.source === "*" ? '<span class="tag wild">any state</span>' : `<code>${escapeHtml2(t.source)}</code>`;
-      const trigger = t.event !== void 0 ? `<code>${escapeHtml2(t.event)}</code>` : `<span class="tag timer">after</span> <code>${escapeHtml2(String(t.after))}</code>`;
-      return `<tr>
-      <td>${src}</td>
-      <td>${trigger}</td>
-      <td>${target}</td>
-      <td>${guard}</td>
-      <td>${actions}</td>
-    </tr>`;
-    }).join("");
-    const resources = (project.system.resources || []).map((r) => `<tr>
-      <td><code>${escapeHtml2(r.name)}</code></td>
-      <td><span class="tag">${escapeHtml2(String(r.interface))}</span></td>
-      <td>${Object.entries(r.binding || {}).map(([k, v]) => `<code>${escapeHtml2(k)}=${escapeHtml2(String(v))}</code>`).join(" ") || '<span class="dim">\u2014</span>'}</td>
-    </tr>`).join("");
-    return `
-    <h3>State hierarchy</h3>
-    <p class="hint">A machine only ever rests in a <em>leaf</em>. Entering a
-    composite state descends to its initial child, marked \u25B8.</p>
-    <div class="tree">${tree || '<p class="dim">No states defined.</p>'}</div>
-
-    <h3>Transitions</h3>
-    <p class="hint">A transition on an enclosing state also applies to its
-    children, and an inner transition on the same event wins.</p>
-    <table>
-      <thead><tr><th>From</th><th>Trigger</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5" class="dim">No transitions defined.</td></tr>'}</tbody>
-    </table>
-
-    <h3>Interfaces</h3>
-    <table>
-      <thead><tr><th>Resource</th><th>Interface</th><th>Binding</th></tr></thead>
-      <tbody>${resources || '<tr><td colspan="3" class="dim">No resources declared.</td></tr>'}</tbody>
-    </table>`;
+    const { system } = project;
+    const flat = flattenStates(system.states);
+    const sections = [];
+    if (flat.length > 0) {
+      const tree = flat.filter((s) => s.depth === 0).map((s) => renderStateNode(s.path, flat)).join("");
+      sections.push(`
+      <h3>State hierarchy</h3>
+      <p class="hint">A machine only ever rests in a <em>leaf</em>. Entering a
+      composite state descends to its initial child, marked \u25B8.</p>
+      <div class="tree">${tree}</div>`);
+    }
+    if (system.transitions.length > 0) {
+      const rows = system.transitions.map((t) => {
+        const targetPath = resolvePath(system.states, t.target);
+        const leaf = targetPath ? resolveEntryLeaf(system.states, targetPath) : null;
+        const descends = leaf && targetPath && leaf !== targetPath;
+        const target = descends ? `${escapeHtml2(t.target)} <span class="arrow">\u21B3</span> <code>${escapeHtml2(leaf)}</code>` : escapeHtml2(t.target);
+        const guard = t.guard ? `<code>${escapeHtml2(t.guard.name)}</code>` : '<span class="dim">\u2014</span>';
+        const actions = t.actions?.length ? t.actions.map((a) => `<code>${escapeHtml2(a.name)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
+        const src = t.source === "*" ? '<span class="tag wild">any state</span>' : `<code>${escapeHtml2(t.source)}</code>`;
+        const trigger = t.event !== void 0 ? `<code>${escapeHtml2(t.event)}</code>` : `<span class="tag timer">after</span> <code>${escapeHtml2(String(t.after))}</code>`;
+        return `<tr><td>${src}</td><td>${trigger}</td><td>${target}</td><td>${guard}</td><td>${actions}</td></tr>`;
+      }).join("");
+      sections.push(`
+      <h3>Transitions</h3>
+      <p class="hint">A transition on an enclosing state also applies to its
+      children, and an inner transition on the same event wins.</p>
+      <table>
+        <thead><tr><th>From</th><th>Trigger</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+    }
+    const resources = system.resources ?? [];
+    if (resources.length > 0) {
+      const rows = resources.map((r) => `<tr>
+        <td><code>${escapeHtml2(r.name)}</code></td>
+        <td><span class="tag">${escapeHtml2(String(r.interface))}</span></td>
+        <td>${Object.entries(r.binding ?? {}).map(([k, v]) => `<code>${escapeHtml2(k)}=${escapeHtml2(String(v))}</code>`).join(" ") || '<span class="dim">\u2014</span>'}</td>
+      </tr>`).join("");
+      sections.push(`
+      <h3>Interfaces</h3>
+      <table>
+        <thead><tr><th>Resource</th><th>Interface</th><th>Binding</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+    }
+    const cmdSet = system.commands;
+    if (cmdSet?.commands?.length) {
+      const rows = cmdSet.commands.map((c) => {
+        const acts = c.actions?.length ? c.actions.map((a) => `<code>${escapeHtml2(a.name)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
+        const ev = c.event ? `<code>${escapeHtml2(c.event)}</code>` : '<span class="dim">\u2014</span>';
+        const reply = c.log ? `<code>${escapeHtml2(c.log)}</code>` : '<span class="dim">\u2014</span>';
+        return `<tr><td><code>${escapeHtml2(c.match)}</code></td><td>${acts}</td><td>${ev}</td><td>${reply}</td></tr>`;
+      }).join("");
+      const src = cmdSet.source ? ` <span class="dim">\u2014 source: <code>${escapeHtml2(cmdSet.source)}</code></span>` : "";
+      sections.push(`
+      <h3>Commands${src}</h3>
+      <table>
+        <thead><tr><th>Command</th><th>Actions</th><th>Event</th><th>Reply</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+    }
+    const tasks = system.tasks ?? [];
+    if (tasks.length > 0) {
+      const rows = tasks.map((t) => {
+        const acts = t.actions.length ? t.actions.map((a) => `<code>${escapeHtml2(a.name)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
+        const log = t.log ? `<code>${escapeHtml2(t.log)}</code>` : '<span class="dim">\u2014</span>';
+        return `<tr><td><code>${escapeHtml2(t.name)}</code></td><td><code>${escapeHtml2(String(t.every))}</code> ms</td><td>${acts}</td><td>${log}</td></tr>`;
+      }).join("");
+      sections.push(`
+      <h3>Tasks</h3>
+      <table>
+        <thead><tr><th>Name</th><th>Interval</th><th>Actions</th><th>Log</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+    }
+    const parameters = system.parameters ?? [];
+    if (parameters.length > 0) {
+      const rows = parameters.map((p) => {
+        const range = p.min !== void 0 && p.max !== void 0 ? `<code>${escapeHtml2(String(p.min))}\u2013${escapeHtml2(String(p.max))}</code>` : '<span class="dim">\u2014</span>';
+        const unit = p.unit ? `<code>${escapeHtml2(p.unit)}</code>` : '<span class="dim">\u2014</span>';
+        return `<tr><td><code>${escapeHtml2(p.name)}</code></td><td><span class="tag">${escapeHtml2(p.type)}</span></td><td><code>${escapeHtml2(String(p.default))}</code></td><td>${range}</td><td>${unit}</td></tr>`;
+      }).join("");
+      sections.push(`
+      <h3>Parameters</h3>
+      <table>
+        <thead><tr><th>Name</th><th>Type</th><th>Default</th><th>Range</th><th>Unit</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+    }
+    if (sections.length === 0) {
+      return '<p class="dim" style="padding:16px 20px">Nothing to show yet \u2014 add hardware:, tasks:, commands:, or machine: to populate this view.</p>';
+    }
+    return sections.join("\n");
   }
   function renderStateNode(path, flat) {
     const node = flat.find((s) => s.path === path);
