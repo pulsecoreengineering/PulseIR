@@ -49,6 +49,18 @@ const MERGED_LISTS = [
 /** Guards against a runaway include graph even if cycle detection is bypassed. */
 const MAX_INCLUDE_DEPTH = 32;
 
+/**
+ * The schema version this build of the toolchain understands.
+ *
+ * Models may declare `pulseir: "1"` at the top level. A model that declares a
+ * higher version than this was written for a newer toolchain; the parser warns
+ * rather than errors so existing models keep compiling while the author
+ * investigates.  A model that declares a *lower* version is from an older
+ * schema; a parser migration note is emitted as a warning, not an error.
+ * Omitting `pulseir:` entirely is accepted silently for backward compatibility.
+ */
+export const SCHEMA_VERSION = 1;
+
 export class ParseError extends Error {
   constructor(
     message: string,
@@ -351,13 +363,29 @@ export class Parser {
       ? this.parseSystem(raw.system as Record<string, unknown>)
       : this.parseDomains(raw);
 
+    const schemaVersion = this.parseSchemaVersion(raw.pulseir);
+
     const project: PulseProject = {
       name: projectRaw.name as string || 'unnamed',
       version: projectRaw.version as string || '0.1.0',
       description: projectRaw.description as string | undefined,
+      schemaVersion,
       target: this.parseTarget(raw.target),
       system,
     };
+
+    // A missing board declaration is not an error - the generator falls back to
+    // generic code - but the fallbacks are lossy enough that the user should be
+    // told explicitly rather than left to wonder why their PWM hint lists three
+    // options or why pin validation did not catch an impossible GPIO number.
+    if (!project.target?.board) {
+      this.warnings.push(
+        'No target board declared. Pin validation is disabled and board-specific ' +
+        'code hints will show all options rather than just yours. Add one:\n' +
+        '  target:\n' +
+        '    board: esp32   # or uno, mega, nano, rp2040, esp8266 ...'
+      );
+    }
 
     // Two things wired to one pin is wrong on every board, so this needs no
     // board profile. Reported here rather than at codegen so the editor and
@@ -382,6 +410,33 @@ export class Parser {
     }
 
     return project;
+  }
+
+  private parseSchemaVersion(raw: unknown): number | undefined {
+    if (raw === undefined || raw === null) return undefined;
+
+    const ver = typeof raw === 'number'
+      ? Math.floor(raw)
+      : typeof raw === 'string'
+        ? parseInt(raw, 10)
+        : NaN;
+
+    if (isNaN(ver) || ver < 1) {
+      throw new ParseError(
+        `"pulseir" must be a positive schema version number (e.g. pulseir: "1"), ` +
+        `got ${JSON.stringify(raw)}`
+      );
+    }
+
+    if (ver > SCHEMA_VERSION) {
+      this.warnings.push(
+        `This model declares pulseir: "${ver}" but this toolchain only understands ` +
+        `schema version ${SCHEMA_VERSION}. Some fields may be ignored. ` +
+        `Update the toolchain, or remove the version declaration to silence this warning.`
+      );
+    }
+
+    return ver;
   }
 
   private parseTarget(raw: unknown): PulseProject['target'] {

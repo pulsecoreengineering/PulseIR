@@ -34,6 +34,7 @@ import type {
   Parameter,
   Resource,
   StateRef,
+  Action,
 } from '../model/index.js';
 import { parseTemplate } from '../analysis/template.js';
 import { InterfaceBackend } from './interfaces.js';
@@ -1328,6 +1329,60 @@ several_reset
   }
 
   /**
+   * Board-aware hint for the PWM write call, shown in action stubs when an
+   * action references a pwm_output device.
+   *
+   * The function name differs by board and by ESP32 core version, so this
+   * comment is the difference between a student calling the wrong API and
+   * getting a compile error they cannot diagnose.
+   */
+  private pwmWriteHint(action: { name: string; driver?: string; params?: Record<string, unknown> }): string {
+    if (action.driver !== 'pwm_control') return '';
+
+    const deviceName = String(action.params?.device ?? '');
+    const device = (this.project.system.components || []).find(c => c.name === deviceName);
+    if (!device) return '';
+
+    const pinMacro = `${this.sanitizeUpper(deviceName)}_PIN`;
+    const channelMacro = `${this.sanitizeUpper(deviceName)}_CHANNEL`;
+
+    // Resolve the duty argument to its C expression.
+    const dutyRaw = action.params?.duty;
+    const dutyParam = (this.project.system.parameters || []).find(p => p.name === String(dutyRaw));
+    const dutyExpr = dutyParam
+      ? `ctx->parameters->${this.sanitize(String(dutyRaw))}`
+      : dutyRaw !== undefined ? String(dutyRaw) : '0';
+
+    const board = (this.project.target?.board ?? '').toLowerCase();
+    const isEsp32 = /esp32/.test(board);
+    const isAvr   = /avr|uno|mega|nano|atmega|leonardo/.test(board);
+    const isRp    = /rp2040|pico/.test(board);
+
+    if (isEsp32) {
+      return (
+        '\n  // PWM write (target: ' + board + '):\n' +
+        `  //   core 3.x: ledcWrite(${pinMacro}, ${dutyExpr});\n` +
+        `  //   core 2.x: ledcWrite(${channelMacro}, ${dutyExpr});`
+      );
+    }
+
+    if (isAvr || isRp) {
+      return (
+        '\n  // PWM write (target: ' + board + '):\n' +
+        `  //   analogWrite(${pinMacro}, ${dutyExpr});`
+      );
+    }
+
+    // No target declared, or an unrecognised board — show all options.
+    return (
+      '\n  // PWM write:\n' +
+      `  //   ESP32 core 3.x: ledcWrite(${pinMacro}, ${dutyExpr});\n` +
+      `  //   ESP32 core 2.x: ledcWrite(${channelMacro}, ${dutyExpr});\n` +
+      `  //   AVR / RP2040:   analogWrite(${pinMacro}, ${dutyExpr});`
+    );
+  }
+
+  /**
    * A `log:` template as print calls.
    *
    * Emitted verbatim in order - one print per literal, one per value - because
@@ -1679,11 +1734,13 @@ ${implementations}`;
         ? `  ${this.consoleStream()}.println("  -> Action: ${name}");\n`
         : '';
 
+      const pwmHint = action ? this.pwmWriteHint(action) : '';
+
       return `void action_${this.sanitize(name)}(SystemContext* ctx) {
 ${trace}  // Declared params for this action (documentation only):
 ${paramDoc}
 ${this.contextDoc()}  //
-  // TODO: Implement the hardware calls for this action.
+  // TODO: Implement the hardware calls for this action.${pwmHint}
   (void)ctx;
 }`;
     });

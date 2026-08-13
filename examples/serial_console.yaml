@@ -9,6 +9,8 @@
 #      split across loop() passes, and refusing one too long to fit are all
 #      generated. What a command *means* is your action, in C.
 
+pulseir: "1"
+
 project:
   name: serial_console
   version: "1.0"

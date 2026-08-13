@@ -204,6 +204,9 @@
   #project-button { font-family: var(--mono); font-size: 12.5px; max-width: 26ch; }
   /* Unconstrained, the template list stretches and wraps the header. */
   #example { max-width: 24ch; }
+  /* Glow the board selector amber when nothing is selected, so a missing
+     board declaration is impossible to miss. */
+  #board.unset { border-color: var(--warn-fg); color: var(--warn-fg); }
   #project-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .caret { color: var(--dim); }
   .menu {
@@ -312,6 +315,27 @@
 
   <label for="example">New from</label>
   <select id="example"><option value="">—</option></select>
+
+  <label for="board">Board</label>
+  <select id="board" title="Target board — sets the right PWM API, pin validation and other board-specific hints">
+    <option value="">— select —</option>
+    <optgroup label="ESP32">
+      <option value="esp32">ESP32</option>
+      <option value="esp32s3">ESP32-S3</option>
+      <option value="esp32s2">ESP32-S2</option>
+      <option value="esp32c3">ESP32-C3</option>
+      <option value="esp32h2">ESP32-H2</option>
+    </optgroup>
+    <optgroup label="AVR">
+      <option value="uno">Arduino Uno</option>
+      <option value="mega">Arduino Mega</option>
+      <option value="nano">Arduino Nano</option>
+    </optgroup>
+    <optgroup label="Other">
+      <option value="rp2040">RP2040 / Pico</option>
+      <option value="esp8266">ESP8266</option>
+    </optgroup>
+  </select>
 
   <label for="namespace">MQTT namespace</label>
   <input id="namespace" placeholder="project name">

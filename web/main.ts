@@ -58,6 +58,7 @@ const importFolderInput = $<HTMLInputElement>('import-folder');
 const copyYamlButton = $<HTMLButtonElement>('copy-yaml');
 const copyOutputButton = $<HTMLButtonElement>('copy-output');
 const namespaceInput = $<HTMLInputElement>('namespace');
+const boardSelect = $<HTMLSelectElement>('board');
 const staleNote = $<HTMLDivElement>('stale-note');
 
 // ---------------------------------------------------------------------------
@@ -471,6 +472,58 @@ function render(): void {
   }
 
   current = { project, sketch, topics, libraries };
+
+  // Keep the board selector in sync with what the model actually declares.
+  syncBoard(project.target?.board ?? '');
+}
+
+/**
+ * Reflect the model's declared board in the selector UI without triggering a
+ * re-render (the selector is read-only here — it follows the YAML, not vice versa).
+ */
+function syncBoard(board: string): void {
+  boardSelect.value = board;
+  boardSelect.classList.toggle('unset', board === '');
+}
+
+/**
+ * Write a board selection back into the active file's YAML text.
+ *
+ * Three cases, handled in order:
+ *   1. A `board:` line already exists → replace its value (or remove the line
+ *      when clearing the selection, rather than leaving `board: `).
+ *   2. A `target:` block exists but has no `board:` → inject after it.
+ *   3. No `target:` block at all → inject one before `project:`.
+ *
+ * Text manipulation preserves comments and user formatting; re-serialising YAML
+ * would silently erase them.
+ */
+function applyBoardToYaml(board: string): void {
+  let text = source.value;
+
+  if (/^[ \t]*board:/m.test(text)) {
+    if (board === '') {
+      // Remove the line entirely when clearing — an empty `board:` would warn.
+      text = text.replace(/^[ \t]*board:.*\n?/m, '');
+    } else {
+      text = text.replace(/^([ \t]*board:).*$/m, `$1 ${board}`);
+    }
+  } else if (/^target:/m.test(text)) {
+    // Target block exists, no board line — add one as the first item.
+    text = text.replace(/^(target:.*)$/m, `$1\n  board: ${board}`);
+  } else {
+    // No target block at all — inject one just before `project:`.
+    const m = /^project:/m.exec(text);
+    if (m) {
+      text = text.slice(0, m.index) + `target:\n  board: ${board}\n\n` + text.slice(m.index);
+    } else {
+      text = `target:\n  board: ${board}\n\n` + text;
+    }
+  }
+
+  source.value = text;
+  workspace.files[workspace.active] = text;
+  paint();
 }
 
 // ---------------------------------------------------------------------------
@@ -862,6 +915,11 @@ function init(): void {
 
   source.addEventListener('scroll', syncScroll, { passive: true });
   namespaceInput.addEventListener('input', rerender);
+
+  boardSelect.addEventListener('change', () => {
+    applyBoardToYaml(boardSelect.value);
+    rerender();
+  });
 
   // Picking a template starts a *new* project rather than overwriting the open
   // one, so browsing the examples can no longer cost someone their work.

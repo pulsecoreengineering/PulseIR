@@ -6,7 +6,7 @@
  * through the parser and produced silently wrong C++.
  */
 
-import { Parser, ParseError } from '../src/parser/index.js';
+import { Parser, ParseError, SCHEMA_VERSION } from '../src/parser/index.js';
 
 function model(body: string): string {
   return `
@@ -439,6 +439,40 @@ test('rejects a command raising an event the model never declares', () => {
   expectReject(plain(`commands:
   map:
     go: {event: NOPE}`), 'unknown event "NOPE"', 'unknown event');
+});
+
+test('schema version: absent is fine, declared matching version is fine', () => {
+  // Omitting pulseir: is the legacy/compat path — silently accepted.
+  expectAccept(plain('tasks:\n  blink: {every: 500, do: toggle}'), 'no pulseir field');
+
+  // Declaring the current version is the ideal form — clean accept.
+  const current = `pulseir: "${SCHEMA_VERSION}"\n` + plain('tasks:\n  blink: {every: 500, do: toggle}');
+  const project = expectAccept(current, 'current schema version');
+  if (project.schemaVersion !== SCHEMA_VERSION) {
+    throw new Error(`schemaVersion not stored: expected ${SCHEMA_VERSION}, got ${project.schemaVersion}`);
+  }
+});
+
+test('schema version: future version warns, does not error', () => {
+  const future = `pulseir: "${SCHEMA_VERSION + 1}"\n` + plain('tasks:\n  blink: {every: 500, do: toggle}');
+  const p = new Parser();
+  p.parse(future);
+  if (!p.warnings.some(w => w.includes('only understands'))) {
+    throw new Error('future schema version produced no warning');
+  }
+});
+
+test('schema version: non-numeric value is rejected', () => {
+  expectReject(
+    `pulseir: "banana"\n` + plain('tasks:\n  blink: {every: 500, do: toggle}'),
+    'positive schema version number',
+    'garbage schema version'
+  );
+  expectReject(
+    `pulseir: "0"\n` + plain('tasks:\n  blink: {every: 500, do: toggle}'),
+    'positive schema version number',
+    'zero schema version'
+  );
 });
 
 // ============================================================================
