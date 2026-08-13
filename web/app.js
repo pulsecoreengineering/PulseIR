@@ -8384,6 +8384,16 @@ machine:
     openProject(restore());
     const rerender = debounce(render, 150);
     source.addEventListener("input", () => {
+      const raw = source.value;
+      const fixed = normalizeYaml(raw);
+      if (fixed !== raw) {
+        const ss = source.selectionStart ?? raw.length;
+        const se = source.selectionEnd ?? raw.length;
+        const shiftStart = normalizeYaml(raw.slice(0, ss)).length - ss;
+        const shiftEnd = normalizeYaml(raw.slice(0, se)).length - se;
+        source.value = fixed;
+        source.setSelectionRange(ss + shiftStart, se + shiftEnd);
+      }
       workspace.files[workspace.active] = source.value;
       paint();
       rerender();
