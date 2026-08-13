@@ -7035,6 +7035,7 @@ ${implementations.join("\n\n")}`;
   var downloadButton = $("download-button");
   var downloadMenu = $("download-menu");
   var themeButton = $("theme-button");
+  var mqttTab = $("tab-topics");
   var store = new ProjectStore(localStorage);
   var workspace = { id: "", name: "", files: {}, entry: "", active: "", updatedAt: 0 };
   var current = null;
@@ -7138,10 +7139,21 @@ target:
       pane.innerHTML = "";
     setStale(false);
     setDownloadReady(false);
+    setMqttTabVisible(false);
   }
   function setDownloadReady(ready) {
     downloadButton.disabled = !ready;
     downloadButton.classList.toggle("ready", ready);
+  }
+  function setMqttTabVisible(visible) {
+    const wasActive = !panes.topics.hidden;
+    mqttTab.hidden = !visible;
+    if (wasActive && !visible) {
+      selectTab("sketch");
+    }
+    if (visible && !wasActive && panes.sketch.hidden) {
+      selectTab("topics");
+    }
   }
   function showGuide() {
     const machineIcon = `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -7341,6 +7353,8 @@ ${parser.warnings.join("\n")}`);
     }
     current = { project, sketch, topics, libraries };
     setDownloadReady(true);
+    const hasMqtt = (project.system.resources ?? []).some((r) => String(r.interface) === "mqtt");
+    setMqttTabVisible(hasMqtt);
     syncBoard(project.target?.board ?? "");
   }
   function syncBoard(board) {
