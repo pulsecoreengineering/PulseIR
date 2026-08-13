@@ -7472,6 +7472,11 @@ target:
   function escapeHtml2(text) {
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
+  function withLineNumbers(html) {
+    const lines = html.split("\n");
+    const width = String(lines.length).length;
+    return lines.map((line, i) => `<span class="ln-num">${String(i + 1).padStart(width)}</span> ${line}`).join("\n");
+  }
   function setStale(stale) {
     staleNote.hidden = !stale;
     for (const pane of Object.values(panes))
@@ -7727,9 +7732,9 @@ target:
     }
     setBadLine(null);
     setStale(false);
-    panes.sketch.innerHTML = `<pre><code>${highlightCpp(sketch)}</code></pre>`;
-    panes.topics.innerHTML = `<pre><code>${escapeHtml2(topics)}</code></pre>`;
-    panes.libraries.innerHTML = `<pre><code>${escapeHtml2(libraries)}</code></pre>`;
+    panes.sketch.innerHTML = `<pre><code>${withLineNumbers(highlightCpp(sketch))}</code></pre>`;
+    panes.topics.innerHTML = `<pre><code>${withLineNumbers(escapeHtml2(topics))}</code></pre>`;
+    panes.libraries.innerHTML = `<pre><code>${withLineNumbers(escapeHtml2(libraries))}</code></pre>`;
     panes.structure.innerHTML = renderStructure(project);
     const fileCount = Object.keys(workspace.files).length;
     const counts = [
