@@ -20,6 +20,7 @@ import { TopicEmitter } from '../src/emit/topics.js';
 import { LibraryEmitter } from '../src/emit/libraries.js';
 import { flattenStates, resolveEntryLeaf, resolvePath } from '../src/analysis/states.js';
 import { highlight, DEFAULT_KEYWORDS } from './highlight.js';
+import { highlightCpp } from './highlight-cpp.js';
 import { ProjectStore, foldImport, findEntry, importedName, nameFromModel } from './projects.js';
 import type { Project } from './projects.js';
 import { zip, unzip, ZipError } from './zip.js';
@@ -413,74 +414,135 @@ function renderFileBar(): void {
  * on an enclosing state applies to everything inside it.
  */
 function renderStructure(project: PulseProject): string {
-  const states = project.system.states;
-  const flat = flattenStates(states);
+  const { system } = project;
+  const flat = flattenStates(system.states);
+  const sections: string[] = [];
 
-  const tree = flat
-    .filter(s => s.depth === 0)
-    .map(s => renderStateNode(s.path, flat))
-    .join('');
+  // ── State hierarchy ──────────────────────────────────────────────────────
+  if (flat.length > 0) {
+    const tree = flat
+      .filter(s => s.depth === 0)
+      .map(s => renderStateNode(s.path, flat))
+      .join('');
+    sections.push(`
+      <h3>State hierarchy</h3>
+      <p class="hint">A machine only ever rests in a <em>leaf</em>. Entering a
+      composite state descends to its initial child, marked ▸.</p>
+      <div class="tree">${tree}</div>`);
+  }
 
-  const rows = project.system.transitions.map(t => {
-    const targetPath = resolvePath(states, t.target);
-    const leaf = targetPath ? resolveEntryLeaf(states, targetPath) : null;
+  // ── Transitions ──────────────────────────────────────────────────────────
+  if (system.transitions.length > 0) {
+    const rows = system.transitions.map(t => {
+      const targetPath = resolvePath(system.states, t.target);
+      const leaf = targetPath ? resolveEntryLeaf(system.states, targetPath) : null;
+      const descends = leaf && targetPath && leaf !== targetPath;
+      const target = descends
+        ? `${escapeHtml(t.target)} <span class="arrow">↳</span> <code>${escapeHtml(leaf)}</code>`
+        : escapeHtml(t.target);
+      const guard = t.guard ? `<code>${escapeHtml(t.guard.name)}</code>` : '<span class="dim">—</span>';
+      const actions = t.actions?.length
+        ? t.actions.map(a => `<code>${escapeHtml(a.name)}</code>`).join(' ')
+        : '<span class="dim">—</span>';
+      const src = t.source === '*'
+        ? '<span class="tag wild">any state</span>'
+        : `<code>${escapeHtml(t.source)}</code>`;
+      const trigger = t.event !== undefined
+        ? `<code>${escapeHtml(t.event)}</code>`
+        : `<span class="tag timer">after</span> <code>${escapeHtml(String(t.after))}</code>`;
+      return `<tr><td>${src}</td><td>${trigger}</td><td>${target}</td><td>${guard}</td><td>${actions}</td></tr>`;
+    }).join('');
+    sections.push(`
+      <h3>Transitions</h3>
+      <p class="hint">A transition on an enclosing state also applies to its
+      children, and an inner transition on the same event wins.</p>
+      <table>
+        <thead><tr><th>From</th><th>Trigger</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+  }
 
-    // Spelling out the descent is the point: "running" is not where you land.
-    const descends = leaf && targetPath && leaf !== targetPath;
-    const target = descends
-      ? `${escapeHtml(t.target)} <span class="arrow">↳</span> <code>${escapeHtml(leaf)}</code>`
-      : escapeHtml(t.target);
+  // ── Interfaces (buses / hardware) ────────────────────────────────────────
+  const resources = system.resources ?? [];
+  if (resources.length > 0) {
+    const rows = resources.map(r => `<tr>
+        <td><code>${escapeHtml(r.name)}</code></td>
+        <td><span class="tag">${escapeHtml(String(r.interface))}</span></td>
+        <td>${Object.entries(r.binding ?? {})
+          .map(([k, v]) => `<code>${escapeHtml(k)}=${escapeHtml(String(v))}</code>`)
+          .join(' ') || '<span class="dim">—</span>'}</td>
+      </tr>`).join('');
+    sections.push(`
+      <h3>Interfaces</h3>
+      <table>
+        <thead><tr><th>Resource</th><th>Interface</th><th>Binding</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+  }
 
-    const guard = t.guard ? `<code>${escapeHtml(t.guard.name)}</code>` : '<span class="dim">—</span>';
-    const actions = t.actions?.length
-      ? t.actions.map(a => `<code>${escapeHtml(a.name)}</code>`).join(' ')
-      : '<span class="dim">—</span>';
-    const src = t.source === '*'
-      ? '<span class="tag wild">any state</span>'
-      : `<code>${escapeHtml(t.source)}</code>`;
+  // ── Commands ─────────────────────────────────────────────────────────────
+  const cmdSet = system.commands;
+  if (cmdSet?.commands?.length) {
+    const rows = cmdSet.commands.map(c => {
+      const acts = c.actions?.length
+        ? c.actions.map(a => `<code>${escapeHtml(a.name)}</code>`).join(' ')
+        : '<span class="dim">—</span>';
+      const ev = c.event ? `<code>${escapeHtml(c.event)}</code>` : '<span class="dim">—</span>';
+      const reply = c.log ? `<code>${escapeHtml(c.log)}</code>` : '<span class="dim">—</span>';
+      return `<tr><td><code>${escapeHtml(c.match)}</code></td><td>${acts}</td><td>${ev}</td><td>${reply}</td></tr>`;
+    }).join('');
+    const src = cmdSet.source
+      ? ` <span class="dim">— source: <code>${escapeHtml(cmdSet.source)}</code></span>`
+      : '';
+    sections.push(`
+      <h3>Commands${src}</h3>
+      <table>
+        <thead><tr><th>Command</th><th>Actions</th><th>Event</th><th>Reply</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+  }
 
-    // A timed transition has no event; show what it waits for instead, so the
-    // table stays a complete picture of what makes the machine move.
-    const trigger = t.event !== undefined
-      ? `<code>${escapeHtml(t.event)}</code>`
-      : `<span class="tag timer">after</span> <code>${escapeHtml(String(t.after))}</code>`;
+  // ── Tasks ────────────────────────────────────────────────────────────────
+  const tasks = system.tasks ?? [];
+  if (tasks.length > 0) {
+    const rows = tasks.map(t => {
+      const acts = t.actions.length
+        ? t.actions.map(a => `<code>${escapeHtml(a.name)}</code>`).join(' ')
+        : '<span class="dim">—</span>';
+      const log = t.log ? `<code>${escapeHtml(t.log)}</code>` : '<span class="dim">—</span>';
+      return `<tr><td><code>${escapeHtml(t.name)}</code></td><td><code>${escapeHtml(String(t.every))}</code> ms</td><td>${acts}</td><td>${log}</td></tr>`;
+    }).join('');
+    sections.push(`
+      <h3>Tasks</h3>
+      <table>
+        <thead><tr><th>Name</th><th>Interval</th><th>Actions</th><th>Log</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+  }
 
-    return `<tr>
-      <td>${src}</td>
-      <td>${trigger}</td>
-      <td>${target}</td>
-      <td>${guard}</td>
-      <td>${actions}</td>
-    </tr>`;
-  }).join('');
+  // ── Parameters ───────────────────────────────────────────────────────────
+  const parameters = system.parameters ?? [];
+  if (parameters.length > 0) {
+    const rows = parameters.map(p => {
+      const range = p.min !== undefined && p.max !== undefined
+        ? `<code>${escapeHtml(String(p.min))}–${escapeHtml(String(p.max))}</code>`
+        : '<span class="dim">—</span>';
+      const unit = p.unit ? `<code>${escapeHtml(p.unit)}</code>` : '<span class="dim">—</span>';
+      return `<tr><td><code>${escapeHtml(p.name)}</code></td><td><span class="tag">${escapeHtml(p.type)}</span></td><td><code>${escapeHtml(String(p.default))}</code></td><td>${range}</td><td>${unit}</td></tr>`;
+    }).join('');
+    sections.push(`
+      <h3>Parameters</h3>
+      <table>
+        <thead><tr><th>Name</th><th>Type</th><th>Default</th><th>Range</th><th>Unit</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+  }
 
-  const resources = (project.system.resources || []).map(r => `<tr>
-      <td><code>${escapeHtml(r.name)}</code></td>
-      <td><span class="tag">${escapeHtml(String(r.interface))}</span></td>
-      <td>${Object.entries(r.binding || {})
-        .map(([k, v]) => `<code>${escapeHtml(k)}=${escapeHtml(String(v))}</code>`)
-        .join(' ') || '<span class="dim">—</span>'}</td>
-    </tr>`).join('');
+  if (sections.length === 0) {
+    return '<p class="dim" style="padding:16px 20px">Nothing to show yet — add hardware:, tasks:, commands:, or machine: to populate this view.</p>';
+  }
 
-  return `
-    <h3>State hierarchy</h3>
-    <p class="hint">A machine only ever rests in a <em>leaf</em>. Entering a
-    composite state descends to its initial child, marked ▸.</p>
-    <div class="tree">${tree || '<p class="dim">No states defined.</p>'}</div>
-
-    <h3>Transitions</h3>
-    <p class="hint">A transition on an enclosing state also applies to its
-    children, and an inner transition on the same event wins.</p>
-    <table>
-      <thead><tr><th>From</th><th>Trigger</th><th>To</th><th>Guard</th><th>Actions</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5" class="dim">No transitions defined.</td></tr>'}</tbody>
-    </table>
-
-    <h3>Interfaces</h3>
-    <table>
-      <thead><tr><th>Resource</th><th>Interface</th><th>Binding</th></tr></thead>
-      <tbody>${resources || '<tr><td colspan="3" class="dim">No resources declared.</td></tr>'}</tbody>
-    </table>`;
+  return sections.join('\n');
 }
 
 function renderStateNode(path: string, flat: ReturnType<typeof flattenStates>): string {
@@ -561,7 +623,7 @@ function render(): void {
   setBadLine(null);
   setStale(false);
 
-  panes.sketch.innerHTML = `<pre><code>${escapeHtml(sketch)}</code></pre>`;
+  panes.sketch.innerHTML = `<pre><code>${highlightCpp(sketch)}</code></pre>`;
   panes.topics.innerHTML = `<pre><code>${escapeHtml(topics)}</code></pre>`;
   panes.libraries.innerHTML = `<pre><code>${escapeHtml(libraries)}</code></pre>`;
   panes.structure.innerHTML = renderStructure(project);

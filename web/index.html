@@ -369,9 +369,18 @@
   }
   #source::selection { background: var(--sel, rgba(120,160,255,.28)); }
 
-  /* Syntax colours */
+  /* YAML syntax colours */
   .y-key        { color: var(--y-key); }
   .y-identifier { color: var(--y-ident); font-style: italic; }
+
+  /* C++ / Arduino syntax colours — reuse the same palette for visual coherence */
+  .c-keyword { color: var(--y-key); font-weight: 600; }
+  .c-type    { color: var(--y-key); }
+  .c-preproc { color: var(--y-anchor); }
+  .c-string  { color: var(--y-string); }
+  .c-number  { color: var(--y-number); }
+  .c-comment { color: var(--y-comment); font-style: italic; }
+  .c-punct   { color: var(--dim); }
   .y-string     { color: var(--y-string); }
   .y-number     { color: var(--y-number); }
   .y-boolean    { color: var(--y-number); }
