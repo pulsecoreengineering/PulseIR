@@ -374,6 +374,19 @@ export class Parser {
       system,
     };
 
+    // A missing board declaration is not an error - the generator falls back to
+    // generic code - but the fallbacks are lossy enough that the user should be
+    // told explicitly rather than left to wonder why their PWM hint lists three
+    // options or why pin validation did not catch an impossible GPIO number.
+    if (!project.target?.board) {
+      this.warnings.push(
+        'No target board declared. Pin validation is disabled and board-specific ' +
+        'code hints will show all options rather than just yours. Add one:\n' +
+        '  target:\n' +
+        '    board: esp32   # or uno, mega, nano, rp2040, esp8266 ...'
+      );
+    }
+
     // Two things wired to one pin is wrong on every board, so this needs no
     // board profile. Reported here rather than at codegen so the editor and
     // every emitter get it for free.

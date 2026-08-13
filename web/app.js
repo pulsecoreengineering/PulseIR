@@ -3430,6 +3430,9 @@ ${lines.join("\n")}${hint}`;
         target: this.parseTarget(raw.target),
         system
       };
+      if (!project.target?.board) {
+        this.warnings.push("No target board declared. Pin validation is disabled and board-specific code hints will show all options rather than just yours. Add one:\n  target:\n    board: esp32   # or uno, mega, nano, rp2040, esp8266 ...");
+      }
       const conflicts = findPinConflicts(project);
       const fatal = conflicts.filter((c) => !(legacy && c.busDeviceOnly));
       const ambiguous = conflicts.filter((c) => legacy && c.busDeviceOnly);
@@ -7022,6 +7025,7 @@ ${implementations.join("\n\n")}`;
   var copyYamlButton = $("copy-yaml");
   var copyOutputButton = $("copy-output");
   var namespaceInput = $("namespace");
+  var boardSelect = $("board");
   var staleNote = $("stale-note");
   var store = new ProjectStore(localStorage);
   var workspace = { id: "", name: "", files: {}, entry: "", active: "", updatedAt: 0 };
@@ -7274,6 +7278,40 @@ ${parser.warnings.join("\n")}`);
       setStatus("ok", project.name, counts);
     }
     current = { project, sketch, topics, libraries };
+    syncBoard(project.target?.board ?? "");
+  }
+  function syncBoard(board) {
+    boardSelect.value = board;
+    boardSelect.classList.toggle("unset", board === "");
+  }
+  function applyBoardToYaml(board) {
+    let text = source.value;
+    if (/^[ \t]*board:/m.test(text)) {
+      if (board === "") {
+        text = text.replace(/^[ \t]*board:.*\n?/m, "");
+      } else {
+        text = text.replace(/^([ \t]*board:).*$/m, `$1 ${board}`);
+      }
+    } else if (/^target:/m.test(text)) {
+      text = text.replace(/^(target:.*)$/m, `$1
+  board: ${board}`);
+    } else {
+      const m = /^project:/m.exec(text);
+      if (m) {
+        text = text.slice(0, m.index) + `target:
+  board: ${board}
+
+` + text.slice(m.index);
+      } else {
+        text = `target:
+  board: ${board}
+
+` + text;
+      }
+    }
+    source.value = text;
+    workspace.files[workspace.active] = text;
+    paint();
   }
   function selectFile(name) {
     if (workspace.files[name] === void 0)
@@ -7560,6 +7598,10 @@ ${parser.warnings.join("\n")}`);
     });
     source.addEventListener("scroll", syncScroll, { passive: true });
     namespaceInput.addEventListener("input", rerender);
+    boardSelect.addEventListener("change", () => {
+      applyBoardToYaml(boardSelect.value);
+      rerender();
+    });
     exampleSelect.addEventListener("change", () => {
       const label = exampleSelect.value;
       exampleSelect.value = "";

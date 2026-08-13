@@ -301,15 +301,17 @@ system:
 
 test('warnings do not accumulate across parses', () => {
   const parser = new Parser();
+  // Legacy schema with no target board → two warnings (retired schema + no board).
   const legacy = `project: {name: l, version: "1.0"}
 system: {name: l, events: [], states: [{name: idle, type: simple}], transitions: []}`;
 
   parser.parse(legacy);
   parser.parse(legacy);
-  equal(parser.warnings.length, 1, 'one warning per parse');
+  equal(parser.warnings.length, 2, 'two warnings per parse (retired schema + no board), not four accumulated');
 
-  parser.parse(`${HEAD}machine: {states: {idle: {}}, transitions: []}`);
-  equal(parser.warnings.length, 0, 'a clean model reports nothing');
+  // A clean model with a board declared → no warnings.
+  parser.parse(`${HEAD}target: {board: esp32}\nmachine: {states: {idle: {}}, transitions: []}`);
+  equal(parser.warnings.length, 0, 'a clean model with a board reports nothing');
 });
 
 // ============================================================================
