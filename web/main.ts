@@ -66,6 +66,7 @@ const staleNote = $<HTMLDivElement>('stale-note');
 const downloadButton = $<HTMLButtonElement>('download-button');
 const downloadMenu = $<HTMLDivElement>('download-menu');
 const themeButton = $<HTMLButtonElement>('theme-button');
+const mqttTab = $<HTMLButtonElement>('tab-topics');
 
 // ---------------------------------------------------------------------------
 // Model state
@@ -273,11 +274,35 @@ function clearOutput(): void {
   for (const pane of Object.values(panes)) pane.innerHTML = '';
   setStale(false);
   setDownloadReady(false);
+  setMqttTabVisible(false);
 }
 
 function setDownloadReady(ready: boolean): void {
   downloadButton.disabled = !ready;
   downloadButton.classList.toggle('ready', ready);
+}
+
+/**
+ * Show or hide the MQTT topics tab.
+ *
+ * The tab is only relevant when the model declares an MQTT bus. Hiding it
+ * when MQTT is absent avoids confusing users who haven't added it yet —
+ * an empty topics document looks like an error, but it just means
+ * "nothing to emit".
+ */
+function setMqttTabVisible(visible: boolean): void {
+  const wasActive = !panes.topics.hidden;
+  mqttTab.hidden = !visible;
+
+  // If the tab was active and is now hidden, fall back to the Sketch tab
+  // so the user is not left looking at a hidden pane.
+  if (wasActive && !visible) {
+    selectTab('sketch');
+  }
+  // If just made visible and nothing else is active, make it active.
+  if (visible && !wasActive && panes.sketch.hidden) {
+    selectTab('topics');
+  }
 }
 
 /**
@@ -554,6 +579,10 @@ function render(): void {
 
   current = { project, sketch, topics, libraries };
   setDownloadReady(true);
+
+  // MQTT topics tab is only meaningful when the model has an MQTT bus.
+  const hasMqtt = (project.system.resources ?? []).some(r => String(r.interface) === 'mqtt');
+  setMqttTabVisible(hasMqtt);
 
   // Keep the board selector in sync with what the model actually declares.
   syncBoard(project.target?.board ?? '');
