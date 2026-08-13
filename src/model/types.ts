@@ -53,6 +53,8 @@ export enum InterfaceType {
   ETHERNET = "ethernet",
   BLE = "ble",
   MQTT = "mqtt",
+  EEPROM = "eeprom",
+  LITTLEFS = "littlefs",
   CUSTOM = "custom",
 }
 

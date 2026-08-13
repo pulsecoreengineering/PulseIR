@@ -70,6 +70,7 @@ const CONSUMED_KEYS: Record<string, string[]> = {
   gpio: ['mode'],
   uart: ['port'],
   mqtt: ['tls'],
+  littlefs: ['format_on_fail'],
 };
 
 /** Binding keys each interface understands; anything else is documented only. */
@@ -82,6 +83,8 @@ const KNOWN_KEYS: Record<string, string[]> = {
   spi: ['sck', 'miso', 'mosi', 'cs', 'frequency'],
   can: ['tx', 'rx', 'bitrate'],
   onewire: ['pin'],
+  eeprom: ['size'],
+  littlefs: ['format_on_fail'],
   wifi: ['ssid', 'password', 'hostname'],
   ethernet: ['cs', 'mac'],
   ble: ['name', 'service'],
@@ -252,6 +255,37 @@ export class InterfaceBackend {
         out.todos.push(
           `${resource.name}: connect and re-connect without blocking, and call ` +
           `${lower(symbol)}.loop() every iteration`
+        );
+        break;
+      }
+
+      case 'eeprom':
+        out.libraries.push(BUILTIN('EEPROM', 'EEPROM.h', 'EEPROM'));
+        out.init.push(
+          // ESP32 emulates EEPROM over flash and needs a byte-count up front;
+          // AVR has hardware EEPROM and needs no begin() at all.
+          '#ifdef ARDUINO_ARCH_ESP32',
+          `  EEPROM.begin(${has('size') ? ref('size') : '512'});`,
+          '#endif'
+        );
+        out.todos.push(
+          `${resource.name}: call EEPROM.commit() after every write on ESP32 — ` +
+          'AVR hardware EEPROM commits automatically'
+        );
+        break;
+
+      case 'littlefs': {
+        out.libraries.push(BUILTIN('LittleFS', 'LittleFS.h', 'LittleFS'));
+        const formatOnFail = binding.format_on_fail === true;
+        out.init.push(
+          `if (!LittleFS.begin(${formatOnFail ? 'true' : 'false'})) {`,
+          `  // TODO: ${resource.name}: mount failed${formatOnFail
+            ? ' — formatted and retrying'
+            : ' — call LittleFS.format() to initialise the partition'}.`,
+          `}`
+        );
+        out.todos.push(
+          `${resource.name}: always close files after use — LittleFS has a limited handle pool`
         );
         break;
       }

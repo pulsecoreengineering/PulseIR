@@ -57,6 +57,8 @@ export const DEFAULT_KEYWORDS: readonly string[] = [
   // serial / SPI / I2C / MQTT / etc.
   'port', 'baud', 'frequency', 'resolution', 'bits',
   'host', 'ssid', 'password', 'prefix', 'topic',
+  // storage
+  'size', 'format_on_fail',
   // machine:
   'initial', 'states', 'transitions', 'entry', 'exit',
   'from', 'on', 'to', 'do', 'guard', 'after', 'log',

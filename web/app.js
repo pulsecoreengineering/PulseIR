@@ -3895,6 +3895,8 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         "ethernet",
         "ble",
         "mqtt",
+        "eeprom",
+        "littlefs",
         "custom"
       ];
       if (!known.includes(iface)) {
@@ -4143,6 +4145,8 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         "ethernet",
         "ble",
         "mqtt",
+        "eeprom",
+        "littlefs",
         "custom"
       ];
       return raw.map((r) => {
@@ -4357,7 +4361,8 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
   var CONSUMED_KEYS = {
     gpio: ["mode"],
     uart: ["port"],
-    mqtt: ["tls"]
+    mqtt: ["tls"],
+    littlefs: ["format_on_fail"]
   };
   var KNOWN_KEYS = {
     gpio: ["pin", "pins", "mode"],
@@ -4368,6 +4373,8 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
     spi: ["sck", "miso", "mosi", "cs", "frequency"],
     can: ["tx", "rx", "bitrate"],
     onewire: ["pin"],
+    eeprom: ["size"],
+    littlefs: ["format_on_fail"],
     wifi: ["ssid", "password", "hostname"],
     ethernet: ["cs", "mac"],
     ble: ["name", "service"],
@@ -4461,6 +4468,24 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
           }
           out.init.push(`${lower(symbol)}.setServer(${has("host") ? ref("host") : '""'}, ${has("port") ? ref("port") : secure ? 8883 : 1883});`);
           out.todos.push(`${resource.name}: connect and re-connect without blocking, and call ${lower(symbol)}.loop() every iteration`);
+          break;
+        }
+        case "eeprom":
+          out.libraries.push(BUILTIN("EEPROM", "EEPROM.h", "EEPROM"));
+          out.init.push(
+            // ESP32 emulates EEPROM over flash and needs a byte-count up front;
+            // AVR has hardware EEPROM and needs no begin() at all.
+            "#ifdef ARDUINO_ARCH_ESP32",
+            `  EEPROM.begin(${has("size") ? ref("size") : "512"});`,
+            "#endif"
+          );
+          out.todos.push(`${resource.name}: call EEPROM.commit() after every write on ESP32 \u2014 AVR hardware EEPROM commits automatically`);
+          break;
+        case "littlefs": {
+          out.libraries.push(BUILTIN("LittleFS", "LittleFS.h", "LittleFS"));
+          const formatOnFail = binding.format_on_fail === true;
+          out.init.push(`if (!LittleFS.begin(${formatOnFail ? "true" : "false"})) {`, `  // TODO: ${resource.name}: mount failed${formatOnFail ? " \u2014 formatted and retrying" : " \u2014 call LittleFS.format() to initialise the partition"}.`, `}`);
+          out.todos.push(`${resource.name}: always close files after use \u2014 LittleFS has a limited handle pool`);
           break;
         }
         case "can":
@@ -6434,6 +6459,9 @@ ${implementations.join("\n\n")}`;
     "password",
     "prefix",
     "topic",
+    // storage
+    "size",
+    "format_on_fail",
     // machine:
     "initial",
     "states",
