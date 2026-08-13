@@ -7024,6 +7024,8 @@ ${implementations.join("\n\n")}`;
   var importFolderInput = $("import-folder");
   var copyYamlButton = $("copy-yaml");
   var copyOutputButton = $("copy-output");
+  var snippetButton = $("snippet-button");
+  var snippetMenu = $("snippet-menu");
   var namespaceInput = $("namespace");
   var boardSelect = $("board");
   var staleNote = $("stale-note");
@@ -7514,6 +7516,168 @@ ${parser.warnings.join("\n")}`);
         return current.sketch;
     }
   }
+  var SNIPPETS = [
+    // ── Serial ───────────────────────────────────────────────────────────────
+    {
+      group: "Serial",
+      label: "Console (UART 0 \u2014 USB serial monitor)",
+      yaml: `hardware:
+  buses:
+    console: { interface: uart, port: 0, baud: 115200 }
+
+commands:
+  source: console
+  map:
+    help: show_help`
+    },
+    {
+      group: "Serial",
+      label: "Extra UART (port 1)",
+      yaml: `hardware:
+  buses:
+    uart1: { interface: uart, port: 1, baud: 9600 }`
+    },
+    // ── Protocol ─────────────────────────────────────────────────────────────
+    {
+      group: "Protocol",
+      label: "I\xB2C bus",
+      yaml: `hardware:
+  buses:
+    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }`
+    },
+    {
+      group: "Protocol",
+      label: "SPI bus",
+      yaml: `hardware:
+  buses:
+    spi_bus: { interface: spi, sck: GPIO18, miso: GPIO19, mosi: GPIO23, cs: GPIO5 }`
+    },
+    {
+      group: "Protocol",
+      label: "Wi-Fi",
+      yaml: `hardware:
+  buses:
+    wifi: { interface: wifi, ssid: "YourSSID" }`
+    },
+    {
+      group: "Protocol",
+      label: "MQTT (over Wi-Fi)",
+      yaml: `hardware:
+  buses:
+    wifi: { interface: wifi, ssid: "YourSSID" }
+    mqtt_bus: { interface: mqtt, host: "broker.example.com", port: 1883, prefix: "device" }`
+    },
+    // ── Device ───────────────────────────────────────────────────────────────
+    {
+      group: "Device",
+      label: "Digital output  (LED, relay)",
+      yaml: `hardware:
+  devices:
+    led: { type: digital_output, pin: GPIO2 }`
+    },
+    {
+      group: "Device",
+      label: "Digital input  (button, switch)",
+      yaml: `hardware:
+  devices:
+    button: { type: digital_input, pin: GPIO0 }`
+    },
+    {
+      group: "Device",
+      label: "PWM output  (fan, motor, servo)",
+      yaml: `hardware:
+  devices:
+    fan: { type: pwm_output, pin: GPIO27, channel: 0, frequency: 25000 }`
+    },
+    {
+      group: "Device",
+      label: "Analog input  (sensor, potentiometer)",
+      yaml: `hardware:
+  devices:
+    sensor: { type: analog_input, pin: GPIO34, unit: V }`
+    },
+    // ── Logic ────────────────────────────────────────────────────────────────
+    {
+      group: "Logic",
+      label: "Parameter  (tunable value)",
+      yaml: `parameters:
+  interval_ms: { type: int, default: 1000, range: [100, 60000], unit: ms }`
+    },
+    {
+      group: "Logic",
+      label: "Task  (repeating work)",
+      yaml: `tasks:
+  heartbeat:
+    every: interval_ms
+    do: my_action
+    log: "running"
+    description: Runs on a timer`
+    },
+    {
+      group: "Logic",
+      label: "Command table  (serial dispatch)",
+      yaml: `commands:
+  source: console
+  map:
+    on:   led_on
+    off:  led_off
+    help: show_help`
+    },
+    {
+      group: "Logic",
+      label: "State machine  (basic toggle)",
+      yaml: `events:
+  PRESS: { source: external }
+
+machine:
+  states:
+    idle:
+    active:
+  transitions:
+    - { from: idle,   on: PRESS, to: active }
+    - { from: active, on: PRESS, to: idle }`
+    }
+  ];
+  function insertSnippet(yaml2) {
+    const text = source.value;
+    const pos = source.selectionStart ?? text.length;
+    const lineEnd = text.indexOf("\n", pos);
+    const insertAt = lineEnd === -1 ? text.length : lineEnd + 1;
+    const before = text.slice(0, insertAt);
+    const after = text.slice(insertAt);
+    const pad = (s) => s.length > 0 && !s.endsWith("\n\n") ? "\n" : "";
+    const suffix = after.length > 0 && !after.startsWith("\n") ? "\n" : "";
+    const inserted = pad(before) + yaml2 + "\n" + suffix;
+    source.value = before + inserted + after;
+    paint();
+    const newPos = insertAt + inserted.length;
+    source.selectionStart = source.selectionEnd = newPos;
+    workspace.files[workspace.active] = source.value;
+  }
+  function closeSnippetMenu() {
+    snippetMenu.hidden = true;
+    snippetButton.setAttribute("aria-expanded", "false");
+  }
+  function openSnippetMenu() {
+    snippetMenu.replaceChildren();
+    let lastGroup = "";
+    for (const s of SNIPPETS) {
+      if (s.group !== lastGroup) {
+        if (lastGroup !== "")
+          snippetMenu.append(separator());
+        snippetMenu.append(heading(s.group));
+        lastGroup = s.group;
+      }
+      snippetMenu.append(item(s.label, "", () => {
+        closeSnippetMenu();
+        insertSnippet(s.yaml);
+        render();
+        source.focus();
+      }));
+    }
+    snippetMenu.hidden = false;
+    snippetButton.setAttribute("aria-expanded", "true");
+  }
   function closeMenu() {
     projectMenu.hidden = true;
     projectButton.setAttribute("aria-expanded", "false");
@@ -7652,13 +7816,24 @@ ${parser.warnings.join("\n")}`);
       else
         closeMenu();
     });
+    snippetButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (snippetMenu.hidden)
+        openSnippetMenu();
+      else
+        closeSnippetMenu();
+    });
     document.addEventListener("click", (event) => {
       if (!projectMenu.hidden && !projectMenu.contains(event.target))
         closeMenu();
+      if (!snippetMenu.hidden && !snippetMenu.contains(event.target))
+        closeSnippetMenu();
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !projectMenu.hidden)
         closeMenu();
+      if (event.key === "Escape" && !snippetMenu.hidden)
+        closeSnippetMenu();
     });
     importZipInput.addEventListener("change", () => {
       const file = importZipInput.files?.[0];
