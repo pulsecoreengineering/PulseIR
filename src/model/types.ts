@@ -369,6 +369,12 @@ export interface PulseSystem {
  */
 export interface Target {
   board?: string;             // "esp32", "esp32s3", ...
+  /**
+   * Emit action-trace `Serial.println()` calls in generated stubs.
+   * Defaults to true so existing models keep their traces. Set to false
+   * before production to strip all diagnostic prints from action stubs.
+   */
+  debug?: boolean;
   description?: string;
   metadata?: Metadata;
 }
