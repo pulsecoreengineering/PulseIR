@@ -348,6 +348,27 @@ the single-file path had been fixed and the folder path had not. `generateFiles`
 now reports `needsRuntime`, and a test asserts no generated file for a
 machine-less project mentions PulseHSM at all.
 
+#### Finding 2e — ledc's API changed under us, and the model kept building the wrong one
+
+Reported straight from a real Arduino IDE build, not the simulator: a `pwm_output`
+device compiled to `ledcSetup()` + `ledcAttachPin()`, and current ESP32 Arduino
+core (3.x) removed both — it only has `ledcAttach(pin, freq, resolution)` and
+`ledcWrite(pin, duty)`, no channel argument. Core 2.x has only the old,
+channel-addressed pair. There is no core version that accepts both, and no
+compiler flag in this project's control over which core the user's IDE has
+installed, so a fixed choice is always wrong for someone.
+
+Verified against espressif/arduino-esp32's own headers (`esp32-hal-ledc.h` on
+`master` vs. `release/v2.x`) rather than assumed from memory, per this
+project's rule about board-specific claims. `setupInterfaces()` now emits
+both calls, gated on `ESP_ARDUINO_VERSION_MAJOR` (defined by the core itself
+since 2.0.1; older cores that lack the macro only ever had the channel API,
+so the `#else` is their only path regardless). The `params:` hint for a pwm
+device's duty already pointed at `_PIN`, which happens to be exactly what the
+new `ledcWrite` wants — only the setup call needed the fork. A generated TODO
+now names both `ledcWrite` signatures next to the pin/channel macros, since
+that call is still the user's to write.
+
 #### Finding 2b — A state cannot repeat on a timer
 
 Surfaced while implementing `after:`, and left unsolved deliberately.

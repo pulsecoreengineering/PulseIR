@@ -418,8 +418,26 @@ test('devices generate their own initialisation', () => {
   const sketch = generate(path.join(repoRoot, 'examples/boiler/pulse.yaml'));
 
   assert(sketch.includes('pinMode(PUMP_PIN, OUTPUT);'), 'digital_output got no pinMode');
-  assert(sketch.includes('ledcAttachPin(HEATER_PIN, HEATER_CHANNEL);'), 'pwm_output got no ledc setup');
+  assert(sketch.includes('ledcAttach(HEATER_PIN,'), 'pwm_output got no core-3.x ledc setup');
+  assert(sketch.includes('ledcAttachPin(HEATER_PIN, HEATER_CHANNEL);'), 'pwm_output got no core-2.x fallback');
   assert(sketch.includes('#define PUMP_PIN 25'), 'device pin macro missing');
+});
+
+test('pwm setup picks its ledc call by core version, not unconditionally', () => {
+  // Core 3.x removed ledcSetup/ledcAttachPin outright (they were the whole
+  // ESP32 core 2.x LEDC API); a sketch that always emits them fails to build
+  // on current Arduino IDE installs. Both calls must exist, but gated behind
+  // ESP_ARDUINO_VERSION_MAJOR so exactly one path compiles on either core.
+  const sketch = generate(path.join(repoRoot, 'examples/boiler/pulse.yaml'));
+
+  const pwmBlock = sketch.slice(
+    sketch.indexOf('#ifdef ARDUINO_ARCH_ESP32', sketch.indexOf('// heater')),
+    sketch.indexOf('#endif', sketch.indexOf('ledcAttachPin')) + '#endif'.length
+  );
+  assert(
+    /#if defined\(ESP_ARDUINO_VERSION_MAJOR\) && ESP_ARDUINO_VERSION_MAJOR >= 3[\s\S]*ledcAttach\(HEATER_PIN,[\s\S]*#else[\s\S]*ledcSetup\(HEATER_CHANNEL[\s\S]*ledcAttachPin\(HEATER_PIN, HEATER_CHANNEL\)[\s\S]*#endif/.test(pwmBlock),
+    `ledc calls are not properly version-gated:\n${pwmBlock}`
+  );
 });
 
 test('generated guards and actions match the FUNCTION_CONTRACT signatures', () => {
@@ -656,6 +674,7 @@ int main() {
   // Input-only pins are fine as inputs; the checker must not object.
   assert(sketch.includes('pinMode(ESTOP_PIN, INPUT);'), 'digital_input got no pinMode');
   assert(sketch.includes('ledcSetup(DRIVE_PWM_CHANNEL'), 'pwm_output got no channel setup');
+  assert(sketch.includes('ledcAttach(DRIVE_PWM_PIN,'), 'pwm_output got no core-3.x pin setup');
 });
 
 test('gate: pump/tank — hysteresis, dry-run and a blocked guard bubbling out', () => {

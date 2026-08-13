@@ -4385,13 +4385,17 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
           out.init.push(...guarded(has("rx") && has("tx") ? `${serial}.begin(${baud}, SERIAL_8N1, ${ref("rx")}, ${ref("tx")});` : `${serial}.begin(${baud});`, `${serial}.begin(${baud});`));
           break;
         }
-        case "pwm":
+        case "pwm": {
           if (has("pin") && has("channel")) {
-            out.init.push("#ifdef ARDUINO_ARCH_ESP32", `  ledcSetup(${ref("channel")}, ${has("frequency") ? ref("frequency") : "5000"}, ${has("resolution") ? ref("resolution") : "8"});`, `  ledcAttachPin(${ref("pin")}, ${ref("channel")});`, "#endif");
+            const freq = has("frequency") ? ref("frequency") : "5000";
+            const resolution = has("resolution") ? ref("resolution") : "8";
+            out.init.push("#ifdef ARDUINO_ARCH_ESP32", "#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3", `  ledcAttach(${ref("pin")}, ${freq}, ${resolution});`, "#else", `  ledcSetup(${ref("channel")}, ${freq}, ${resolution});`, `  ledcAttachPin(${ref("pin")}, ${ref("channel")});`, "#endif", "#endif");
+            out.todos.push(`${resource.name}: write duty with ledcWrite(${ref("pin")}, duty) on core 3.x, or ledcWrite(${ref("channel")}, duty) before it`);
           } else if (has("pin")) {
             out.init.push(`pinMode(${ref("pin")}, OUTPUT);`);
           }
           break;
+        }
         case "adc":
           if (has("pin"))
             out.init.push(`pinMode(${ref("pin")}, INPUT);`);
