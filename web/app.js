@@ -7231,6 +7231,9 @@ target:
   }
   function render() {
     persist();
+    const entryText = workspace.files[workspace.entry] ?? "";
+    const rawBoard = /^[ \t]*board:\s*(\S+)/m.exec(entryText)?.[1] ?? "";
+    syncBoard(rawBoard);
     let project;
     const parser = new Parser();
     try {
@@ -7394,10 +7397,25 @@ ${parser.warnings.join("\n")}`);
       return;
     openProject(store.create(name.trim(), files, entry));
   }
+  function applyNameToYaml(name) {
+    const text = workspace.files[workspace.entry];
+    if (!text)
+      return;
+    const updated = text.replace(/^(project:[^\S\n]*\n)((?:[ \t]+[^\n]*\n)*?)([ \t]+name:)[^\n]*/m, (_match, header, before, nameKey) => `${header}${before}${nameKey} ${name}`);
+    if (updated === text)
+      return;
+    workspace.files[workspace.entry] = updated;
+    if (workspace.active === workspace.entry) {
+      source.value = updated;
+      paint();
+    }
+  }
   function renameProject() {
     const name = prompt("Rename project", workspace.name);
     if (!name?.trim() || name.trim() === workspace.name)
       return;
+    applyNameToYaml(name.trim());
+    persist();
     const renamed = store.rename(workspace.id, name.trim());
     if (renamed)
       openProject(renamed);
