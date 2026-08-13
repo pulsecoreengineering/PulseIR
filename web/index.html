@@ -381,6 +381,20 @@
   .c-number  { color: var(--y-number); }
   .c-comment { color: var(--y-comment); font-style: italic; }
   .c-punct   { color: var(--dim); }
+
+  /* Output pane line numbers */
+  .ln-num {
+    display: inline-block;
+    min-width: 3ch;
+    text-align: right;
+    padding-right: 10px;
+    margin-right: 10px;
+    border-right: 1px solid var(--border);
+    color: var(--dim);
+    opacity: 0.55;
+    user-select: none;
+    -webkit-user-select: none;
+  }
   .y-string     { color: var(--y-string); }
   .y-number     { color: var(--y-number); }
   .y-boolean    { color: var(--y-number); }

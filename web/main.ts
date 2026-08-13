@@ -265,6 +265,20 @@ function escapeHtml(text: string): string {
 }
 
 /**
+ * Prepend right-aligned line numbers to already-highlighted HTML.
+ *
+ * Each number is wrapped in a span with user-select:none so copy-paste
+ * gives clean code without numbers in the clipboard.
+ */
+function withLineNumbers(html: string): string {
+  const lines = html.split('\n');
+  const width = String(lines.length).length;
+  return lines
+    .map((line, i) => `<span class="ln-num">${String(i + 1).padStart(width)}</span> ${line}`)
+    .join('\n');
+}
+
+/**
  * On failure the panes keep their last good content so the student still has
  * something to edit against - but that content is now a lie about the current
  * source, so it has to be labelled rather than just dimmed.
@@ -623,9 +637,9 @@ function render(): void {
   setBadLine(null);
   setStale(false);
 
-  panes.sketch.innerHTML = `<pre><code>${highlightCpp(sketch)}</code></pre>`;
-  panes.topics.innerHTML = `<pre><code>${escapeHtml(topics)}</code></pre>`;
-  panes.libraries.innerHTML = `<pre><code>${escapeHtml(libraries)}</code></pre>`;
+  panes.sketch.innerHTML = `<pre><code>${withLineNumbers(highlightCpp(sketch))}</code></pre>`;
+  panes.topics.innerHTML = `<pre><code>${withLineNumbers(escapeHtml(topics))}</code></pre>`;
+  panes.libraries.innerHTML = `<pre><code>${withLineNumbers(escapeHtml(libraries))}</code></pre>`;
   panes.structure.innerHTML = renderStructure(project);
 
   const fileCount = Object.keys(workspace.files).length;
