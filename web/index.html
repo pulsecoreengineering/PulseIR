@@ -135,6 +135,84 @@
   }
   #theme-button svg { display: block; }
 
+  #settings-button {
+    display: flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; padding: 0;
+    border-color: transparent; background: transparent; border-radius: 6px;
+    color: var(--dim); flex-shrink: 0;
+  }
+  #settings-button:hover { border-color: var(--border); color: var(--text); }
+  #settings-button svg { display: block; }
+
+  /* ── Settings modal ────────────────────────────────────────────────────── */
+  .modal-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(0,0,0,.45);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal-overlay[hidden] { display: none; }
+  .modal {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    width: 500px; max-width: calc(100vw - 32px);
+    max-height: calc(100vh - 64px); display: flex; flex-direction: column;
+    box-shadow: 0 8px 40px rgba(0,0,0,.22);
+  }
+  .modal-header {
+    display: flex; align-items: center; padding: 14px 18px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0; gap: 8px;
+  }
+  .modal-header h2 { margin: 0; font-size: 15px; font-weight: 600; flex: 1; }
+  .icon-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; padding: 0;
+    border: 1px solid transparent; background: transparent; border-radius: 6px;
+    color: var(--dim); cursor: pointer; flex-shrink: 0;
+  }
+  .icon-btn:hover { border-color: var(--border); color: var(--text); }
+  .modal-body { flex: 1; overflow-y: auto; padding: 18px 20px; }
+  .modal-section + .modal-section { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 22px; }
+  .modal-section h3 { margin: 0 0 5px; font-size: 13px; font-weight: 600; }
+  .modal-section .hint { margin: 0 0 12px; font-size: 12px; color: var(--dim); line-height: 1.55; }
+  .keyword-chips {
+    display: flex; flex-wrap: wrap; gap: 5px;
+    min-height: 34px; margin-bottom: 10px;
+    padding: 6px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--panel);
+  }
+  .keyword-chip {
+    display: inline-flex; align-items: center; gap: 0;
+    border-radius: 4px; background: var(--bg); border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .keyword-chip code {
+    padding: 2px 6px; font: 12px/1.5 var(--mono); color: var(--y-key);
+  }
+  .chip-remove {
+    background: none; border: none; border-left: 1px solid var(--border);
+    cursor: pointer; color: var(--dim); padding: 2px 5px;
+    font-size: 13px; line-height: 1; height: 100%;
+  }
+  .chip-remove:hover { color: var(--err-fg); background: var(--err-bg); }
+  .keyword-add { display: flex; gap: 6px; margin-bottom: 8px; }
+  .keyword-add input {
+    flex: 1; padding: 5px 9px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text);
+    font: 13px/1 var(--mono);
+  }
+  .keyword-add input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .keyword-add button {
+    padding: 5px 14px; border-radius: 6px;
+    border: 1px solid var(--accent); background: var(--accent);
+    color: #fff; cursor: pointer; font-size: 13px; white-space: nowrap;
+  }
+  .keyword-add button:hover { opacity: .88; }
+  .reset-btn {
+    background: none; border: none; cursor: pointer;
+    color: var(--dim); font-size: 12px; text-decoration: underline; padding: 0;
+  }
+  .reset-btn:hover { color: var(--text); }
+
   /* Project / example selectors */
   #project-button {
     font-family: var(--mono); font-size: 12.5px; max-width: 24ch;
@@ -482,6 +560,14 @@
       <path d="M8 2v12M2 8h12" opacity=".4"/>
     </svg>
   </button>
+
+  <!-- Settings: keyword registry and other per-user preferences -->
+  <button id="settings-button" title="Settings" aria-label="Open settings">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="8" cy="8" r="2.2"/>
+      <path d="M8 1.5v1.1M8 13.4v1.1M1.5 8h1.1M13.4 8h1.1M3.4 3.4l.78.78M11.82 11.82l.78.78M12.6 3.4l-.78.78M4.18 11.82l-.78.78"/>
+    </svg>
+  </button>
 </header>
 
 <!-- Hidden file inputs driven from the project menu -->
@@ -554,6 +640,38 @@
 </main>
 
 <div class="status ok" id="status"><strong>Loading…</strong></div>
+
+<!-- Settings modal -->
+<div id="settings-modal" class="modal-overlay" hidden>
+  <div class="modal" role="dialog" aria-labelledby="settings-title" aria-modal="true">
+    <div class="modal-header">
+      <h2 id="settings-title">Settings</h2>
+      <button id="settings-close" class="icon-btn" title="Close" aria-label="Close settings">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <line x1="2" y1="2" x2="12" y2="12"/><line x1="12" y1="2" x2="2" y2="12"/>
+        </svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <section class="modal-section">
+        <h3>Highlight keywords</h3>
+        <p class="hint">
+          Keys in this list are highlighted in <strong>blue</strong> as schema keywords.
+          All other keys appear in <em>italic teal</em> as user-defined names
+          (bus names, state names, action names, etc.).
+          Changes take effect immediately and are saved in the browser.
+        </p>
+        <div id="keyword-chips" class="keyword-chips"></div>
+        <div class="keyword-add">
+          <input id="keyword-input" type="text" placeholder="Add keyword…"
+                 autocomplete="off" autocorrect="off" spellcheck="false">
+          <button id="keyword-add-btn" type="button">Add</button>
+        </div>
+        <button id="keyword-reset-btn" class="reset-btn" type="button">Reset to defaults</button>
+      </section>
+    </div>
+  </div>
+</div>
 
 <script src="./app.js"></script>
 </body>
