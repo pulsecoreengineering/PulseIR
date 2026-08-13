@@ -7567,7 +7567,8 @@ target:
   }
   function setStatus(kind, title, detail = "") {
     status.className = `status ${kind}`;
-    status.innerHTML = `<strong>${escapeHtml2(title)}</strong>${detail ? `<span>${escapeHtml2(detail)}</span>` : ""}`;
+    const detailHtml = detail ? `<span>${escapeHtml2(detail).replace(/\n/g, "<br>")}</span>` : "";
+    status.innerHTML = `<strong>${escapeHtml2(title)}</strong>${detailHtml}`;
   }
   function renderFileBar() {
     const names = fileNames();
@@ -7726,7 +7727,8 @@ target:
         return;
       }
       setBadLine(line !== null && workspace.active === workspace.entry ? line : null);
-      setStatus("error", `Model error${line !== null ? ` (line ${line})` : ""}`, message);
+      const kind = error instanceof ParseError ? "Model error" : "YAML syntax error";
+      setStatus("error", `${kind}${line !== null ? ` (line ${line})` : ""}`, message);
       if (current !== null)
         setStale(true);
       return;
@@ -7759,8 +7761,8 @@ target:
       `${sketch.split("\n").length} lines generated`
     ].filter(Boolean).join(" \xB7 ");
     if (parser.warnings.length > 0) {
-      setStatus("warn", project.name, `${counts}
-${parser.warnings.join("\n")}`);
+      const warnDetail = [counts, ...parser.warnings.map((w) => `\u26A0 ${w}`)].join("\n");
+      setStatus("warn", project.name, warnDetail);
     } else {
       setStatus("ok", project.name, counts);
     }

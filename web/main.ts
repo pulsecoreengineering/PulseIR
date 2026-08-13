@@ -410,9 +410,10 @@ function showGuide(): void {
 
 function setStatus(kind: 'ok' | 'warn' | 'error' | 'info', title: string, detail = ''): void {
   status.className = `status ${kind}`;
-  status.innerHTML = `<strong>${escapeHtml(title)}</strong>${
-    detail ? `<span>${escapeHtml(detail)}</span>` : ''
-  }`;
+  const detailHtml = detail
+    ? `<span>${escapeHtml(detail).replace(/\n/g, '<br>')}</span>`
+    : '';
+  status.innerHTML = `<strong>${escapeHtml(title)}</strong>${detailHtml}`;
 }
 
 function renderFileBar(): void {
@@ -646,7 +647,10 @@ function render(): void {
     // that is the file on screen - the entry file is the one it starts from.
     setBadLine(line !== null && workspace.active === workspace.entry ? line : null);
 
-    setStatus('error', `Model error${line !== null ? ` (line ${line})` : ''}`, message);
+    // ParseError = semantic problem our parser caught; anything else is a raw
+    // YAML syntax error from js-yaml (bad indentation, unexpected token, etc.).
+    const kind = error instanceof ParseError ? 'Model error' : 'YAML syntax error';
+    setStatus('error', `${kind}${line !== null ? ` (line ${line})` : ''}`, message);
     if (current !== null) setStale(true);
     return;
   }
@@ -682,7 +686,8 @@ function render(): void {
   ].filter(Boolean).join(' · ');
   // A retired schema still generates, but the student should be told.
   if (parser.warnings.length > 0) {
-    setStatus('warn', project.name, `${counts}\n${parser.warnings.join('\n')}`);
+    const warnDetail = [counts, ...parser.warnings.map(w => `⚠ ${w}`)].join('\n');
+    setStatus('warn', project.name, warnDetail);
   } else {
     setStatus('ok', project.name, counts);
   }
