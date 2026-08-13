@@ -27,6 +27,31 @@ import { zip, unzip, ZipError } from './zip.js';
 import type { PulseProject } from '../src/model/index.js';
 import { EXAMPLES } from './examples.js';
 
+/**
+ * Auto-correct the common typo of omitting the space after a colon in a
+ * mapping entry, e.g. `board:esp32` → `board: esp32`.
+ *
+ * Applied to source before parsing only — the textarea content is never
+ * touched, so cursor position and undo history are preserved.
+ *
+ * Safe guards:
+ *  - Only matches `letter/underscore word : non-space` (keys can't start
+ *    with a digit, so `12:30` timestamps are skipped).
+ *  - The non-space character after the colon must not be `/` (avoids
+ *    mangling `://` in URLs) or `:` itself.
+ *  - Applied line by line; lines that start with `#` after trimming
+ *    (whole-line comments) are skipped entirely.
+ */
+function normalizeYaml(source: string): string {
+  return source
+    .split('\n')
+    .map(line => {
+      if (line.trimStart().startsWith('#')) return line;
+      return line.replace(/([a-zA-Z_]\w*):([^\s\n:/])/g, '$1: $2');
+    })
+    .join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // DOM
 // ---------------------------------------------------------------------------
@@ -593,8 +618,12 @@ function render(): void {
   const parser = new Parser();
   try {
     // The open buffers are the filesystem, so an import between tabs resolves
-    // the same way it does on disk.
-    const resolver = new MemoryResolver(workspace.files);
+    // the same way it does on disk. Normalize first so a missing space after
+    // a colon (board:esp32) is silently corrected before the YAML parser sees it.
+    const normalizedFiles = Object.fromEntries(
+      Object.entries(workspace.files).map(([k, v]) => [k, normalizeYaml(v)])
+    );
+    const resolver = new MemoryResolver(normalizedFiles);
     project = parser.parseFrom(workspace.entry, resolver);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
