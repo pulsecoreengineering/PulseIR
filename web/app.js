@@ -7061,33 +7061,15 @@ ${implementations.join("\n\n")}`;
       store.save(workspace);
   }
   var BLANK_MODEL = `# A new PulseIR model.
+# Use Insert \u25BE in the toolbar to add hardware, devices, tasks and logic.
+pulseir: "1"
+
 project:
   name: untitled
   version: "1.0"
 
 target:
   board: esp32
-
-hardware:
-  devices:
-    led: { type: digital_output, pin: GPIO2 }
-
-events:
-  PRESS: { source: external }
-
-machine:
-  states:
-    off:
-    on:
-
-  transitions:
-    - from: off
-      on: PRESS
-      to: on
-
-    - from: on
-      on: PRESS
-      to: off
 `;
   var HIGHLIGHT_LIMIT = 2e5;
   var highlightingOn = true;
