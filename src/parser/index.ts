@@ -372,6 +372,7 @@ export class Parser {
       name: projectRaw.name as string || 'unnamed',
       version: projectRaw.version as string || '0.1.0',
       description: projectRaw.description as string | undefined,
+      author: projectRaw.author as string | undefined,
       schemaVersion,
       target: this.parseTarget(raw.target),
       system,

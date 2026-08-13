@@ -46,7 +46,7 @@ export const DEFAULT_KEYWORDS: readonly string[] = [
   'project', 'target', 'hardware', 'buses', 'devices', 'machine', 'tasks',
   'commands', 'imports', 'events', 'resources',
   // project:
-  'name', 'version', 'pulseir', 'description',
+  'name', 'version', 'pulseir', 'description', 'author',
   // target:
   'board', 'verbose', 'drivers',
   // hardware / buses / devices - structure

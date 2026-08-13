@@ -16,6 +16,7 @@
 import { Parser, ParseError } from '../src/parser/index.js';
 import { MemoryResolver } from '../src/parser/resolver.js';
 import { Codegen } from '../src/codegen/index.js';
+import type { GeneratedProject } from '../src/codegen/index.js';
 import { TopicEmitter } from '../src/emit/topics.js';
 import { LibraryEmitter } from '../src/emit/libraries.js';
 import { flattenStates, resolveEntryLeaf, resolvePath } from '../src/analysis/states.js';
@@ -115,7 +116,7 @@ const store = new ProjectStore(localStorage);
 let workspace: Project = { id: '', name: '', files: {}, entry: '', active: '', updatedAt: 0 };
 
 /** Last successful render, so downloads never hand over a broken file. */
-let current: { project: PulseProject; sketch: string; topics: string; libraries: string } | null = null;
+let current: { project: PulseProject; sketch: string; topics: string; libraries: string; generatedProject: GeneratedProject } | null = null;
 
 function fileNames(): string[] {
   // Entry first, then the rest alphabetically - a stable order that puts the
@@ -656,10 +657,12 @@ function render(): void {
   }
 
   let sketch: string;
+  let generatedProject: GeneratedProject;
   let topics: string;
   let libraries: string;
   try {
     sketch = new Codegen().generate(project);
+    generatedProject = new Codegen().generateFiles(project);
     topics = new TopicEmitter().toJSON(project, namespaceInput.value.trim() || undefined);
     libraries = new LibraryEmitter().toJSON(project);
   } catch (error) {
@@ -692,7 +695,7 @@ function render(): void {
     setStatus('ok', project.name, counts);
   }
 
-  current = { project, sketch, topics, libraries };
+  current = { project, sketch, topics, libraries, generatedProject };
   setDownloadReady(true);
 
   // MQTT topics tab is only meaningful when the model has an MQTT bus.
@@ -1122,6 +1125,33 @@ board     = ${boardId}
 framework = arduino
 ${libSection}
 `;
+}
+
+/**
+ * Package the split project output as a zip.
+ *
+ * Files from `generated` are rewritten on every run and live at the sketch
+ * root. Files from `scaffolds` contain the guard and action stubs the user
+ * fills in; the CLI writes them only when absent. In the zip they sit under
+ * `src/` (the paths from `generateFiles()` already include the prefix), so
+ * unzipping gives a folder ready to open in PlatformIO or the Arduino IDE.
+ */
+function downloadProjectZip(): void {
+  if (!current) return;
+  const { project, generatedProject } = current;
+  const folder = safeFolderName(project.name);
+  const entries: Record<string, string> = {};
+
+  for (const file of generatedProject.generated) {
+    entries[`${folder}/${file.path}`] = file.contents;
+  }
+  for (const file of generatedProject.scaffolds) {
+    // Scaffolds are "write once" — label them so the user knows not to
+    // delete them and expect the generator to regenerate them.
+    entries[`${folder}/${file.path}`] = file.contents;
+  }
+
+  download(`${folder}.zip`, zip(entries), 'application/zip');
 }
 
 /** A name safe on every filesystem, and never empty. */
@@ -1633,6 +1663,10 @@ function init(): void {
     closeDownloadMenu();
     if (!current) return;
     download(`${current.project.name}.ino`, current.sketch, 'text/plain');
+  });
+  $<HTMLButtonElement>('download-project').addEventListener('click', () => {
+    closeDownloadMenu();
+    downloadProjectZip();
   });
   $<HTMLButtonElement>('download-topics').addEventListener('click', () => {
     closeDownloadMenu();

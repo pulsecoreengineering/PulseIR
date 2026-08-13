@@ -3426,6 +3426,7 @@ ${lines.join("\n")}${hint}`;
         name: projectRaw.name || "unnamed",
         version: projectRaw.version || "0.1.0",
         description: projectRaw.description,
+        author: projectRaw.author,
         schemaVersion,
         target: this.parseTarget(raw.target),
         system
@@ -4350,6 +4351,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
 
   // dist/src/codegen/interfaces.js
   var SECRET_KEY = /(pass|password|secret|token|psk|credential|apikey|api_key)/i;
+  var ENV_VAR_REF = /^\$\{([A-Z_][A-Z0-9_]*)\}$/i;
   var BUILTIN = (name, include, reason) => ({ name, include, source: "builtin", reason });
   var REGISTRY = (name, include, reason) => ({ name, include, source: "registry", reason });
   var CONSUMED_KEYS = {
@@ -4469,9 +4471,14 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
           break;
       }
       out.init = out.init.filter(Boolean);
-      for (const key of Object.keys(binding)) {
+      for (const [key, value] of Object.entries(binding)) {
         if (SECRET_KEY.test(key)) {
-          out.todos.push(`${resource.name}: set ${symbol}_${key.toUpperCase()} before building`);
+          const envMatch = typeof value === "string" ? ENV_VAR_REF.exec(value) : null;
+          if (envMatch) {
+            out.todos.push(`${resource.name}: ${key} sourced from \${${envMatch[1]}} \u2014 define via build flag`);
+          } else {
+            out.todos.push(`${resource.name}: set ${symbol}_${key.toUpperCase()} before building`);
+          }
         }
       }
       return out;
@@ -4503,6 +4510,12 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         const name = `${symbol}_${key.toUpperCase()}`;
         if (consumed.includes(key))
           continue;
+        const envMatch = typeof value === "string" ? ENV_VAR_REF.exec(value) : null;
+        if (envMatch) {
+          const envName = envMatch[1];
+          lines.push(`#ifndef ${envName}`, `#define ${envName} ""  // pass as build flag: -D${envName}=\\"your_value\\"`, `#endif`, `#define ${name} ${envName}`);
+          continue;
+        }
         if (SECRET_KEY.test(key)) {
           lines.push(`#define ${name} ""  // TODO: set this; do not commit secrets to the model`);
           continue;
@@ -4835,14 +4848,16 @@ ${this.generateActionImplementations()}
 `;
     }
     generateHeader() {
-      const { name, version } = this.project;
+      const { name, version, author } = this.project;
       const date = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
+      const authorLine = author ? ` * Author:    ${author}
+` : "";
       const preamble = `/**
  * PulseIR Generated Code
  *
  * Project: ${name}
  * Version: ${version}
- * Generated: ${date}
+${authorLine} * Generated: ${date}
  *
  * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
@@ -4864,7 +4879,7 @@ ${this.generateActionImplementations()}
  *
  * Project: ${name}
  * Version: ${version}
- * Generated: ${date}
+${authorLine} * Generated: ${date}
  *
  * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
@@ -6383,6 +6398,7 @@ ${implementations.join("\n\n")}`;
     "version",
     "pulseir",
     "description",
+    "author",
     // target:
     "board",
     "verbose",
@@ -7734,10 +7750,12 @@ target:
       return;
     }
     let sketch;
+    let generatedProject;
     let topics;
     let libraries;
     try {
       sketch = new Codegen().generate(project);
+      generatedProject = new Codegen().generateFiles(project);
       topics = new TopicEmitter().toJSON(project, namespaceInput.value.trim() || void 0);
       libraries = new LibraryEmitter().toJSON(project);
     } catch (error) {
@@ -7766,7 +7784,7 @@ target:
     } else {
       setStatus("ok", project.name, counts);
     }
-    current = { project, sketch, topics, libraries };
+    current = { project, sketch, topics, libraries, generatedProject };
     setDownloadReady(true);
     const hasMqtt = (project.system.resources ?? []).some((r) => String(r.interface) === "mqtt");
     setMqttTabVisible(hasMqtt);
@@ -8086,6 +8104,20 @@ board     = ${boardId}
 framework = arduino
 ${libSection}
 `;
+  }
+  function downloadProjectZip() {
+    if (!current)
+      return;
+    const { project, generatedProject } = current;
+    const folder = safeFolderName(project.name);
+    const entries = {};
+    for (const file of generatedProject.generated) {
+      entries[`${folder}/${file.path}`] = file.contents;
+    }
+    for (const file of generatedProject.scaffolds) {
+      entries[`${folder}/${file.path}`] = file.contents;
+    }
+    download(`${folder}.zip`, zip(entries), "application/zip");
   }
   function safeFolderName(name) {
     const clean = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
@@ -8501,6 +8533,10 @@ machine:
       if (!current)
         return;
       download(`${current.project.name}.ino`, current.sketch, "text/plain");
+    });
+    $("download-project").addEventListener("click", () => {
+      closeDownloadMenu();
+      downloadProjectZip();
     });
     $("download-topics").addEventListener("click", () => {
       closeDownloadMenu();

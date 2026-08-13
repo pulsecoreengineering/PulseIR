@@ -44,6 +44,18 @@ export interface InterfaceEmission {
  */
 const SECRET_KEY = /(pass|password|secret|token|psk|credential|apikey|api_key)/i;
 
+/**
+ * An environment-variable reference: `${WIFI_SSID}`.
+ *
+ * When a binding value matches this pattern the generated code emits a
+ * `#ifndef` / `#define` guard that falls back to an empty string, so the
+ * sketch compiles out of the box while still making clear where the real
+ * value must come from (a build flag, e.g. `-DWIFI_SSID=\"your_network\"`).
+ * The resource's own `#define` then aliases that symbol so every call site
+ * remains unchanged.
+ */
+const ENV_VAR_REF = /^\$\{([A-Z_][A-Z0-9_]*)\}$/i;
+
 const BUILTIN = (name: string, include: string, reason: string): ImpliedLibrary =>
   ({ name, include, source: 'builtin', reason });
 
@@ -259,9 +271,14 @@ export class InterfaceBackend {
     out.init = out.init.filter(Boolean);
 
     // Credentials get a blank placeholder so a real value never reaches git.
-    for (const key of Object.keys(binding)) {
+    for (const [key, value] of Object.entries(binding)) {
       if (SECRET_KEY.test(key)) {
-        out.todos.push(`${resource.name}: set ${symbol}_${key.toUpperCase()} before building`);
+        const envMatch = typeof value === 'string' ? ENV_VAR_REF.exec(value) : null;
+        if (envMatch) {
+          out.todos.push(`${resource.name}: ${key} sourced from \$\{${envMatch[1]}\} — define via build flag`);
+        } else {
+          out.todos.push(`${resource.name}: set ${symbol}_${key.toUpperCase()} before building`);
+        }
       }
     }
 
@@ -301,6 +318,20 @@ export class InterfaceBackend {
       const name = `${symbol}_${key.toUpperCase()}`;
 
       if (consumed.includes(key)) continue;
+
+      // Env var reference: `${VAR_NAME}` — emit a #ifndef guard that falls
+      // back to an empty string, then alias to the resource's own symbol.
+      const envMatch = typeof value === 'string' ? ENV_VAR_REF.exec(value) : null;
+      if (envMatch) {
+        const envName = envMatch[1];
+        lines.push(
+          `#ifndef ${envName}`,
+          `#define ${envName} ""  // pass as build flag: -D${envName}=\\"your_value\\"`,
+          `#endif`,
+          `#define ${name} ${envName}`,
+        );
+        continue;
+      }
 
       if (SECRET_KEY.test(key)) {
         // Never inline the model's value, even if one was supplied.

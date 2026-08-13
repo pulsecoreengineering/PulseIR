@@ -383,6 +383,7 @@ export interface PulseProject {
   name: string;
   version: string;
   description?: string;
+  author?: string;
 
   /** Parsed from the top-level `pulseir:` field. Absent when not declared. */
   schemaVersion?: number;
