@@ -62,6 +62,9 @@ const MAX_INCLUDE_DEPTH = 32;
 export const SCHEMA_VERSION = 1;
 
 export class ParseError extends Error {
+  /** Distinguishes semantic "nothing to generate" from a real syntax fault. */
+  kind?: 'empty-model';
+
   constructor(
     message: string,
     public line?: number,
@@ -1460,12 +1463,14 @@ export class Parser {
     // Transitions are not checked here: every one names a `from` and a `to`,
     // and those are resolved against the state list as they are parsed. A
     // transition with no states cannot get this far.
-    throw new ParseError(
+    const empty = new ParseError(
       'The model does nothing. Give it at least one of:\n' +
       '  machine:   states and transitions\n' +
       '  tasks:     work that repeats on an interval\n' +
       '  commands:  actions to run when a command arrives'
     );
+    empty.kind = 'empty-model';
+    throw empty;
   }
 
   /**

@@ -4258,7 +4258,9 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
     assertUsable(states, tasks, commands) {
       if (states.length > 0 || tasks.length > 0 || commands)
         return;
-      throw new ParseError("The model does nothing. Give it at least one of:\n  machine:   states and transitions\n  tasks:     work that repeats on an interval\n  commands:  actions to run when a command arrives");
+      const empty = new ParseError("The model does nothing. Give it at least one of:\n  machine:   states and transitions\n  tasks:     work that repeats on an interval\n  commands:  actions to run when a command arrives");
+      empty.kind = "empty-model";
+      throw empty;
     }
     /**
      * Check every `after:` that names a parameter, once they have all been read.
@@ -7140,6 +7142,40 @@ target:
     downloadButton.disabled = !ready;
     downloadButton.classList.toggle("ready", ready);
   }
+  function showGuide() {
+    const cards = [
+      {
+        icon: "\u{1F500}",
+        label: "machine:",
+        desc: "State machine \u2014 define states and the events that move between them. Use Insert \u25BE \u2192 Logic \u2192 State machine."
+      },
+      {
+        icon: "\u23F1",
+        label: "tasks:",
+        desc: "Repeating background work \u2014 read a sensor, blink an LED, publish MQTT. Use Insert \u25BE \u2192 Logic \u2192 Task."
+      },
+      {
+        icon: "\u{1F4E1}",
+        label: "commands:",
+        desc: "Serial command dispatch \u2014 map text commands arriving over UART to actions. Use Insert \u25BE \u2192 Logic \u2192 Command table."
+      }
+    ];
+    const cardHtml = cards.map((c) => `
+    <div class="guide-card">
+      <div class="guide-card-icon">${c.icon}</div>
+      <div class="guide-card-label">${escapeHtml2(c.label)}</div>
+      <p class="guide-card-desc">${escapeHtml2(c.desc)}</p>
+    </div>`).join("");
+    panes.sketch.innerHTML = `
+    <div class="guide">
+      <p class="guide-title">\u2713 Project setup complete</p>
+      <p class="guide-sub">Your project, board, and version are configured. Add at least one of these sections to generate code:</p>
+      <div class="guide-cards">${cardHtml}</div>
+      <p class="guide-hint">
+        Tip: use the <kbd>Insert \u25BE</kbd> button in the toolbar to add any of these with a single click.
+      </p>
+    </div>`;
+  }
   function setStatus(kind, title, detail = "") {
     status.className = `status ${kind}`;
     status.innerHTML = `<strong>${escapeHtml2(title)}</strong>${detail ? `<span>${escapeHtml2(detail)}</span>` : ""}`;
@@ -7242,6 +7278,13 @@ target:
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const line = error instanceof ParseError && error.line !== void 0 ? error.line + 1 : null;
+      if (error instanceof ParseError && error.kind === "empty-model") {
+        setBadLine(null);
+        clearOutput();
+        showGuide();
+        setStatus("info", `${workspace.name} \u2014 project ready`, "Add machine:, tasks:, or commands: to generate code.");
+        return;
+      }
       setBadLine(line !== null && workspace.active === workspace.entry ? line : null);
       setStatus("error", `Model error${line !== null ? ` (line ${line})` : ""}`, message);
       if (current !== null)

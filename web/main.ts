@@ -279,7 +279,49 @@ function setDownloadReady(ready: boolean): void {
   downloadButton.classList.toggle('ready', ready);
 }
 
-function setStatus(kind: 'ok' | 'warn' | 'error', title: string, detail = ''): void {
+/**
+ * Render a getting-started guide in the Sketch pane when the model is valid
+ * but has no machine/tasks/commands yet. This replaces the generic red error
+ * with actionable next steps.
+ */
+function showGuide(): void {
+  const cards: { icon: string; label: string; desc: string }[] = [
+    {
+      icon: '🔀',
+      label: 'machine:',
+      desc: 'State machine — define states and the events that move between them. Use Insert ▾ → Logic → State machine.',
+    },
+    {
+      icon: '⏱',
+      label: 'tasks:',
+      desc: 'Repeating background work — read a sensor, blink an LED, publish MQTT. Use Insert ▾ → Logic → Task.',
+    },
+    {
+      icon: '📡',
+      label: 'commands:',
+      desc: 'Serial command dispatch — map text commands arriving over UART to actions. Use Insert ▾ → Logic → Command table.',
+    },
+  ];
+
+  const cardHtml = cards.map(c => `
+    <div class="guide-card">
+      <div class="guide-card-icon">${c.icon}</div>
+      <div class="guide-card-label">${escapeHtml(c.label)}</div>
+      <p class="guide-card-desc">${escapeHtml(c.desc)}</p>
+    </div>`).join('');
+
+  panes.sketch.innerHTML = `
+    <div class="guide">
+      <p class="guide-title">✓ Project setup complete</p>
+      <p class="guide-sub">Your project, board, and version are configured. Add at least one of these sections to generate code:</p>
+      <div class="guide-cards">${cardHtml}</div>
+      <p class="guide-hint">
+        Tip: use the <kbd>Insert ▾</kbd> button in the toolbar to add any of these with a single click.
+      </p>
+    </div>`;
+}
+
+function setStatus(kind: 'ok' | 'warn' | 'error' | 'info', title: string, detail = ''): void {
   status.className = `status ${kind}`;
   status.innerHTML = `<strong>${escapeHtml(title)}</strong>${
     detail ? `<span>${escapeHtml(detail)}</span>` : ''
@@ -437,6 +479,16 @@ function render(): void {
     const line = error instanceof ParseError && error.line !== undefined
       ? error.line + 1
       : null;
+
+    // An empty-model error means the project is structurally valid but has no
+    // content to generate yet. Show a guide rather than a red error message.
+    if (error instanceof ParseError && error.kind === 'empty-model') {
+      setBadLine(null);
+      clearOutput();
+      showGuide();
+      setStatus('info', `${workspace.name} — project ready`, 'Add machine:, tasks:, or commands: to generate code.');
+      return;
+    }
 
     // The parser reports against whichever file failed. Only mark a line when
     // that is the file on screen - the entry file is the one it starts from.
