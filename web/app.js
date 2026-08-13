@@ -7345,6 +7345,13 @@ ${implementations.join("\n\n")}`;
   };
 
   // dist/web/main.js
+  function normalizeYaml(source2) {
+    return source2.split("\n").map((line) => {
+      if (line.trimStart().startsWith("#"))
+        return line;
+      return line.replace(/([a-zA-Z_]\w*):([^\s\n:/])/g, "$1: $2");
+    }).join("\n");
+  }
   var $ = (id) => {
     const el = document.getElementById(id);
     if (!el)
@@ -7705,7 +7712,8 @@ target:
     let project;
     const parser = new Parser();
     try {
-      const resolver = new MemoryResolver(workspace.files);
+      const normalizedFiles = Object.fromEntries(Object.entries(workspace.files).map(([k, v]) => [k, normalizeYaml(v)]));
+      const resolver = new MemoryResolver(normalizedFiles);
       project = parser.parseFrom(workspace.entry, resolver);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
