@@ -145,6 +145,13 @@
   #settings-button svg { display: block; }
 
   /* ── Settings modal ────────────────────────────────────────────────────── */
+  .settings-group + .settings-group {
+    margin-top: 20px; border-top: 1px solid var(--border); padding-top: 20px;
+  }
+  .settings-group-label {
+    font-size: 10px; font-weight: 700; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--dim); margin-bottom: 14px;
+  }
   .modal-overlay {
     position: fixed; inset: 0; z-index: 200;
     background: rgba(0,0,0,.45);
@@ -586,9 +593,17 @@
 
   <!-- Settings: keyword registry and other per-user preferences -->
   <button id="settings-button" title="Settings" aria-label="Open settings">
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <circle cx="8" cy="8" r="2.2"/>
-      <path d="M8 1.5v1.1M8 13.4v1.1M1.5 8h1.1M13.4 8h1.1M3.4 3.4l.78.78M11.82 11.82l.78.78M12.6 3.4l-.78.78M4.18 11.82l-.78.78"/>
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <path fill-rule="evenodd" d="
+        M 13.45,7.23 L 14.93,7.03 L 14.93,8.97 L 13.45,8.77
+        L 12.39,11.31 L 13.59,12.21 L 12.21,13.59 L 11.31,12.39
+        L 8.77,13.45 L 8.97,14.93 L 7.03,14.93 L 7.23,13.45
+        L 4.69,12.39 L 3.79,13.59 L 2.41,12.21 L 3.61,11.31
+        L 2.55,8.77 L 1.07,8.97 L 1.07,7.03 L 2.55,7.23
+        L 3.61,4.69 L 2.41,3.79 L 3.79,2.41 L 4.69,3.61
+        L 7.23,2.55 L 7.03,1.07 L 8.97,1.07 L 8.77,2.55
+        L 11.31,3.61 L 12.21,2.41 L 13.59,3.79 L 12.39,4.69 Z
+        M 10.5,8 A 2.5,2.5 0 1 0 5.5,8 A 2.5,2.5 0 1 0 10.5,8 Z"/>
     </svg>
   </button>
 </header>
@@ -679,22 +694,28 @@
       </button>
     </div>
     <div class="modal-body">
-      <section class="modal-section">
-        <h3>Highlight keywords</h3>
-        <p class="hint">
-          Keys in this list are highlighted in <strong>blue</strong> as schema keywords.
-          All other keys appear in <em>italic teal</em> as user-defined names
-          (bus names, state names, action names, etc.).
-          Changes take effect immediately and are saved in the browser.
-        </p>
-        <div id="keyword-chips" class="keyword-chips"></div>
-        <div class="keyword-add">
-          <input id="keyword-input" type="text" placeholder="Add keyword…"
-                 autocomplete="off" autocorrect="off" spellcheck="false">
-          <button id="keyword-add-btn" type="button">Add</button>
-        </div>
-        <button id="keyword-reset-btn" class="reset-btn" type="button">Reset to defaults</button>
-      </section>
+
+      <!-- ── Editor ───────────────────────────────────────────────────────── -->
+      <div class="settings-group">
+        <div class="settings-group-label">Editor</div>
+        <section class="modal-section">
+          <h3>Highlight keywords</h3>
+          <p class="hint">
+            Keys in this list are highlighted in <strong>blue</strong> as schema keywords.
+            All other keys appear in <em>italic teal</em> as user-defined names
+            (bus names, state names, action names, etc.).
+            Changes take effect immediately and are saved in the browser.
+          </p>
+          <div id="keyword-chips" class="keyword-chips"></div>
+          <div class="keyword-add">
+            <input id="keyword-input" type="text" placeholder="Add keyword…"
+                   autocomplete="off" autocorrect="off" spellcheck="false">
+            <button id="keyword-add-btn" type="button">Add</button>
+          </div>
+          <button id="keyword-reset-btn" class="reset-btn" type="button">Reset to defaults</button>
+        </section>
+      </div>
+
     </div>
   </div>
 </div>
