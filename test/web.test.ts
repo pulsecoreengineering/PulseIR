@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
+import { mergeSnippetIntoYaml } from '../web/snippet-merge.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../..');
@@ -310,6 +311,62 @@ test('.gitattributes pins the working tree to LF', () => {
     /^\*\s+text=auto\s+eol=lf\s*$/m.test(attributes),
     '.gitattributes no longer forces LF; a Windows checkout will break `git pull` again'
   );
+});
+
+// ── Snippet merging ──────────────────────────────────────────────────────────
+
+const BASE_HW = `project: {name: x, version: "1.0"}
+
+hardware:
+  devices:
+    led: { type: digital_output, pin: GPIO2 }
+
+parameters:
+  blink_ms: { type: int, default: 500 }
+`;
+
+test('inserting a bus into a doc with no hardware.buses adds buses sub-section', () => {
+  const snippet = `hardware:\n  buses:\n    console: { interface: uart, port: 0, baud: 115200 }`;
+  const result = mergeSnippetIntoYaml(BASE_HW, snippet);
+  assert(result.includes('devices:'), 'devices must be preserved');
+  assert(result.includes('buses:'), 'buses must be added');
+  assert(result.includes('console:'), 'console entry must be added');
+  assert(result.split('hardware:').length === 2, 'must not produce a second hardware: key');
+});
+
+test('inserting a second bus appends under the existing buses sub-section', () => {
+  const withBus = mergeSnippetIntoYaml(BASE_HW, `hardware:\n  buses:\n    console: { interface: uart, port: 0 }`);
+  const result  = mergeSnippetIntoYaml(withBus, `hardware:\n  buses:\n    uart1: { interface: uart, port: 1 }`);
+  assert(result.includes('console:'), 'original bus must survive');
+  assert(result.includes('uart1:'), 'new bus must be added');
+  assert(result.split('hardware:').length === 2, 'must not produce a second hardware: key');
+  assert(result.split('buses:').length === 2, 'must not produce a second buses: key');
+});
+
+test('inserting a device merges into existing devices sub-section', () => {
+  const snippet = `hardware:\n  devices:\n    button: { type: digital_input, pin: GPIO0 }`;
+  const result = mergeSnippetIntoYaml(BASE_HW, snippet);
+  assert(result.includes('led:'), 'existing device must survive');
+  assert(result.includes('button:'), 'new device must be added');
+  assert(result.split('hardware:').length === 2, 'must not produce a second hardware: key');
+  assert(result.split('devices:').length === 2, 'must not produce a second devices: key');
+});
+
+test('inserting a snippet with an absent top-level key appends it', () => {
+  const snippet = `tasks:\n  heartbeat:\n    every: 500\n    do: toggle`;
+  const result = mergeSnippetIntoYaml(BASE_HW, snippet);
+  assert(result.includes('tasks:'), 'tasks must be added');
+  assert(result.includes('heartbeat:'), 'heartbeat task must be present');
+  assert(result.includes('hardware:'), 'hardware must be preserved');
+});
+
+test('merging a Console snippet adds buses and commands without duplicating hardware', () => {
+  const snippet = `hardware:\n  buses:\n    console: { interface: uart, port: 0, baud: 115200 }\n\ncommands:\n  source: console\n  map:\n    help: show_help`;
+  const result = mergeSnippetIntoYaml(BASE_HW, snippet);
+  assert(result.split('hardware:').length === 2, 'must not produce a second hardware: key');
+  assert(result.includes('buses:'), 'buses must be added');
+  assert(result.includes('commands:'), 'commands must be added');
+  assert(result.includes('devices:'), 'devices must be preserved');
 });
 
 // ============================================================================

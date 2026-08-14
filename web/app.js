@@ -7700,6 +7700,113 @@ ${implementations.join("\n\n")}`;
     }
   };
 
+  // dist/web/snippet-merge.js
+  function parseTopBlocks(text) {
+    const blocks = [];
+    let cur = null;
+    for (const line of text.split("\n")) {
+      const m = /^([A-Za-z_][\w-]*):/.exec(line);
+      if (m) {
+        if (cur)
+          blocks.push(cur);
+        cur = { key: m[1], lines: [line] };
+      } else if (cur)
+        cur.lines.push(line);
+    }
+    if (cur)
+      blocks.push(cur);
+    return blocks;
+  }
+  function parseChildBlocks(lines, indent) {
+    const blocks = [];
+    let cur = null;
+    const re = new RegExp(`^${indent}([A-Za-z_][\\w-]*):`);
+    for (const line of lines) {
+      const m = re.exec(line);
+      if (m) {
+        if (cur)
+          blocks.push(cur);
+        cur = { key: m[1], lines: [line] };
+      } else if (cur)
+        cur.lines.push(line);
+    }
+    if (cur)
+      blocks.push(cur);
+    return blocks;
+  }
+  function trimTrailingBlanks(lines) {
+    let end = lines.length;
+    while (end > 0 && lines[end - 1].trim() === "")
+      end--;
+    return lines.slice(0, end);
+  }
+  function findInsertionPoint(lines) {
+    let i = lines.length;
+    while (i > 0 && lines[i - 1].trim() === "")
+      i--;
+    return i;
+  }
+  function findNextTopKeyIdx(lines, from) {
+    for (let i = from; i < lines.length; i++) {
+      if (/^[A-Za-z_][\w-]*:/.test(lines[i]))
+        return i;
+    }
+    return lines.length;
+  }
+  function findNextChildKeyIdx(lines, from, indent) {
+    const re = new RegExp(`^${indent}[A-Za-z_][\\w-]*:`);
+    for (let i = from; i < lines.length; i++) {
+      if (re.test(lines[i]))
+        return i;
+    }
+    return lines.length;
+  }
+  function mergeChildBlock(sectionLines, key, childLines, indent) {
+    const re = new RegExp(`^${indent}${key}:`);
+    const keyIdx = sectionLines.findIndex((l) => re.test(l));
+    if (keyIdx === -1) {
+      const at2 = findInsertionPoint(sectionLines);
+      return [
+        ...sectionLines.slice(0, at2),
+        ...trimTrailingBlanks(childLines),
+        ...sectionLines.slice(at2)
+      ];
+    }
+    const childEnd = findNextChildKeyIdx(sectionLines, keyIdx + 1, indent);
+    const grandchildren = trimTrailingBlanks(childLines.slice(1));
+    const sub = sectionLines.slice(keyIdx, childEnd);
+    const at = findInsertionPoint(sub);
+    return [
+      ...sectionLines.slice(0, keyIdx),
+      ...sub.slice(0, at),
+      ...grandchildren,
+      ...sub.slice(at),
+      ...sectionLines.slice(childEnd)
+    ];
+  }
+  function mergeTopBlock(docLines, key, snippetLines) {
+    const keyIdx = docLines.findIndex((l) => /^([A-Za-z_][\w-]*):/.exec(l)?.[1] === key);
+    if (keyIdx === -1) {
+      const at = findInsertionPoint(docLines);
+      return [...docLines.slice(0, at), "", ...trimTrailingBlanks(snippetLines), ...docLines.slice(at)];
+    }
+    const sectionEnd = findNextTopKeyIdx(docLines, keyIdx + 1);
+    let merged = docLines.slice(keyIdx, sectionEnd);
+    for (const child of parseChildBlocks(snippetLines.slice(1), "  ")) {
+      merged = mergeChildBlock(merged, child.key, child.lines, "  ");
+    }
+    return [...docLines.slice(0, keyIdx), ...merged, ...docLines.slice(sectionEnd)];
+  }
+  function mergeSnippetIntoYaml(doc, snippet2) {
+    let lines = doc.split("\n");
+    for (const blk of parseTopBlocks(snippet2)) {
+      lines = mergeTopBlock(lines, blk.key, blk.lines);
+    }
+    while (lines.length > 1 && lines[lines.length - 1] === "")
+      lines.pop();
+    return lines.join("\n") + "\n";
+  }
+
   // dist/web/main.js
   function normalizeYaml(source2) {
     return source2.split("\n").map((line) => {
@@ -8809,19 +8916,9 @@ machine:
     }
   ];
   function insertSnippet(yaml2) {
-    const text = source.value;
-    const pos = source.selectionStart ?? text.length;
-    const lineEnd = text.indexOf("\n", pos);
-    const insertAt = lineEnd === -1 ? text.length : lineEnd + 1;
-    const before = text.slice(0, insertAt);
-    const after = text.slice(insertAt);
-    const pad = (s) => s.length > 0 && !s.endsWith("\n\n") ? "\n" : "";
-    const suffix = after.length > 0 && !after.startsWith("\n") ? "\n" : "";
-    const inserted = pad(before) + yaml2 + "\n" + suffix;
-    source.value = before + inserted + after;
+    source.value = mergeSnippetIntoYaml(source.value, yaml2);
     paint();
-    const newPos = insertAt + inserted.length;
-    source.selectionStart = source.selectionEnd = newPos;
+    source.selectionStart = source.selectionEnd = source.value.length;
     workspace.files[workspace.active] = source.value;
   }
   function closeSnippetMenu() {
