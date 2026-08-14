@@ -6404,6 +6404,135 @@ ${implementations.join("\n\n")}`;
     return entry.version ? `${entry.name}@${entry.version}` : entry.name;
   }
 
+  // dist/src/analysis/validate.js
+  var REQUIRED_GROUPS = {
+    i2c: [["sda", "scl"]],
+    spi: [["sck", "miso", "mosi"]],
+    gpio: [["pin"]],
+    pwm: [["pin"]],
+    adc: [["pin"]],
+    onewire: [["pin"]]
+  };
+  var Validator = class {
+    /**
+     * Validate the parsed project and return all diagnostics.
+     *
+     * @param parserWarnings  The `parser.warnings` array from the last parse —
+     *   lifted verbatim into diagnostics so callers have one list.
+     */
+    validate(project, parserWarnings = []) {
+      const diagnostics = [];
+      for (const w of parserWarnings) {
+        diagnostics.push({ severity: "warning", code: "PARSER", message: w });
+      }
+      const { system } = project;
+      if (system.states.length > 0) {
+        this.checkUnreachableStates(project, diagnostics);
+      }
+      if (system.events.length > 0) {
+        this.checkUnusedEvents(project, diagnostics);
+      }
+      if ((system.resources ?? []).length > 0) {
+        this.checkPartialBindings(project, diagnostics);
+      }
+      return {
+        diagnostics,
+        get errorCount() {
+          return diagnostics.filter((d) => d.severity === "error").length;
+        },
+        get warningCount() {
+          return diagnostics.filter((d) => d.severity === "warning").length;
+        }
+      };
+    }
+    /**
+     * Warn about leaf states that no transition can ever reach.
+     *
+     * A composite-state target is followed down its initial chain, so
+     * `to: running` implicitly reaches `running/heating` when that is the
+     * initial child — those leaves are counted as reachable too.
+     */
+    checkUnreachableStates(project, out) {
+      const { system } = project;
+      const flat = flattenStates(system.states);
+      const reachable = /* @__PURE__ */ new Set();
+      const initialLeaf = resolveEntryLeaf(system.states, system.states[0].name);
+      if (initialLeaf)
+        reachable.add(initialLeaf);
+      for (const t of system.transitions) {
+        const fullPath = resolvePath(system.states, t.target);
+        if (!fullPath)
+          continue;
+        const leaf = resolveEntryLeaf(system.states, fullPath);
+        if (leaf)
+          reachable.add(leaf);
+        reachable.add(fullPath);
+      }
+      for (const { path, isLeaf } of flat) {
+        if (!isLeaf)
+          continue;
+        if (reachable.has(path))
+          continue;
+        out.push({
+          severity: "warning",
+          code: "UNREACHABLE_STATE",
+          message: `State "${path}" is never the target of any transition and is not the initial state \u2014 it will never be entered`
+        });
+      }
+    }
+    /**
+     * Warn about events that are declared but never referenced in any
+     * transition or command. A declared event that nothing reacts to is
+     * almost always a typo in the transition's "on:" field.
+     */
+    checkUnusedEvents(project, out) {
+      const { system } = project;
+      const used = /* @__PURE__ */ new Set();
+      for (const t of system.transitions) {
+        if (t.event)
+          used.add(t.event);
+      }
+      for (const cmd of system.commands?.commands ?? []) {
+        if (cmd.event)
+          used.add(cmd.event);
+      }
+      for (const event of system.events) {
+        if (!used.has(event.name)) {
+          out.push({
+            severity: "warning",
+            code: "UNUSED_EVENT",
+            message: `Event "${event.name}" is declared but never referenced in a transition or command`
+          });
+        }
+      }
+    }
+    /**
+     * Warn when a binding declares some but not all of a required pin group.
+     * Declaring none is intentional (use board defaults); declaring half is
+     * almost always a copy-paste mistake.
+     */
+    checkPartialBindings(project, out) {
+      for (const resource of project.system.resources ?? []) {
+        const kind = String(resource.interface);
+        const groups = REQUIRED_GROUPS[kind];
+        if (!groups)
+          continue;
+        const binding = resource.binding ?? {};
+        for (const group of groups) {
+          const present = group.filter((k) => binding[k] !== void 0);
+          if (present.length > 0 && present.length < group.length) {
+            const missing = group.filter((k) => binding[k] === void 0);
+            out.push({
+              severity: "warning",
+              code: "PARTIAL_BINDING",
+              message: `${resource.name} (${kind}): has ${present.join(", ")} but is missing ${missing.join(", ")} \u2014 declare all of [${group.join(", ")}] or none`
+            });
+          }
+        }
+      }
+    }
+  };
+
   // dist/web/highlight.js
   var DEFAULT_KEYWORDS = [
     // Top-level blocks
@@ -7748,10 +7877,26 @@ target:
       </svg>
     </div>`;
   }
-  function renderStructure(project) {
+  function renderDiagnostics(result) {
+    if (result.diagnostics.length === 0)
+      return "";
+    const items = result.diagnostics.map((d) => {
+      const cls = d.severity === "error" ? "error" : "warn";
+      return `<li class="${cls}"><span class="diag-code">${escapeHtml2(d.code)}</span><span>${escapeHtml2(d.message)}</span></li>`;
+    }).join("");
+    const title = [
+      result.errorCount > 0 ? `${result.errorCount} error${result.errorCount !== 1 ? "s" : ""}` : "",
+      result.warningCount > 0 ? `${result.warningCount} warning${result.warningCount !== 1 ? "s" : ""}` : ""
+    ].filter(Boolean).join(", ");
+    return `<h3>Problems <span style="text-transform:none;letter-spacing:0;font-size:11px">(${title})</span></h3><ul class="problems">${items}</ul>`;
+  }
+  function renderStructure(project, validation) {
     const { system } = project;
     const flat = flattenStates(system.states);
     const sections = [];
+    const problems = renderDiagnostics(validation);
+    if (problems)
+      sections.push(problems);
     const diagram = renderHardwareDiagram(project);
     if (diagram)
       sections.push(diagram);
@@ -7907,10 +8052,11 @@ target:
     }
     setBadLine(null);
     setStale(false);
+    const validation = new Validator().validate(project, parser.warnings);
     panes.sketch.innerHTML = `<pre><code>${withLineNumbers(highlightCpp(sketch))}</code></pre>`;
     panes.topics.innerHTML = `<pre><code>${withLineNumbers(escapeHtml2(topics))}</code></pre>`;
     panes.libraries.innerHTML = `<pre><code>${withLineNumbers(escapeHtml2(libraries))}</code></pre>`;
-    panes.structure.innerHTML = renderStructure(project);
+    panes.structure.innerHTML = renderStructure(project, validation);
     const fileCount = Object.keys(workspace.files).length;
     const counts = [
       fileCount > 1 ? `${fileCount} files` : null,
@@ -7919,9 +8065,9 @@ target:
       `${(project.system.resources || []).length} resources`,
       `${sketch.split("\n").length} lines generated`
     ].filter(Boolean).join(" \xB7 ");
-    if (parser.warnings.length > 0) {
-      const warnDetail = [counts, ...parser.warnings.map((w) => `\u26A0 ${w}`)].join("\n");
-      setStatus("warn", project.name, warnDetail);
+    const wc = validation.warningCount;
+    if (wc > 0) {
+      setStatus("warn", project.name, `${counts} \xB7 ${wc} warning${wc !== 1 ? "s" : ""} \u2014 see Structure tab`);
     } else {
       setStatus("ok", project.name, counts);
     }

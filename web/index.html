@@ -487,6 +487,18 @@
   .status span { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
 
   /* ── Structure view ─────────────────────────────────────────────────────── */
+  .problems { margin: 0 0 2px; padding: 0; list-style: none; }
+  .problems li {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 7px 10px; border-radius: 6px; margin-bottom: 4px;
+    font-size: 12.5px; line-height: 1.5;
+  }
+  .problems li.warn { background: var(--warn-bg); color: var(--warn-fg); }
+  .problems li.error { background: var(--err-bg); color: var(--err-fg); }
+  .problems .diag-code {
+    font-family: var(--mono); font-size: 10px; font-weight: 700;
+    letter-spacing: .04em; opacity: .65; flex-shrink: 0; padding-top: 2px;
+  }
   h3 {
     font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
     color: var(--dim); margin: 18px 0 6px; font-weight: 600;

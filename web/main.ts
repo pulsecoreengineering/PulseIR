@@ -20,6 +20,8 @@ import type { GeneratedProject } from '../src/codegen/index.js';
 import { TopicEmitter } from '../src/emit/topics.js';
 import { LibraryEmitter } from '../src/emit/libraries.js';
 import { flattenStates, resolveEntryLeaf, resolvePath } from '../src/analysis/states.js';
+import { Validator } from '../src/analysis/validate.js';
+import type { ValidationResult } from '../src/analysis/validate.js';
 import { highlight, DEFAULT_KEYWORDS } from './highlight.js';
 import { highlightCpp } from './highlight-cpp.js';
 import { ProjectStore, foldImport, findEntry, importedName, nameFromModel } from './projects.js';
@@ -623,15 +625,39 @@ function renderHardwareDiagram(project: PulseProject): string {
     </div>`;
 }
 
+function renderDiagnostics(result: ValidationResult): string {
+  if (result.diagnostics.length === 0) return '';
+
+  const items = result.diagnostics.map(d => {
+    const cls = d.severity === 'error' ? 'error' : 'warn';
+    return (
+      `<li class="${cls}">` +
+      `<span class="diag-code">${escapeHtml(d.code)}</span>` +
+      `<span>${escapeHtml(d.message)}</span>` +
+      `</li>`
+    );
+  }).join('');
+
+  const title = [
+    result.errorCount > 0 ? `${result.errorCount} error${result.errorCount !== 1 ? 's' : ''}` : '',
+    result.warningCount > 0 ? `${result.warningCount} warning${result.warningCount !== 1 ? 's' : ''}` : '',
+  ].filter(Boolean).join(', ');
+
+  return `<h3>Problems <span style="text-transform:none;letter-spacing:0;font-size:11px">(${title})</span></h3><ul class="problems">${items}</ul>`;
+}
+
 /**
  * The structure pane exists to make the two rules students get wrong visible:
  * entering a composite state descends to its initial child, and a transition
  * on an enclosing state applies to everything inside it.
  */
-function renderStructure(project: PulseProject): string {
+function renderStructure(project: PulseProject, validation: ValidationResult): string {
   const { system } = project;
   const flat = flattenStates(system.states);
   const sections: string[] = [];
+
+  const problems = renderDiagnostics(validation);
+  if (problems) sections.push(problems);
 
   const diagram = renderHardwareDiagram(project);
   if (diagram) sections.push(diagram);
@@ -850,10 +876,12 @@ function render(): void {
   setBadLine(null);
   setStale(false);
 
+  const validation = new Validator().validate(project, parser.warnings);
+
   panes.sketch.innerHTML = `<pre><code>${withLineNumbers(highlightCpp(sketch))}</code></pre>`;
   panes.topics.innerHTML = `<pre><code>${withLineNumbers(escapeHtml(topics))}</code></pre>`;
   panes.libraries.innerHTML = `<pre><code>${withLineNumbers(escapeHtml(libraries))}</code></pre>`;
-  panes.structure.innerHTML = renderStructure(project);
+  panes.structure.innerHTML = renderStructure(project, validation);
 
   const fileCount = Object.keys(workspace.files).length;
   const counts = [
@@ -863,10 +891,10 @@ function render(): void {
     `${(project.system.resources || []).length} resources`,
     `${sketch.split('\n').length} lines generated`,
   ].filter(Boolean).join(' · ');
-  // A retired schema still generates, but the student should be told.
-  if (parser.warnings.length > 0) {
-    const warnDetail = [counts, ...parser.warnings.map(w => `⚠ ${w}`)].join('\n');
-    setStatus('warn', project.name, warnDetail);
+
+  const wc = validation.warningCount;
+  if (wc > 0) {
+    setStatus('warn', project.name, `${counts} · ${wc} warning${wc !== 1 ? 's' : ''} — see Structure tab`);
   } else {
     setStatus('ok', project.name, counts);
   }
