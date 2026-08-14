@@ -4488,9 +4488,18 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
           out.todos.push(`${resource.name}: always close files after use \u2014 LittleFS has a limited handle pool`);
           break;
         }
-        case "can":
-          out.todos.push(`${resource.name}: CAN has no single Arduino API - declare the library your board needs and initialise it here`);
+        case "can": {
+          const bitrateRaw = Number(binding.bitrate ?? 5e5);
+          const timingMacro = canTimingMacro(bitrateRaw);
+          const sym = symbol;
+          const hasTx = binding.tx !== void 0;
+          const hasRx = binding.rx !== void 0;
+          out.globals.push("#ifdef ARDUINO_ARCH_ESP32", "#include <driver/twai.h>", "#endif");
+          const txExpr = hasTx ? `(gpio_num_t)${sym}_TX` : "(gpio_num_t)4";
+          const rxExpr = hasRx ? `(gpio_num_t)${sym}_RX` : "(gpio_num_t)5";
+          out.init.push("#ifdef ARDUINO_ARCH_ESP32", `  static const twai_general_config_t ${sym}_g =`, `    TWAI_GENERAL_CONFIG_DEFAULT(${txExpr}, ${rxExpr}, TWAI_MODE_NORMAL);`, `  static const twai_timing_config_t ${sym}_t = ${timingMacro};`, `  static const twai_filter_config_t ${sym}_f = TWAI_FILTER_CONFIG_ACCEPT_ALL();`, `  twai_driver_install(&${sym}_g, &${sym}_t, &${sym}_f);`, "  twai_start();", "#else", `  // TODO: ${resource.name}: add your CAN library initialization here (e.g. MCP2515).`, "#endif");
           break;
+        }
         default:
           out.todos.push(`${resource.name}: custom interface, initialise it here`);
           break;
@@ -4579,6 +4588,19 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
   function lower(symbol) {
     return symbol.toLowerCase().replace(/_([a-z])/g, (_, c) => c.toUpperCase());
   }
+  function canTimingMacro(bitrate) {
+    const map2 = {
+      25e3: "TWAI_TIMING_CONFIG_25KBITS()",
+      5e4: "TWAI_TIMING_CONFIG_50KBITS()",
+      1e5: "TWAI_TIMING_CONFIG_100KBITS()",
+      125e3: "TWAI_TIMING_CONFIG_125KBITS()",
+      25e4: "TWAI_TIMING_CONFIG_250KBITS()",
+      5e5: "TWAI_TIMING_CONFIG_500KBITS()",
+      8e5: "TWAI_TIMING_CONFIG_800KBITS()",
+      1e6: "TWAI_TIMING_CONFIG_1MBITS()"
+    };
+    return map2[bitrate] ?? "TWAI_TIMING_CONFIG_500KBITS()  // adjust for your declared bitrate";
+  }
 
   // dist/src/codegen/index.js
   var CodegenError = class extends Error {
@@ -4647,6 +4669,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         this.generateTimeouts(),
         this.generateTasks(),
         this.generateCommands(),
+        this.generateReadSensors(),
         this.generateSetupFunction(),
         this.generateLoopFunction(),
         this.generateGuardImplementations(),
@@ -4740,6 +4763,7 @@ void setupInterfaces();${this.declInterfaceGlobals()}`,
         this.generateTimeouts(),
         this.generateTasks(),
         this.generateCommands(),
+        this.generateReadSensors(),
         this.generateSetupFunction(),
         this.generateLoopFunction()
       ].join("\n\n") + "\n";
@@ -5644,6 +5668,137 @@ several_reset
   //   ESP32 core 2.x: ledcWrite(${channelMacro}, ${dutyExpr});
   //   AVR / RP2040:   analogWrite(${pinMacro}, ${dutyExpr});`;
     }
+    // =========================================================================
+    // GENERATED ACTION BODIES
+    // =========================================================================
+    /**
+     * Generate the real hardware call for a built-in driver action, or fall back
+     * to a TODO comment for custom drivers the generator cannot know about.
+     *
+     * The surrounding function still keeps its param documentation and context
+     * listing — only the implementation line changes.
+     */
+    actionBody(action) {
+      const driver = action?.driver;
+      const params = action?.params ?? {};
+      switch (driver) {
+        case "gpio_control": {
+          const rawDevice = params.device;
+          const rawDevices = params.devices;
+          const targets = rawDevices ?? (rawDevice ? [rawDevice] : []);
+          const value = params.value;
+          if (targets.length === 0 || value === void 0)
+            break;
+          const valueStr = String(value).toUpperCase();
+          if (valueStr === "TOGGLE") {
+            return targets.map((t) => {
+              const pin = `${this.sanitizeUpper(String(t))}_PIN`;
+              return `  digitalWrite(${pin}, !digitalRead(${pin}));`;
+            }).join("\n") + "\n  (void)ctx;";
+          }
+          const valueExpr = valueStr === "HIGH" || value === 1 ? "HIGH" : valueStr === "LOW" || value === 0 ? "LOW" : this.isParameter(String(value)) ? `systemParameters.${this.sanitize(String(value))} ? HIGH : LOW` : null;
+          if (valueExpr === null)
+            break;
+          return targets.map((t) => `  digitalWrite(${this.sanitizeUpper(String(t))}_PIN, ${valueExpr});`).join("\n") + "\n  (void)ctx;";
+        }
+        case "adc_read": {
+          const deviceName = String(params.device ?? "");
+          if (this.isSensorComponent(deviceName)) {
+            const pin = `${this.sanitizeUpper(deviceName)}_PIN`;
+            const field = `systemSensors.${this.sanitize(deviceName)}`;
+            return `  ${field} = analogRead(${pin});
+  (void)ctx;`;
+          }
+          break;
+        }
+        case "gpio_read": {
+          const deviceName = String(params.device ?? "");
+          if (this.isSensorComponent(deviceName)) {
+            const pin = `${this.sanitizeUpper(deviceName)}_PIN`;
+            const field = `systemSensors.${this.sanitize(deviceName)}`;
+            return `  ${field} = (float)digitalRead(${pin});
+  (void)ctx;`;
+          }
+          break;
+        }
+        case "pwm_control": {
+          const deviceName = String(params.device ?? "");
+          const device = (this.project.system.components || []).find((c) => c.name === deviceName);
+          if (!device)
+            break;
+          const pinMacro = `${this.sanitizeUpper(deviceName)}_PIN`;
+          const channelMacro = `${this.sanitizeUpper(deviceName)}_CHANNEL`;
+          const dutyRaw = params.duty;
+          const dutyParam = (this.project.system.parameters || []).find((p) => p.name === String(dutyRaw));
+          const dutyExpr = dutyParam ? `ctx->parameters->${this.sanitize(String(dutyRaw))}` : dutyRaw !== void 0 ? String(dutyRaw) : "0";
+          const board = (this.project.target?.board ?? "").toLowerCase();
+          const isAvr = /avr|uno|mega|nano|atmega|leonardo/.test(board);
+          const isRp = /rp2040|pico/.test(board);
+          if (isAvr || isRp) {
+            return `  analogWrite(${pinMacro}, ${dutyExpr});
+  (void)ctx;`;
+          }
+          return [
+            "#ifdef ARDUINO_ARCH_ESP32",
+            "#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3",
+            `  ledcWrite(${pinMacro}, ${dutyExpr});`,
+            "#else",
+            `  ledcWrite(${channelMacro}, ${dutyExpr});`,
+            "#endif",
+            "#else",
+            `  analogWrite(${pinMacro}, ${dutyExpr});`,
+            "#endif",
+            "  (void)ctx;"
+          ].join("\n");
+        }
+        case "console_help": {
+          if (!this.hasConsole)
+            break;
+          const cmds = (this.project.system.commands?.commands ?? []).map((c) => c.match);
+          const stream = this.consoleStream();
+          const list = cmds.length ? cmds.join(", ") : "(no commands declared)";
+          return `  ${stream}.println("Commands: ${list}");
+  (void)ctx;`;
+        }
+      }
+      return "  // TODO: Implement the hardware calls for this action.\n  (void)ctx;";
+    }
+    /** True when name is a declared model parameter. */
+    isParameter(name) {
+      return (this.project.system.parameters || []).some((p) => p.name === name);
+    }
+    /** True when name is a declared sensor component. */
+    isSensorComponent(name) {
+      return (this.project.system.components || []).some((c) => c.name === name && String(c.class) === "sensor");
+    }
+    // =========================================================================
+    // SENSOR READS
+    // =========================================================================
+    /**
+     * Generate a `readSensors()` function that populates `systemSensors` from
+     * declared sensor devices that have a known, PIN-based read pattern.
+     *
+     * Only analog_input and digital_input are emitted here — they need no extra
+     * library and the read is a single `analogRead`/`digitalRead` call. Bus-based
+     * sensors (ds18b20, bme280, etc.) require library-specific objects; their
+     * stubs live in the action bodies that explicitly trigger a read, and the
+     * developer adds the object global for their chosen library.
+     */
+    generateReadSensors() {
+      const sensors = (this.project.system.components || []).filter((c) => String(c.class) === "sensor" && (c.type === "analog_input" || c.type === "digital_input"));
+      if (sensors.length === 0)
+        return "";
+      const reads = sensors.map((c) => {
+        const pin = `${this.sanitizeUpper(c.name)}_PIN`;
+        const field = `systemSensors.${this.sanitize(c.name)}`;
+        return c.type === "analog_input" ? `  ${field} = analogRead(${pin});` : `  ${field} = (float)digitalRead(${pin});`;
+      });
+      return `// Populate systemSensors before guards and actions read them.
+// Called at the top of every loop() pass.
+static void readSensors() {
+${reads.join("\n")}
+}`;
+    }
     /**
      * A `log:` template as print calls.
      *
@@ -5843,6 +5998,9 @@ ${blocks.join("\n\n")}`;
     // =========================================================================
     generateLoopFunction() {
       const body = [];
+      const hasPinSensors = (this.project.system.components || []).some((c) => String(c.class) === "sensor" && (c.type === "analog_input" || c.type === "digital_input"));
+      if (hasPinSensors)
+        body.push("  readSensors();");
       if (this.project.system.commands)
         body.push("  pollCommands();");
       for (const task of this.project.system.tasks || []) {
@@ -5851,14 +6009,21 @@ ${blocks.join("\n\n")}`;
       if (this.hasMachine) {
         const example = this.project.system.events[0];
         const exampleName = example ? `EVENT_${this.sanitizeUpper(example.name)}` : "EVENT_NONE";
-        body.push(`  // TODO: Read sensors into systemSensors, then raise events.
+        const sensorComment = hasPinSensors ? `  // TODO: Raise events from the readings readSensors() just populated.
+  // Example:
+  //   if (systemSensors.temp >= systemParameters.setpoint) {
+  //     fsm.sendEvent(${exampleName});
+  //   }
+  //
+  // sendEvent() is ISR-safe, so interrupts may call it directly.` : `  // TODO: Read sensors into systemSensors, then raise events.
   // Example:
   //   systemSensors.temperature = readTemperature();
   //   if (systemSensors.temperature >= systemParameters.setpoint) {
   //     fsm.sendEvent(${exampleName});
   //   }
   //
-  // sendEvent() is ISR-safe, so interrupts may call it directly.
+  // sendEvent() is ISR-safe, so interrupts may call it directly.`;
+        body.push(`${sensorComment}
 
   fsm.update();`);
       } else if (body.length === 0) {
@@ -5921,13 +6086,12 @@ ${implementations}`;
         const paramDoc = action?.params ? Object.entries(action.params).map(([k, v]) => `  //   ${k}: ${JSON.stringify(v)}${this.resolveParamHint(v)}`).join("\n") : "  //   (none)";
         const trace = this.hasConsole && this.isVerbose ? `  ${this.consoleStream()}.println("  -> Action: ${name}");
 ` : "";
-        const pwmHint = action ? this.pwmWriteHint(action) : "";
+        const body = this.actionBody(action);
         return `void action_${this.sanitize(name)}(SystemContext* ctx) {
 ${trace}  // Declared params for this action (documentation only):
 ${paramDoc}
 ${this.contextDoc()}  //
-  // TODO: Implement the hardware calls for this action.${pwmHint}
-  (void)ctx;
+${body}
 }`;
       });
       return `// ============================================================================

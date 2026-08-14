@@ -290,12 +290,36 @@ export class InterfaceBackend {
         break;
       }
 
-      case 'can':
-        out.todos.push(
-          `${resource.name}: CAN has no single Arduino API - declare the library ` +
-          'your board needs and initialise it here'
+      case 'can': {
+        const bitrateRaw = Number(binding.bitrate ?? 500000);
+        const timingMacro = canTimingMacro(bitrateRaw);
+        const sym = symbol;
+        const hasTx = binding.tx !== undefined;
+        const hasRx = binding.rx !== undefined;
+
+        // ESP32 TWAI (the built-in CAN peripheral). The sketch stays portable:
+        // non-ESP32 targets get a TODO that names the peripheral they need.
+        out.globals.push(
+          '#ifdef ARDUINO_ARCH_ESP32',
+          '#include <driver/twai.h>',
+          '#endif',
+        );
+        const txExpr = hasTx ? `(gpio_num_t)${sym}_TX` : '(gpio_num_t)4';
+        const rxExpr = hasRx ? `(gpio_num_t)${sym}_RX` : '(gpio_num_t)5';
+        out.init.push(
+          '#ifdef ARDUINO_ARCH_ESP32',
+          `  static const twai_general_config_t ${sym}_g =`,
+          `    TWAI_GENERAL_CONFIG_DEFAULT(${txExpr}, ${rxExpr}, TWAI_MODE_NORMAL);`,
+          `  static const twai_timing_config_t ${sym}_t = ${timingMacro};`,
+          `  static const twai_filter_config_t ${sym}_f = TWAI_FILTER_CONFIG_ACCEPT_ALL();`,
+          `  twai_driver_install(&${sym}_g, &${sym}_t, &${sym}_f);`,
+          '  twai_start();',
+          '#else',
+          `  // TODO: ${resource.name}: add your CAN library initialization here (e.g. MCP2515).`,
+          '#endif',
         );
         break;
+      }
 
       default:
         out.todos.push(`${resource.name}: custom interface, initialise it here`);
@@ -414,4 +438,19 @@ function literal(value: unknown): string {
 
 function lower(symbol: string): string {
   return symbol.toLowerCase().replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+}
+
+/** Map a declared bitrate (bps) to the ESP32 TWAI timing-config macro name. */
+function canTimingMacro(bitrate: number): string {
+  const map: Record<number, string> = {
+    25000:   'TWAI_TIMING_CONFIG_25KBITS()',
+    50000:   'TWAI_TIMING_CONFIG_50KBITS()',
+    100000:  'TWAI_TIMING_CONFIG_100KBITS()',
+    125000:  'TWAI_TIMING_CONFIG_125KBITS()',
+    250000:  'TWAI_TIMING_CONFIG_250KBITS()',
+    500000:  'TWAI_TIMING_CONFIG_500KBITS()',
+    800000:  'TWAI_TIMING_CONFIG_800KBITS()',
+    1000000: 'TWAI_TIMING_CONFIG_1MBITS()',
+  };
+  return map[bitrate] ?? 'TWAI_TIMING_CONFIG_500KBITS()  // adjust for your declared bitrate';
 }
