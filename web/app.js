@@ -7773,8 +7773,16 @@ ${implementations.join("\n\n")}`;
       ];
     }
     const childEnd = findNextChildKeyIdx(sectionLines, keyIdx + 1, indent);
-    const grandchildren = trimTrailingBlanks(childLines.slice(1));
     const sub = sectionLines.slice(keyIdx, childEnd);
+    const grandchildren = trimTrailingBlanks(childLines.slice(1)).filter((line) => {
+      const entryKey = /^\s+([A-Za-z_][\w-]*)[\s:]/.exec(line)?.[1];
+      if (!entryKey)
+        return true;
+      const alreadyPresent = new RegExp(`^\\s+${entryKey}[\\s:]`);
+      return !sub.some((l) => alreadyPresent.test(l));
+    });
+    if (grandchildren.length === 0)
+      return sectionLines;
     const at = findInsertionPoint(sub);
     return [
       ...sectionLines.slice(0, keyIdx),

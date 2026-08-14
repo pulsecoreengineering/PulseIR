@@ -79,9 +79,20 @@ export function mergeChildBlock(
   }
 
   const childEnd = findNextChildKeyIdx(sectionLines, keyIdx + 1, indent);
-  const grandchildren = trimTrailingBlanks(childLines.slice(1));
   const sub = sectionLines.slice(keyIdx, childEnd);
-  const at  = findInsertionPoint(sub);
+
+  // Only add grandchildren whose key isn't already present in the sub-section —
+  // prevents duplicate map entries when the snippet overlaps with existing content.
+  const grandchildren = trimTrailingBlanks(childLines.slice(1)).filter(line => {
+    const entryKey = /^\s+([A-Za-z_][\w-]*)[\s:]/.exec(line)?.[1];
+    if (!entryKey) return true;
+    const alreadyPresent = new RegExp(`^\\s+${entryKey}[\\s:]`);
+    return !sub.some(l => alreadyPresent.test(l));
+  });
+
+  if (grandchildren.length === 0) return sectionLines;
+
+  const at = findInsertionPoint(sub);
   return [
     ...sectionLines.slice(0, keyIdx),
     ...sub.slice(0, at),
