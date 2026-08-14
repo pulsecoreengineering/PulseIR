@@ -4361,6 +4361,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
   var CONSUMED_KEYS = {
     gpio: ["mode"],
     uart: ["port"],
+    rs485: ["port"],
     mqtt: ["tls"],
     littlefs: ["format_on_fail"]
   };
@@ -4372,6 +4373,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
     i2c: ["sda", "scl", "frequency", "address"],
     spi: ["sck", "miso", "mosi", "cs", "frequency"],
     can: ["tx", "rx", "bitrate"],
+    rs485: ["port", "baud", "rx", "tx", "de", "re"],
     onewire: ["pin"],
     eeprom: ["size"],
     littlefs: ["format_on_fail"],
@@ -4413,6 +4415,23 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
           const serial = port === 0 ? "Serial" : `Serial${port}`;
           const baud = has("baud") ? ref("baud") : "115200";
           out.init.push(...guarded(has("rx") && has("tx") ? `${serial}.begin(${baud}, SERIAL_8N1, ${ref("rx")}, ${ref("tx")});` : `${serial}.begin(${baud});`, `${serial}.begin(${baud});`));
+          break;
+        }
+        case "rs485": {
+          const port = binding.port === void 0 ? 1 : Number(binding.port);
+          const serial = port === 0 ? "Serial" : `Serial${port}`;
+          const baud = has("baud") ? ref("baud") : "9600";
+          out.init.push(...guarded(has("rx") && has("tx") ? `${serial}.begin(${baud}, SERIAL_8N1, ${ref("rx")}, ${ref("tx")});` : `${serial}.begin(${baud});`, `${serial}.begin(${baud});`));
+          if (has("de")) {
+            out.init.push(`pinMode(${ref("de")}, OUTPUT);`, `digitalWrite(${ref("de")}, LOW);  // start in receive mode`);
+            if (has("re")) {
+              out.init.push(`pinMode(${ref("re")}, OUTPUT);`, `digitalWrite(${ref("re")}, LOW);  // RE active-low: receiver enabled`);
+            }
+            const deNote = has("re") ? `set ${ref("de")} HIGH / ${ref("re")} HIGH before writing; clear both after flush` : `set ${ref("de")} HIGH before writing, LOW after ${serial}.flush()`;
+            out.todos.push(`${resource.name}: ${deNote} \u2014 RS485 direction control`);
+          } else {
+            out.todos.push(`${resource.name}: add "de" (and optionally "re") bindings for RS485 direction control`);
+          }
           break;
         }
         case "pwm": {
