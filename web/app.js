@@ -7638,10 +7638,123 @@ target:
       tab.addEventListener("dblclick", () => renameFile(name));
     }
   }
+  var IFACE_COLOR = {
+    i2c: "#3b82f6",
+    spi: "#7c3aed",
+    uart: "#059669",
+    gpio: "#d97706",
+    pwm: "#ea580c",
+    adc: "#dc2626",
+    wifi: "#0891b2",
+    ethernet: "#0284c7",
+    ble: "#6d28d9",
+    mqtt: "#0ea5e9",
+    can: "#b45309",
+    onewire: "#15803d",
+    eeprom: "#4f46e5",
+    littlefs: "#0f766e",
+    custom: "#6b7280"
+  };
+  var PIN_KEYS2 = {
+    i2c: ["sda", "scl", "frequency", "address"],
+    spi: ["sck", "miso", "mosi", "cs"],
+    uart: ["port", "rx", "tx", "baud"],
+    gpio: ["pin", "mode"],
+    pwm: ["pin", "channel", "frequency"],
+    adc: ["pin"],
+    wifi: ["ssid", "hostname"],
+    ethernet: ["cs", "mac"],
+    ble: ["name"],
+    mqtt: ["host", "port", "prefix"],
+    can: ["tx", "rx", "bitrate"],
+    onewire: ["pin"],
+    eeprom: ["size"],
+    littlefs: ["format_on_fail"],
+    custom: []
+  };
+  function pinSummary(resource) {
+    const kind = String(resource.interface);
+    const keys = PIN_KEYS2[kind] ?? [];
+    const binding = resource.binding ?? {};
+    return keys.filter((k) => binding[k] !== void 0).slice(0, 4).map((k) => `${k.toUpperCase()}:${String(binding[k])}`).join("  ");
+  }
+  function renderHardwareDiagram(project) {
+    const resources = project.system.resources ?? [];
+    const components = project.system.components ?? [];
+    if (resources.length === 0 && components.length === 0)
+      return "";
+    const ROW = 80, NH = 60, NW = 195, PAD = 20;
+    const BX = 270, BW = 180;
+    const CX = 515;
+    const SVG_W = 720;
+    const rows = Math.max(resources.length, components.length, 1);
+    const SVG_H = rows * ROW + PAD * 2;
+    const boardLabel = escapeHtml2(project.target?.board ?? "Board");
+    const resMap = new Map(resources.map((r, i) => [r.name, i]));
+    const p = [];
+    p.push(`<rect x="${BX}" y="${PAD / 2}" width="${BW}" height="${SVG_H - PAD / 2}" rx="8" style="fill:var(--panel);stroke:var(--border);stroke-width:1.5"/>`);
+    p.push(`<text x="${BX + BW / 2}" y="${PAD / 2 + 16}" text-anchor="middle" style="font-size:11px;font-weight:600;fill:var(--dim)">${boardLabel}</text>`);
+    for (let i = 0; i < resources.length; i++) {
+      const r = resources[i];
+      const kind = String(r.interface);
+      const color = IFACE_COLOR[kind] ?? "#6b7280";
+      const ny = PAD + i * ROW;
+      const cy = ny + NH / 2;
+      p.push(`<rect x="10" y="${ny}" width="${NW}" height="${NH}" rx="6" style="fill:var(--bg);stroke:${color};stroke-width:1.5"/>`);
+      p.push(`<text x="18" y="${ny + 20}" style="font-size:12px;font-weight:600;fill:var(--text)">${escapeHtml2(r.name)}</text>`);
+      p.push(`<text x="18" y="${ny + 36}" style="font-size:10px;font-weight:500;fill:${color}">${kind}</text>`);
+      const pins = pinSummary(r);
+      if (pins) {
+        p.push(`<text x="18" y="${ny + 52}" style="font-size:9px;font-family:monospace,monospace;fill:var(--dim)">${escapeHtml2(pins)}</text>`);
+      }
+      p.push(`<line x1="${10 + NW}" y1="${cy}" x2="${BX}" y2="${cy}" style="stroke:${color};stroke-width:1.5"/>`);
+      p.push(`<circle cx="${BX}" cy="${cy}" r="3" style="fill:${color}"/>`);
+    }
+    for (let j = 0; j < components.length; j++) {
+      const c = components[j];
+      const ny = PAD + j * ROW;
+      const cy = ny + NH / 2;
+      let color = null;
+      if (c.bus) {
+        const ri = resMap.get(c.bus);
+        if (ri !== void 0) {
+          const kind = String(resources[ri].interface);
+          color = IFACE_COLOR[kind] ?? null;
+        }
+      }
+      const strokeColor = color ?? "var(--border)";
+      const lineColor = color ?? "var(--dim)";
+      p.push(`<rect x="${CX}" y="${ny}" width="${NW}" height="${NH}" rx="6" style="fill:var(--bg);stroke:${strokeColor};stroke-width:1.5"/>`);
+      p.push(`<text x="${CX + NW - 12}" y="${ny + 20}" text-anchor="end" style="font-size:12px;font-weight:600;fill:var(--text)">${escapeHtml2(c.name)}</text>`);
+      const sub = c.bus ? `bus: ${c.bus}` : c.driver ?? "";
+      if (sub) {
+        p.push(`<text x="${CX + NW - 12}" y="${ny + 36}" text-anchor="end" style="font-size:10px;fill:var(--dim)">${escapeHtml2(sub)}</text>`);
+      }
+      if (c.type) {
+        p.push(`<text x="${CX + NW - 12}" y="${ny + 52}" text-anchor="end" style="font-size:9px;font-family:monospace,monospace;fill:var(--dim)">${escapeHtml2(c.type)}</text>`);
+      }
+      const dash = color ? "" : ' stroke-dasharray="4 3"';
+      p.push(`<line x1="${BX + BW}" y1="${cy}" x2="${CX}" y2="${cy}" style="stroke:${lineColor};stroke-width:1.5"${dash}/>`);
+      p.push(`<circle cx="${BX + BW}" cy="${cy}" r="3" style="fill:${lineColor}"/>`);
+    }
+    return `
+    <h3>Hardware diagram</h3>
+    <p class="hint">Resources (buses) on the left connect to the board. Components on the right inherit their line colour from the bus they sit on.</p>
+    <div style="overflow-x:auto">
+      <svg viewBox="0 0 ${SVG_W} ${SVG_H}" role="img"
+           aria-label="Hardware wiring diagram for ${boardLabel}"
+           style="max-width:100%;height:auto;display:block;min-width:480px">
+        ${p.join("\n        ")}
+      </svg>
+    </div>`;
+  }
   function renderStructure(project) {
     const { system } = project;
     const flat = flattenStates(system.states);
     const sections = [];
+    const diagram = renderHardwareDiagram(project);
+    if (diagram)
+      sections.push(diagram);
     if (flat.length > 0) {
       const tree = flat.filter((s) => s.depth === 0).map((s) => renderStateNode(s.path, flat)).join("");
       sections.push(`
