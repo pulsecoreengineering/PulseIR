@@ -1611,29 +1611,17 @@ machine:
   },
 ];
 
+import { mergeSnippetIntoYaml } from './snippet-merge.js';
+
 /**
- * Insert a snippet at the end of the line the cursor is on, separated from
- * existing content by a blank line on each side. Inserts into the active file.
+ * Insert a snippet into the active file, merging into existing top-level
+ * sections rather than duplicating keys. Falls back to appending for keys
+ * that are not yet present in the document.
  */
 function insertSnippet(yaml: string): void {
-  const text = source.value;
-  const pos = source.selectionStart ?? text.length;
-
-  // End of the current line (or end of file).
-  const lineEnd = text.indexOf('\n', pos);
-  const insertAt = lineEnd === -1 ? text.length : lineEnd + 1;
-
-  const before = text.slice(0, insertAt);
-  const after  = text.slice(insertAt);
-
-  const pad = (s: string) => (s.length > 0 && !s.endsWith('\n\n') ? '\n' : '');
-  const suffix = after.length > 0 && !after.startsWith('\n') ? '\n' : '';
-  const inserted = pad(before) + yaml + '\n' + suffix;
-
-  source.value = before + inserted + after;
+  source.value = mergeSnippetIntoYaml(source.value, yaml);
   paint();
-  const newPos = insertAt + inserted.length;
-  source.selectionStart = source.selectionEnd = newPos;
+  source.selectionStart = source.selectionEnd = source.value.length;
   workspace.files[workspace.active] = source.value;
 }
 
