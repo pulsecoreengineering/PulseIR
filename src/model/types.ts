@@ -53,6 +53,8 @@ export enum InterfaceType {
   ETHERNET = "ethernet",
   BLE = "ble",
   MQTT = "mqtt",
+  EEPROM = "eeprom",
+  LITTLEFS = "littlefs",
   CUSTOM = "custom",
 }
 
@@ -383,6 +385,7 @@ export interface PulseProject {
   name: string;
   version: string;
   description?: string;
+  author?: string;
 
   /** Parsed from the top-level `pulseir:` field. Absent when not declared. */
   schemaVersion?: number;

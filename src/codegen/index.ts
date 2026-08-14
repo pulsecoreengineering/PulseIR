@@ -420,15 +420,16 @@ ${this.generateActionImplementations()}
   }
 
   private generateHeader(): string {
-    const { name, version } = this.project;
+    const { name, version, author } = this.project;
     const date = new Date().toISOString().split('T')[0];
+    const authorLine = author ? ` * Author:    ${author}\n` : '';
 
     const preamble = `/**
  * PulseIR Generated Code
  *
  * Project: ${name}
  * Version: ${version}
- * Generated: ${date}
+${authorLine} * Generated: ${date}
  *
  * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
@@ -452,7 +453,7 @@ ${this.generateActionImplementations()}
  *
  * Project: ${name}
  * Version: ${version}
- * Generated: ${date}
+${authorLine} * Generated: ${date}
  *
  * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.

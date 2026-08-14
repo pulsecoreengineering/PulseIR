@@ -372,6 +372,7 @@ export class Parser {
       name: projectRaw.name as string || 'unnamed',
       version: projectRaw.version as string || '0.1.0',
       description: projectRaw.description as string | undefined,
+      author: projectRaw.author as string | undefined,
       schemaVersion,
       target: this.parseTarget(raw.target),
       system,
@@ -994,7 +995,7 @@ export class Parser {
   private assertKnownInterface(name: string, iface: string): void {
     const known = [
       'gpio', 'pwm', 'adc', 'uart', 'i2c', 'spi',
-      'can', 'onewire', 'wifi', 'ethernet', 'ble', 'mqtt', 'custom',
+      'can', 'onewire', 'wifi', 'ethernet', 'ble', 'mqtt', 'eeprom', 'littlefs', 'custom',
     ];
     if (!known.includes(iface)) {
       throw new ParseError(
@@ -1312,7 +1313,7 @@ export class Parser {
 
     const known = [
       'gpio', 'pwm', 'adc', 'uart', 'i2c', 'spi',
-      'can', 'onewire', 'wifi', 'ethernet', 'ble', 'mqtt', 'custom',
+      'can', 'onewire', 'wifi', 'ethernet', 'ble', 'mqtt', 'eeprom', 'littlefs', 'custom',
     ];
 
     return raw.map(r => {

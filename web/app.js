@@ -3426,6 +3426,7 @@ ${lines.join("\n")}${hint}`;
         name: projectRaw.name || "unnamed",
         version: projectRaw.version || "0.1.0",
         description: projectRaw.description,
+        author: projectRaw.author,
         schemaVersion,
         target: this.parseTarget(raw.target),
         system
@@ -3894,6 +3895,8 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         "ethernet",
         "ble",
         "mqtt",
+        "eeprom",
+        "littlefs",
         "custom"
       ];
       if (!known.includes(iface)) {
@@ -4142,6 +4145,8 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         "ethernet",
         "ble",
         "mqtt",
+        "eeprom",
+        "littlefs",
         "custom"
       ];
       return raw.map((r) => {
@@ -4350,12 +4355,14 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
 
   // dist/src/codegen/interfaces.js
   var SECRET_KEY = /(pass|password|secret|token|psk|credential|apikey|api_key)/i;
+  var ENV_VAR_REF = /^\$\{([A-Z_][A-Z0-9_]*)\}$/i;
   var BUILTIN = (name, include, reason) => ({ name, include, source: "builtin", reason });
   var REGISTRY = (name, include, reason) => ({ name, include, source: "registry", reason });
   var CONSUMED_KEYS = {
     gpio: ["mode"],
     uart: ["port"],
-    mqtt: ["tls"]
+    mqtt: ["tls"],
+    littlefs: ["format_on_fail"]
   };
   var KNOWN_KEYS = {
     gpio: ["pin", "pins", "mode"],
@@ -4366,6 +4373,8 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
     spi: ["sck", "miso", "mosi", "cs", "frequency"],
     can: ["tx", "rx", "bitrate"],
     onewire: ["pin"],
+    eeprom: ["size"],
+    littlefs: ["format_on_fail"],
     wifi: ["ssid", "password", "hostname"],
     ethernet: ["cs", "mac"],
     ble: ["name", "service"],
@@ -4461,6 +4470,24 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
           out.todos.push(`${resource.name}: connect and re-connect without blocking, and call ${lower(symbol)}.loop() every iteration`);
           break;
         }
+        case "eeprom":
+          out.libraries.push(BUILTIN("EEPROM", "EEPROM.h", "EEPROM"));
+          out.init.push(
+            // ESP32 emulates EEPROM over flash and needs a byte-count up front;
+            // AVR has hardware EEPROM and needs no begin() at all.
+            "#ifdef ARDUINO_ARCH_ESP32",
+            `  EEPROM.begin(${has("size") ? ref("size") : "512"});`,
+            "#endif"
+          );
+          out.todos.push(`${resource.name}: call EEPROM.commit() after every write on ESP32 \u2014 AVR hardware EEPROM commits automatically`);
+          break;
+        case "littlefs": {
+          out.libraries.push(BUILTIN("LittleFS", "LittleFS.h", "LittleFS"));
+          const formatOnFail = binding.format_on_fail === true;
+          out.init.push(`if (!LittleFS.begin(${formatOnFail ? "true" : "false"})) {`, `  // TODO: ${resource.name}: mount failed${formatOnFail ? " \u2014 formatted and retrying" : " \u2014 call LittleFS.format() to initialise the partition"}.`, `}`);
+          out.todos.push(`${resource.name}: always close files after use \u2014 LittleFS has a limited handle pool`);
+          break;
+        }
         case "can":
           out.todos.push(`${resource.name}: CAN has no single Arduino API - declare the library your board needs and initialise it here`);
           break;
@@ -4469,9 +4496,14 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
           break;
       }
       out.init = out.init.filter(Boolean);
-      for (const key of Object.keys(binding)) {
+      for (const [key, value] of Object.entries(binding)) {
         if (SECRET_KEY.test(key)) {
-          out.todos.push(`${resource.name}: set ${symbol}_${key.toUpperCase()} before building`);
+          const envMatch = typeof value === "string" ? ENV_VAR_REF.exec(value) : null;
+          if (envMatch) {
+            out.todos.push(`${resource.name}: ${key} sourced from \${${envMatch[1]}} \u2014 define via build flag`);
+          } else {
+            out.todos.push(`${resource.name}: set ${symbol}_${key.toUpperCase()} before building`);
+          }
         }
       }
       return out;
@@ -4503,6 +4535,12 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         const name = `${symbol}_${key.toUpperCase()}`;
         if (consumed.includes(key))
           continue;
+        const envMatch = typeof value === "string" ? ENV_VAR_REF.exec(value) : null;
+        if (envMatch) {
+          const envName = envMatch[1];
+          lines.push(`#ifndef ${envName}`, `#define ${envName} ""  // pass as build flag: -D${envName}=\\"your_value\\"`, `#endif`, `#define ${name} ${envName}`);
+          continue;
+        }
         if (SECRET_KEY.test(key)) {
           lines.push(`#define ${name} ""  // TODO: set this; do not commit secrets to the model`);
           continue;
@@ -4835,14 +4873,16 @@ ${this.generateActionImplementations()}
 `;
     }
     generateHeader() {
-      const { name, version } = this.project;
+      const { name, version, author } = this.project;
       const date = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
+      const authorLine = author ? ` * Author:    ${author}
+` : "";
       const preamble = `/**
  * PulseIR Generated Code
  *
  * Project: ${name}
  * Version: ${version}
- * Generated: ${date}
+${authorLine} * Generated: ${date}
  *
  * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
@@ -4864,7 +4904,7 @@ ${this.generateActionImplementations()}
  *
  * Project: ${name}
  * Version: ${version}
- * Generated: ${date}
+${authorLine} * Generated: ${date}
  *
  * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
@@ -6383,6 +6423,7 @@ ${implementations.join("\n\n")}`;
     "version",
     "pulseir",
     "description",
+    "author",
     // target:
     "board",
     "verbose",
@@ -6418,6 +6459,9 @@ ${implementations.join("\n\n")}`;
     "password",
     "prefix",
     "topic",
+    // storage
+    "size",
+    "format_on_fail",
     // machine:
     "initial",
     "states",
@@ -7567,7 +7611,8 @@ target:
   }
   function setStatus(kind, title, detail = "") {
     status.className = `status ${kind}`;
-    status.innerHTML = `<strong>${escapeHtml2(title)}</strong>${detail ? `<span>${escapeHtml2(detail)}</span>` : ""}`;
+    const detailHtml = detail ? `<span>${escapeHtml2(detail).replace(/\n/g, "<br>")}</span>` : "";
+    status.innerHTML = `<strong>${escapeHtml2(title)}</strong>${detailHtml}`;
   }
   function renderFileBar() {
     const names = fileNames();
@@ -7593,10 +7638,123 @@ target:
       tab.addEventListener("dblclick", () => renameFile(name));
     }
   }
+  var IFACE_COLOR = {
+    i2c: "#3b82f6",
+    spi: "#7c3aed",
+    uart: "#059669",
+    gpio: "#d97706",
+    pwm: "#ea580c",
+    adc: "#dc2626",
+    wifi: "#0891b2",
+    ethernet: "#0284c7",
+    ble: "#6d28d9",
+    mqtt: "#0ea5e9",
+    can: "#b45309",
+    onewire: "#15803d",
+    eeprom: "#4f46e5",
+    littlefs: "#0f766e",
+    custom: "#6b7280"
+  };
+  var PIN_KEYS2 = {
+    i2c: ["sda", "scl", "frequency", "address"],
+    spi: ["sck", "miso", "mosi", "cs"],
+    uart: ["port", "rx", "tx", "baud"],
+    gpio: ["pin", "mode"],
+    pwm: ["pin", "channel", "frequency"],
+    adc: ["pin"],
+    wifi: ["ssid", "hostname"],
+    ethernet: ["cs", "mac"],
+    ble: ["name"],
+    mqtt: ["host", "port", "prefix"],
+    can: ["tx", "rx", "bitrate"],
+    onewire: ["pin"],
+    eeprom: ["size"],
+    littlefs: ["format_on_fail"],
+    custom: []
+  };
+  function pinSummary(resource) {
+    const kind = String(resource.interface);
+    const keys = PIN_KEYS2[kind] ?? [];
+    const binding = resource.binding ?? {};
+    return keys.filter((k) => binding[k] !== void 0).slice(0, 4).map((k) => `${k.toUpperCase()}:${String(binding[k])}`).join("  ");
+  }
+  function renderHardwareDiagram(project) {
+    const resources = project.system.resources ?? [];
+    const components = project.system.components ?? [];
+    if (resources.length === 0 && components.length === 0)
+      return "";
+    const ROW = 80, NH = 60, NW = 195, PAD = 20;
+    const BX = 270, BW = 180;
+    const CX = 515;
+    const SVG_W = 720;
+    const rows = Math.max(resources.length, components.length, 1);
+    const SVG_H = rows * ROW + PAD * 2;
+    const boardLabel = escapeHtml2(project.target?.board ?? "Board");
+    const resMap = new Map(resources.map((r, i) => [r.name, i]));
+    const p = [];
+    p.push(`<rect x="${BX}" y="${PAD / 2}" width="${BW}" height="${SVG_H - PAD / 2}" rx="8" style="fill:var(--panel);stroke:var(--border);stroke-width:1.5"/>`);
+    p.push(`<text x="${BX + BW / 2}" y="${PAD / 2 + 16}" text-anchor="middle" style="font-size:11px;font-weight:600;fill:var(--dim)">${boardLabel}</text>`);
+    for (let i = 0; i < resources.length; i++) {
+      const r = resources[i];
+      const kind = String(r.interface);
+      const color = IFACE_COLOR[kind] ?? "#6b7280";
+      const ny = PAD + i * ROW;
+      const cy = ny + NH / 2;
+      p.push(`<rect x="10" y="${ny}" width="${NW}" height="${NH}" rx="6" style="fill:var(--bg);stroke:${color};stroke-width:1.5"/>`);
+      p.push(`<text x="18" y="${ny + 20}" style="font-size:12px;font-weight:600;fill:var(--text)">${escapeHtml2(r.name)}</text>`);
+      p.push(`<text x="18" y="${ny + 36}" style="font-size:10px;font-weight:500;fill:${color}">${kind}</text>`);
+      const pins = pinSummary(r);
+      if (pins) {
+        p.push(`<text x="18" y="${ny + 52}" style="font-size:9px;font-family:monospace,monospace;fill:var(--dim)">${escapeHtml2(pins)}</text>`);
+      }
+      p.push(`<line x1="${10 + NW}" y1="${cy}" x2="${BX}" y2="${cy}" style="stroke:${color};stroke-width:1.5"/>`);
+      p.push(`<circle cx="${BX}" cy="${cy}" r="3" style="fill:${color}"/>`);
+    }
+    for (let j = 0; j < components.length; j++) {
+      const c = components[j];
+      const ny = PAD + j * ROW;
+      const cy = ny + NH / 2;
+      let color = null;
+      if (c.bus) {
+        const ri = resMap.get(c.bus);
+        if (ri !== void 0) {
+          const kind = String(resources[ri].interface);
+          color = IFACE_COLOR[kind] ?? null;
+        }
+      }
+      const strokeColor = color ?? "var(--border)";
+      const lineColor = color ?? "var(--dim)";
+      p.push(`<rect x="${CX}" y="${ny}" width="${NW}" height="${NH}" rx="6" style="fill:var(--bg);stroke:${strokeColor};stroke-width:1.5"/>`);
+      p.push(`<text x="${CX + NW - 12}" y="${ny + 20}" text-anchor="end" style="font-size:12px;font-weight:600;fill:var(--text)">${escapeHtml2(c.name)}</text>`);
+      const sub = c.bus ? `bus: ${c.bus}` : c.driver ?? "";
+      if (sub) {
+        p.push(`<text x="${CX + NW - 12}" y="${ny + 36}" text-anchor="end" style="font-size:10px;fill:var(--dim)">${escapeHtml2(sub)}</text>`);
+      }
+      if (c.type) {
+        p.push(`<text x="${CX + NW - 12}" y="${ny + 52}" text-anchor="end" style="font-size:9px;font-family:monospace,monospace;fill:var(--dim)">${escapeHtml2(c.type)}</text>`);
+      }
+      const dash = color ? "" : ' stroke-dasharray="4 3"';
+      p.push(`<line x1="${BX + BW}" y1="${cy}" x2="${CX}" y2="${cy}" style="stroke:${lineColor};stroke-width:1.5"${dash}/>`);
+      p.push(`<circle cx="${BX + BW}" cy="${cy}" r="3" style="fill:${lineColor}"/>`);
+    }
+    return `
+    <h3>Hardware diagram</h3>
+    <p class="hint">Resources (buses) on the left connect to the board. Components on the right inherit their line colour from the bus they sit on.</p>
+    <div style="overflow-x:auto">
+      <svg viewBox="0 0 ${SVG_W} ${SVG_H}" role="img"
+           aria-label="Hardware wiring diagram for ${boardLabel}"
+           style="max-width:100%;height:auto;display:block;min-width:480px">
+        ${p.join("\n        ")}
+      </svg>
+    </div>`;
+  }
   function renderStructure(project) {
     const { system } = project;
     const flat = flattenStates(system.states);
     const sections = [];
+    const diagram = renderHardwareDiagram(project);
+    if (diagram)
+      sections.push(diagram);
     if (flat.length > 0) {
       const tree = flat.filter((s) => s.depth === 0).map((s) => renderStateNode(s.path, flat)).join("");
       sections.push(`
@@ -7726,16 +7884,19 @@ target:
         return;
       }
       setBadLine(line !== null && workspace.active === workspace.entry ? line : null);
-      setStatus("error", `Model error${line !== null ? ` (line ${line})` : ""}`, message);
+      const kind = error instanceof ParseError ? "Model error" : "YAML syntax error";
+      setStatus("error", `${kind}${line !== null ? ` (line ${line})` : ""}`, message);
       if (current !== null)
         setStale(true);
       return;
     }
     let sketch;
+    let generatedProject;
     let topics;
     let libraries;
     try {
       sketch = new Codegen().generate(project);
+      generatedProject = new Codegen().generateFiles(project);
       topics = new TopicEmitter().toJSON(project, namespaceInput.value.trim() || void 0);
       libraries = new LibraryEmitter().toJSON(project);
     } catch (error) {
@@ -7759,12 +7920,12 @@ target:
       `${sketch.split("\n").length} lines generated`
     ].filter(Boolean).join(" \xB7 ");
     if (parser.warnings.length > 0) {
-      setStatus("warn", project.name, `${counts}
-${parser.warnings.join("\n")}`);
+      const warnDetail = [counts, ...parser.warnings.map((w) => `\u26A0 ${w}`)].join("\n");
+      setStatus("warn", project.name, warnDetail);
     } else {
       setStatus("ok", project.name, counts);
     }
-    current = { project, sketch, topics, libraries };
+    current = { project, sketch, topics, libraries, generatedProject };
     setDownloadReady(true);
     const hasMqtt = (project.system.resources ?? []).some((r) => String(r.interface) === "mqtt");
     setMqttTabVisible(hasMqtt);
@@ -7906,6 +8067,26 @@ ${parser.warnings.join("\n")}`);
     workspace.files[workspace.active] = text;
     paint();
   }
+  function addImportToYaml(text, filename) {
+    const entry = `  - ${filename}`;
+    const block = /^([ \t]*imports:[ \t]*\n(?:[ \t]+-[^\n]*\n)*)/m.exec(text);
+    if (block) {
+      const at = block.index + block[0].length;
+      return text.slice(0, at) + entry + "\n" + text.slice(at);
+    }
+    const proj = /^project:[^\n]*\n(?:[ \t]+[^\n]*\n?)*/m.exec(text);
+    if (proj) {
+      const at = proj.index + proj[0].length;
+      return text.slice(0, at) + `
+imports:
+${entry}
+` + text.slice(at);
+    }
+    return `imports:
+${entry}
+
+` + text;
+  }
   function selectFile(name) {
     if (workspace.files[name] === void 0)
       return;
@@ -7929,11 +8110,12 @@ ${parser.warnings.join("\n")}`);
       return;
     }
     workspace.files[clean] = `# ${clean}
-#
-# Add this to the entry file's import list:
-#   imports:
-#     - ${clean}
 `;
+    const entryText = workspace.files[workspace.entry] ?? "";
+    const wired = addImportToYaml(entryText, clean);
+    workspace.files[workspace.entry] = wired;
+    if (workspace.active === workspace.entry)
+      source.value = wired;
     selectFile(clean);
     render();
   }
@@ -8032,6 +8214,52 @@ ${parser.warnings.join("\n")}`);
     }
     download(`${folder}.zip`, zip(entries), "application/zip");
   }
+  function generatePlatformioIni(project) {
+    const board = project.target?.board ?? "";
+    const BOARD_MAP = {
+      esp32: ["espressif32", "esp32dev"],
+      esp32s3: ["espressif32", "esp32-s3-devkitc-1"],
+      esp32c3: ["espressif32", "esp32-c3-devkitm-1"],
+      esp8266: ["espressif8266", "nodemcuv2"],
+      uno: ["atmelavr", "uno"],
+      mega: ["atmelavr", "megaatmega2560"],
+      nano: ["atmelavr", "nanoatmega328"],
+      nano33ble: ["nordicnrf52", "nano33ble"],
+      rp2040: ["raspberrypi", "rpipico"],
+      teensy41: ["teensy", "teensy41"]
+    };
+    const [platform, boardId] = BOARD_MAP[board] ?? ["# unknown platform", board || "# set board in target:"];
+    const libs = project.system.libraries ?? [];
+    const libDeps = libs.map((lib) => {
+      if (lib.source === "git" && lib.url)
+        return lib.url;
+      if (lib.version)
+        return `${lib.name}@${lib.version}`;
+      return lib.name;
+    });
+    const libSection = libDeps.length > 0 ? `lib_deps =
+${libDeps.map((l) => `    ${l}`).join("\n")}` : "# lib_deps =";
+    return `[env:${boardId}]
+platform = ${platform}
+board     = ${boardId}
+framework = arduino
+${libSection}
+`;
+  }
+  function downloadProjectZip() {
+    if (!current)
+      return;
+    const { project, generatedProject } = current;
+    const folder = safeFolderName(project.name);
+    const entries = {};
+    for (const file of generatedProject.generated) {
+      entries[`${folder}/${file.path}`] = file.contents;
+    }
+    for (const file of generatedProject.scaffolds) {
+      entries[`${folder}/${file.path}`] = file.contents;
+    }
+    download(`${folder}.zip`, zip(entries), "application/zip");
+  }
   function safeFolderName(name) {
     const clean = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
     return clean || "model";
@@ -8123,6 +8351,13 @@ ${parser.warnings.join("\n")}`);
     }
   }
   var SNIPPETS = [
+    // ── Project ───────────────────────────────────────────────────────────────
+    {
+      group: "Project",
+      label: "Import another file",
+      yaml: `imports:
+  - part.yaml`
+    },
     // ── Serial ───────────────────────────────────────────────────────────────
     {
       group: "Serial",
@@ -8440,6 +8675,10 @@ machine:
         return;
       download(`${current.project.name}.ino`, current.sketch, "text/plain");
     });
+    $("download-project").addEventListener("click", () => {
+      closeDownloadMenu();
+      downloadProjectZip();
+    });
     $("download-topics").addEventListener("click", () => {
       closeDownloadMenu();
       if (!current)
@@ -8451,6 +8690,12 @@ machine:
       if (!current)
         return;
       download("libraries.json", current.libraries, "application/json");
+    });
+    $("download-platformio").addEventListener("click", () => {
+      closeDownloadMenu();
+      if (!current)
+        return;
+      download("platformio.ini", generatePlatformioIni(current.project), "text/plain");
     });
     source.addEventListener("keydown", (event) => {
       const { selectionStart, selectionEnd, value } = source;
