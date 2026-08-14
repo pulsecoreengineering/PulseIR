@@ -172,6 +172,7 @@ export class Codegen {
       this.generateTimeouts(),
       this.generateTasks(),
       this.generateCommands(),
+      this.generateReadSensors(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
       this.generateGuardImplementations(),
@@ -271,6 +272,7 @@ void setupInterfaces();${this.declInterfaceGlobals()}`,
       this.generateTimeouts(),
       this.generateTasks(),
       this.generateCommands(),
+      this.generateReadSensors(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
     ].join('\n\n') + '\n';
@@ -1388,6 +1390,173 @@ several_reset
     );
   }
 
+  // =========================================================================
+  // GENERATED ACTION BODIES
+  // =========================================================================
+
+  /**
+   * Generate the real hardware call for a built-in driver action, or fall back
+   * to a TODO comment for custom drivers the generator cannot know about.
+   *
+   * The surrounding function still keeps its param documentation and context
+   * listing — only the implementation line changes.
+   */
+  private actionBody(action: Action | undefined): string {
+    const driver = action?.driver as string | undefined;
+    const params = action?.params ?? {};
+
+    switch (driver) {
+      case 'gpio_control': {
+        const rawDevice  = params.device  as string | undefined;
+        const rawDevices = params.devices as string[] | undefined;
+        const targets = rawDevices ?? (rawDevice ? [rawDevice] : []);
+        const value   = params.value as string | number | undefined;
+        if (targets.length === 0 || value === undefined) break;
+
+        const valueStr = String(value).toUpperCase();
+        if (valueStr === 'TOGGLE') {
+          // Toggle: read the current state and invert it.
+          return targets
+            .map(t => {
+              const pin = `${this.sanitizeUpper(String(t))}_PIN`;
+              return `  digitalWrite(${pin}, !digitalRead(${pin}));`;
+            })
+            .join('\n') + '\n  (void)ctx;';
+        }
+
+        const valueExpr = valueStr === 'HIGH' || value === 1
+          ? 'HIGH'
+          : valueStr === 'LOW' || value === 0
+          ? 'LOW'
+          : this.isParameter(String(value))
+          ? `systemParameters.${this.sanitize(String(value))} ? HIGH : LOW`
+          : null;  // unknown value — fall back to TODO
+
+        if (valueExpr === null) break;
+
+        return targets
+          .map(t => `  digitalWrite(${this.sanitizeUpper(String(t))}_PIN, ${valueExpr});`)
+          .join('\n') + '\n  (void)ctx;';
+      }
+
+      case 'adc_read': {
+        const deviceName = String(params.device ?? '');
+        if (this.isSensorComponent(deviceName)) {
+          const pin   = `${this.sanitizeUpper(deviceName)}_PIN`;
+          const field = `systemSensors.${this.sanitize(deviceName)}`;
+          return `  ${field} = analogRead(${pin});\n  (void)ctx;`;
+        }
+        break;
+      }
+
+      case 'gpio_read': {
+        const deviceName = String(params.device ?? '');
+        if (this.isSensorComponent(deviceName)) {
+          const pin   = `${this.sanitizeUpper(deviceName)}_PIN`;
+          const field = `systemSensors.${this.sanitize(deviceName)}`;
+          return `  ${field} = (float)digitalRead(${pin});\n  (void)ctx;`;
+        }
+        break;
+      }
+
+      case 'pwm_control': {
+        const deviceName = String(params.device ?? '');
+        const device = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (!device) break;
+
+        const pinMacro     = `${this.sanitizeUpper(deviceName)}_PIN`;
+        const channelMacro = `${this.sanitizeUpper(deviceName)}_CHANNEL`;
+        const dutyRaw      = params.duty;
+        const dutyParam    = (this.project.system.parameters || []).find(p => p.name === String(dutyRaw));
+        const dutyExpr     = dutyParam
+          ? `ctx->parameters->${this.sanitize(String(dutyRaw))}`
+          : dutyRaw !== undefined ? String(dutyRaw) : '0';
+
+        const board   = (this.project.target?.board ?? '').toLowerCase();
+        const isAvr   = /avr|uno|mega|nano|atmega|leonardo/.test(board);
+        const isRp    = /rp2040|pico/.test(board);
+
+        // Always emit the ESP32 guard so the sketch compiles under g++ too.
+        // The isAvr/isRp check only affects the fallback, not the ESP32 path.
+        if (isAvr || isRp) {
+          return `  analogWrite(${pinMacro}, ${dutyExpr});\n  (void)ctx;`;
+        }
+        // ESP32 (explicit or unknown board) — portable guard that compiles everywhere.
+        return [
+          '#ifdef ARDUINO_ARCH_ESP32',
+          '#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3',
+          `  ledcWrite(${pinMacro}, ${dutyExpr});`,
+          '#else',
+          `  ledcWrite(${channelMacro}, ${dutyExpr});`,
+          '#endif',
+          '#else',
+          `  analogWrite(${pinMacro}, ${dutyExpr});`,
+          '#endif',
+          '  (void)ctx;',
+        ].join('\n');
+      }
+
+      case 'console_help': {
+        if (!this.hasConsole) break;
+        const cmds = (this.project.system.commands?.commands ?? []).map(c => c.match);
+        const stream = this.consoleStream();
+        const list = cmds.length ? cmds.join(', ') : '(no commands declared)';
+        return `  ${stream}.println("Commands: ${list}");\n  (void)ctx;`;
+      }
+    }
+
+    // Unknown or custom driver — the user writes the body.
+    return '  // TODO: Implement the hardware calls for this action.\n  (void)ctx;';
+  }
+
+  /** True when name is a declared model parameter. */
+  private isParameter(name: string): boolean {
+    return (this.project.system.parameters || []).some(p => p.name === name);
+  }
+
+  /** True when name is a declared sensor component. */
+  private isSensorComponent(name: string): boolean {
+    return (this.project.system.components || []).some(
+      c => c.name === name && String(c.class) === 'sensor'
+    );
+  }
+
+  // =========================================================================
+  // SENSOR READS
+  // =========================================================================
+
+  /**
+   * Generate a `readSensors()` function that populates `systemSensors` from
+   * declared sensor devices that have a known, PIN-based read pattern.
+   *
+   * Only analog_input and digital_input are emitted here — they need no extra
+   * library and the read is a single `analogRead`/`digitalRead` call. Bus-based
+   * sensors (ds18b20, bme280, etc.) require library-specific objects; their
+   * stubs live in the action bodies that explicitly trigger a read, and the
+   * developer adds the object global for their chosen library.
+   */
+  private generateReadSensors(): string {
+    const sensors = (this.project.system.components || []).filter(
+      c => String(c.class) === 'sensor' &&
+           (c.type === 'analog_input' || c.type === 'digital_input')
+    );
+    if (sensors.length === 0) return '';
+
+    const reads = sensors.map(c => {
+      const pin   = `${this.sanitizeUpper(c.name)}_PIN`;
+      const field = `systemSensors.${this.sanitize(c.name)}`;
+      return c.type === 'analog_input'
+        ? `  ${field} = analogRead(${pin});`
+        : `  ${field} = (float)digitalRead(${pin});`;
+    });
+
+    return `// Populate systemSensors before guards and actions read them.
+// Called at the top of every loop() pass.
+static void readSensors() {
+${reads.join('\n')}
+}`;
+  }
+
   /**
    * A `log:` template as print calls.
    *
@@ -1440,7 +1609,7 @@ several_reset
   }
 
   /** Every action the model actually uses, wherever it was used. */
-  private everyUsedAction(): { name: string; params?: Record<string, unknown> }[] {
+  private everyUsedAction(): Action[] {
     return [
       ...this.project.system.transitions.flatMap(t => t.actions || []),
       ...(this.project.system.tasks || []).flatMap(t => t.actions),
@@ -1628,6 +1797,13 @@ ${blocks.join('\n\n')}`;
   private generateLoopFunction(): string {
     const body: string[] = [];
 
+    // Sensor reads come first: guards and actions in the same pass see fresh values.
+    const hasPinSensors = (this.project.system.components || []).some(
+      c => String(c.class) === 'sensor' &&
+           (c.type === 'analog_input' || c.type === 'digital_input')
+    );
+    if (hasPinSensors) body.push('  readSensors();');
+
     if (this.project.system.commands) body.push('  pollCommands();');
 
     for (const task of this.project.system.tasks || []) {
@@ -1638,14 +1814,26 @@ ${blocks.join('\n\n')}`;
       const example = this.project.system.events[0];
       const exampleName = example ? `EVENT_${this.sanitizeUpper(example.name)}` : 'EVENT_NONE';
 
-      body.push(`  // TODO: Read sensors into systemSensors, then raise events.
+      // When readSensors() already covers all sensors, the TODO shrinks to
+      // just "raise events based on the readings you now have".
+      const sensorComment = hasPinSensors
+        ? `  // TODO: Raise events from the readings readSensors() just populated.
+  // Example:
+  //   if (systemSensors.temp >= systemParameters.setpoint) {
+  //     fsm.sendEvent(${exampleName});
+  //   }
+  //
+  // sendEvent() is ISR-safe, so interrupts may call it directly.`
+        : `  // TODO: Read sensors into systemSensors, then raise events.
   // Example:
   //   systemSensors.temperature = readTemperature();
   //   if (systemSensors.temperature >= systemParameters.setpoint) {
   //     fsm.sendEvent(${exampleName});
   //   }
   //
-  // sendEvent() is ISR-safe, so interrupts may call it directly.
+  // sendEvent() is ISR-safe, so interrupts may call it directly.`;
+
+      body.push(`${sensorComment}
 
   fsm.update();`);
     } else if (body.length === 0) {
@@ -1741,14 +1929,13 @@ ${implementations}`;
         ? `  ${this.consoleStream()}.println("  -> Action: ${name}");\n`
         : '';
 
-      const pwmHint = action ? this.pwmWriteHint(action) : '';
+      const body = this.actionBody(action);
 
       return `void action_${this.sanitize(name)}(SystemContext* ctx) {
 ${trace}  // Declared params for this action (documentation only):
 ${paramDoc}
 ${this.contextDoc()}  //
-  // TODO: Implement the hardware calls for this action.${pwmHint}
-  (void)ctx;
+${body}
 }`;
     });
 

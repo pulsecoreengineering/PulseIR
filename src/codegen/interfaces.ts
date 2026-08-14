@@ -69,6 +69,7 @@ const REGISTRY = (name: string, include: string, reason: string): ImpliedLibrary
 const CONSUMED_KEYS: Record<string, string[]> = {
   gpio: ['mode'],
   uart: ['port'],
+  rs485: ['port'],
   mqtt: ['tls'],
   littlefs: ['format_on_fail'],
 };
@@ -82,6 +83,7 @@ const KNOWN_KEYS: Record<string, string[]> = {
   i2c: ['sda', 'scl', 'frequency', 'address'],
   spi: ['sck', 'miso', 'mosi', 'cs', 'frequency'],
   can: ['tx', 'rx', 'bitrate'],
+  rs485: ['port', 'baud', 'rx', 'tx', 'de', 're'],
   onewire: ['pin'],
   eeprom: ['size'],
   littlefs: ['format_on_fail'],
@@ -149,6 +151,41 @@ export class InterfaceBackend {
             `${serial}.begin(${baud});`
           )
         );
+        break;
+      }
+
+      case 'rs485': {
+        const port = binding.port === undefined ? 1 : Number(binding.port);
+        const serial = port === 0 ? 'Serial' : `Serial${port}`;
+        const baud = has('baud') ? ref('baud') : '9600';
+        out.init.push(
+          ...guarded(
+            has('rx') && has('tx')
+              ? `${serial}.begin(${baud}, SERIAL_8N1, ${ref('rx')}, ${ref('tx')});`
+              : `${serial}.begin(${baud});`,
+            `${serial}.begin(${baud});`
+          )
+        );
+        if (has('de')) {
+          out.init.push(
+            `pinMode(${ref('de')}, OUTPUT);`,
+            `digitalWrite(${ref('de')}, LOW);  // start in receive mode`
+          );
+          if (has('re')) {
+            out.init.push(
+              `pinMode(${ref('re')}, OUTPUT);`,
+              `digitalWrite(${ref('re')}, LOW);  // RE active-low: receiver enabled`
+            );
+          }
+          const deNote = has('re')
+            ? `set ${ref('de')} HIGH / ${ref('re')} HIGH before writing; clear both after flush`
+            : `set ${ref('de')} HIGH before writing, LOW after ${serial}.flush()`;
+          out.todos.push(`${resource.name}: ${deNote} — RS485 direction control`);
+        } else {
+          out.todos.push(
+            `${resource.name}: add "de" (and optionally "re") bindings for RS485 direction control`
+          );
+        }
         break;
       }
 
@@ -290,12 +327,36 @@ export class InterfaceBackend {
         break;
       }
 
-      case 'can':
-        out.todos.push(
-          `${resource.name}: CAN has no single Arduino API - declare the library ` +
-          'your board needs and initialise it here'
+      case 'can': {
+        const bitrateRaw = Number(binding.bitrate ?? 500000);
+        const timingMacro = canTimingMacro(bitrateRaw);
+        const sym = symbol;
+        const hasTx = binding.tx !== undefined;
+        const hasRx = binding.rx !== undefined;
+
+        // ESP32 TWAI (the built-in CAN peripheral). The sketch stays portable:
+        // non-ESP32 targets get a TODO that names the peripheral they need.
+        out.globals.push(
+          '#ifdef ARDUINO_ARCH_ESP32',
+          '#include <driver/twai.h>',
+          '#endif',
+        );
+        const txExpr = hasTx ? `(gpio_num_t)${sym}_TX` : '(gpio_num_t)4';
+        const rxExpr = hasRx ? `(gpio_num_t)${sym}_RX` : '(gpio_num_t)5';
+        out.init.push(
+          '#ifdef ARDUINO_ARCH_ESP32',
+          `  static const twai_general_config_t ${sym}_g =`,
+          `    TWAI_GENERAL_CONFIG_DEFAULT(${txExpr}, ${rxExpr}, TWAI_MODE_NORMAL);`,
+          `  static const twai_timing_config_t ${sym}_t = ${timingMacro};`,
+          `  static const twai_filter_config_t ${sym}_f = TWAI_FILTER_CONFIG_ACCEPT_ALL();`,
+          `  twai_driver_install(&${sym}_g, &${sym}_t, &${sym}_f);`,
+          '  twai_start();',
+          '#else',
+          `  // TODO: ${resource.name}: add your CAN library initialization here (e.g. MCP2515).`,
+          '#endif',
         );
         break;
+      }
 
       default:
         out.todos.push(`${resource.name}: custom interface, initialise it here`);
@@ -414,4 +475,19 @@ function literal(value: unknown): string {
 
 function lower(symbol: string): string {
   return symbol.toLowerCase().replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+}
+
+/** Map a declared bitrate (bps) to the ESP32 TWAI timing-config macro name. */
+function canTimingMacro(bitrate: number): string {
+  const map: Record<number, string> = {
+    25000:   'TWAI_TIMING_CONFIG_25KBITS()',
+    50000:   'TWAI_TIMING_CONFIG_50KBITS()',
+    100000:  'TWAI_TIMING_CONFIG_100KBITS()',
+    125000:  'TWAI_TIMING_CONFIG_125KBITS()',
+    250000:  'TWAI_TIMING_CONFIG_250KBITS()',
+    500000:  'TWAI_TIMING_CONFIG_500KBITS()',
+    800000:  'TWAI_TIMING_CONFIG_800KBITS()',
+    1000000: 'TWAI_TIMING_CONFIG_1MBITS()',
+  };
+  return map[bitrate] ?? 'TWAI_TIMING_CONFIG_500KBITS()  // adjust for your declared bitrate';
 }
