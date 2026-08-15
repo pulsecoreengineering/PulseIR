@@ -1,14 +1,16 @@
 /**
- * Arduino backend for PulseIR.
+ * Codegen — IR traversal and structure; platform-agnostic.
  *
- * This is *a* backend, not the IR: it turns a PulseModel into an Arduino
- * sketch. When the model declares a state machine it targets the PulseHSM
- * runtime; when it does not, it emits plain Arduino with no runtime at all,
- * and `hasMachine` is the seam between the two.
+ * This class owns *what* to emit: it walks the PulseModel, resolves state
+ * hierarchies, manages guard/action/transition indexing, and decides the
+ * overall shape of the generated output. Everything that is
+ * platform-specific — function names, include directives, UART API spellings,
+ * GPIO call signatures — is delegated to the injected PlatformBackend.
  *
- * Converts PulseModel → C++ code targeting the PulseHSM runtime (deps/).
+ * The default backend (ArduinoBackend) is backward-compatible: callers that
+ * do `new Codegen()` get the same Arduino output as before.
  *
- * The model maps onto the library like this:
+ * The model maps onto the PulseHSM runtime like this:
  *   - every IR state becomes a PulseHSM state, registered parent-before-child
  *   - a state's outgoing transitions become its `onEvent` callback
  *   - event bubbling gives "innermost transition wins" for free: a leaf handler
@@ -37,8 +39,9 @@ import type {
   Action,
 } from '../model/index.js';
 import { parseTemplate } from '../analysis/template.js';
-import { InterfaceBackend } from './interfaces.js';
 import type { ImpliedLibrary, InterfaceEmission } from './interfaces.js';
+import type { PlatformBackend, Sizing } from './backend.js';
+import { ArduinoBackend } from './arduino.js';
 
 export class CodegenError extends Error {
   constructor(message: string) {
@@ -138,11 +141,15 @@ export class Codegen {
   /** state index → timed ("after") transitions leaving it, in model order */
   private timedBySource: Map<number, number[]> = new Map();
 
-  private readonly interfaces = new InterfaceBackend();
+  private readonly backend: PlatformBackend;
   /** resource name → what its interface contributes to the sketch */
   private emissions: Map<string, InterfaceEmission> = new Map();
   /** Every library needed, deduplicated by name. */
   private libraries: Map<string, ImpliedLibrary> = new Map();
+
+  constructor(backend: PlatformBackend = new ArduinoBackend()) {
+    this.backend = backend;
+  }
 
   /**
    * Generate C++ code from a validated PulseModel
@@ -213,7 +220,7 @@ export class Codegen {
           ? [{ path: 'PulseHSM_config.h', contents: this.generateConfigHeader() }]
           : []),
         { path: headerName, contents: this.composeHeader(headerName) },
-        { path: `${base}.ino`, contents: this.composeSketch(headerName) },
+        { path: `${base}${this.backend.fileExtension}`, contents: this.composeSketch(headerName) },
       ],
       scaffolds: [
         ...(this.hasMachine
@@ -333,7 +340,7 @@ ${this.generateActionImplementations()}
    */
   private indexInterfaces(): void {
     for (const resource of this.project.system.resources || []) {
-      this.addEmission(resource.name, this.interfaces.emit(resource, this.sanitizeUpper(resource.name)));
+      this.addEmission(resource.name, this.backend.emitInterface(resource, this.sanitizeUpper(resource.name)));
     }
 
     // A device that owns its pin initialises itself, so `pump: {type:
@@ -345,7 +352,7 @@ ${this.generateActionImplementations()}
       const binding = { ...(device.config || {}) };
       if (mapping.mode && binding.mode === undefined) binding.mode = mapping.mode;
 
-      this.addEmission(device.name, this.interfaces.emit(
+      this.addEmission(device.name, this.backend.emitInterface(
         {
           name: device.name,
           interface: mapping.interface as never,
@@ -357,7 +364,7 @@ ${this.generateActionImplementations()}
     }
 
     // Declared libraries win, so a model can pin a version or override a header.
-    for (const library of this.interfaces.declared(this.project.system.libraries)) {
+    for (const library of this.backend.declaredLibraries(this.project.system.libraries)) {
       this.libraries.set(library.name, library);
     }
   }
@@ -379,11 +386,12 @@ ${this.generateActionImplementations()}
    * These decide the layout of the PulseHSM class, so every translation unit
    * has to see the same values - see generateConfigHeader().
    */
-  private sizing(): { maxStates: number; maxEvents: number; levels: number } {
+  private sizing(): Sizing {
     return {
       maxStates: this.states.length + 2,      // + headroom for growth
       maxEvents: this.nextPowerOfTwo(Math.max(8, this.project.system.events.length)),
       levels: Math.max(1, ...this.states.map(s => s.depth + 1)),
+      stateCount: this.states.length,
     };
   }
 
@@ -401,7 +409,7 @@ ${this.generateActionImplementations()}
    * against a separately compiled PulseHSM.cpp. Call it after generate().
    */
   generateConfigHeader(): string {
-    const { maxStates, maxEvents, levels } = this.sizing();
+    const { maxStates, maxEvents, levels, stateCount } = this.sizing();
 
     return `/**
  * PulseHSM sizing for ${this.project.name} - GENERATED, DO NOT EDIT.
@@ -413,7 +421,7 @@ ${this.generateActionImplementations()}
 #ifndef PULSEHSM_CONFIG_H
 #define PULSEHSM_CONFIG_H
 
-#define PULSEHSM_MAX_STATES  ${maxStates}   // ${this.states.length} states + headroom
+#define PULSEHSM_MAX_STATES  ${maxStates}   // ${stateCount} states + headroom
 #define PULSEHSM_MAX_EVENTS  ${maxEvents}   // ring buffer, must be a power of two
 #define PULSEHSM_MAX_DEPTH   ${levels}   // deepest nesting, including the leaf
 
@@ -425,6 +433,12 @@ ${this.generateActionImplementations()}
     const { name, version, author } = this.project;
     const date = new Date().toISOString().split('T')[0];
     const authorLine = author ? ` * Author:    ${author}\n` : '';
+    const runtimeNote = this.hasMachine
+      ? ' * Runtime: PulseHSM (this model declares a state machine).'
+      : ' * Runtime: none. No state machine is declared; no runtime library is needed.';
+    const sigNote = this.hasMachine
+      ? ` * Guard/action signatures follow FUNCTION_CONTRACT.md:\n *   bool guard_<name>(const SystemContext* ctx)\n *   void action_<name>(SystemContext* ctx)`
+      : ` * Action signatures follow FUNCTION_CONTRACT.md:\n *   void action_<name>(SystemContext* ctx)`;
 
     const preamble = `/**
  * PulseIR Generated Code
@@ -436,48 +450,12 @@ ${authorLine} * Generated: ${date}
  * This file was auto-generated from a PulseIR model.
  * DO NOT EDIT MANUALLY - regenerate from source instead.
  *
- * Runtime: none. This model declares no state machine, so the sketch below is
- * plain Arduino and needs no library beyond the core.
+${runtimeNote}
  *
- * Action signatures follow FUNCTION_CONTRACT.md:
- *   void action_<name>(SystemContext* ctx)
+${sigNote}
  */`;
 
-    // No state machine, so no runtime: this is a plain Arduino sketch.
-    if (!this.hasMachine) {
-      return `${preamble}\n\n#include <Arduino.h>`;
-    }
-
-    const { maxStates, maxEvents, levels } = this.sizing();
-
-    return `/**
- * PulseIR Generated Code
- *
- * Project: ${name}
- * Version: ${version}
-${authorLine} * Generated: ${date}
- *
- * This file was auto-generated from a PulseIR model.
- * DO NOT EDIT MANUALLY - regenerate from source instead.
- *
- * Runtime: PulseHSM (this model declares a state machine).
- *
- * Guard/action signatures follow FUNCTION_CONTRACT.md:
- *   bool guard_<name>(const SystemContext* ctx)
- *   void action_<name>(SystemContext* ctx)
- */
-
-// Sized from the model, and repeated in PulseHSM_config.h so that PulseHSM.cpp
-// - a separate translation unit that never sees this file - is compiled
-// against the same table sizes. Defining them only here would leave the
-// runtime on its defaults, and states past the eighth would be silently
-// dropped. Generate with --outdir to get that file written for you.
-#define PULSEHSM_MAX_STATES  ${maxStates}   // ${this.states.length} states + headroom
-#define PULSEHSM_MAX_EVENTS  ${maxEvents}   // ring buffer, must be a power of two
-#define PULSEHSM_MAX_DEPTH   ${levels}   // deepest nesting, including the leaf
-
-#include <Arduino.h>
-#include "PulseHSM.h"`;
+    return `${preamble}\n\n${this.backend.platformIncludes(this.hasMachine, this.sizing())}`;
   }
 
   // =========================================================================
@@ -1087,6 +1065,8 @@ ${cases.join('\n')}
       ? this.resolveEntry(rootRelative === -1 ? 0 : rootRelative)
       : -1;
 
+    const stream = this.consoleStream();
+
     const machineSetup = !this.hasMachine ? '' : `
   // Register states. Parents are registered before their children.
 ${registrations}
@@ -1095,9 +1075,18 @@ ${this.registrationCheck()}
   // begin() must be given a leaf state.
   fsm.begin(${this.states[startIndex].symbol});
 ${this.hasConsole && this.isVerbose ? `
-  ${this.consoleStream()}.print("Initial state: ");
-  ${this.consoleStream()}.println(fsm.getCurrentName());
+  ${this.backend.printExpr(stream, '"Initial state: "')};
+  ${this.backend.printlnExpr(stream, 'fsm.getCurrentName()')};
 ` : ''}`;
+
+    const setupBody = `  // Buses and peripherals declared as resources. Nothing else is opened: a
+  // peripheral the model did not declare has no business appearing here.
+  setupInterfaces();
+
+  // Wire up the context handed to every action
+  systemContext.parameters = &systemParameters;
+  systemContext.sensors = &systemSensors;
+${machineSetup}`;
 
     return `// ============================================================================
 // SETUP
@@ -1105,15 +1094,7 @@ ${this.hasConsole && this.isVerbose ? `
 
 ${componentComments}
 
-void setup() {
-  // Buses and peripherals declared as resources. Nothing else is opened: a
-  // peripheral the model did not declare has no business appearing here.
-  setupInterfaces();
-
-  // Wire up the context handed to every action
-  systemContext.parameters = &systemParameters;
-  systemContext.sensors = &systemSensors;
-${machineSetup}}`;
+${this.backend.renderSetup(setupBody)}`;
   }
 
   // =========================================================================
@@ -1160,13 +1141,11 @@ ${machineSetup}}`;
     return this.project.target?.verbose ?? true;
   }
 
-  /** The C expression naming the console stream, e.g. `Serial`. */
+  /** The C identifier for the console stream, e.g. `Serial`. */
   private consoleStream(): string {
     const resource = this.declaredConsole();
-    if (!resource) return 'Serial';
-
-    const port = Number(resource.binding?.port ?? 1);
-    return port === 0 ? 'Serial' : `Serial${port}`;
+    const port = resource ? Number(resource.binding?.port ?? 1) : 0;
+    return this.backend.consoleStreamName(port);
   }
 
   /** `enteredAt`-style globals and the loop body for `tasks:`. */
@@ -1174,10 +1153,13 @@ ${machineSetup}}`;
     const tasks = this.project.system.tasks || [];
     if (tasks.length === 0) return '';
 
+    const tsType = this.backend.timestampType();
+    const now = this.backend.nowExpr();
+
     const blocks = tasks.map(task => {
       const base = this.sanitize(task.name);
       const interval = typeof task.every === 'string'
-        ? `(unsigned long)systemParameters.${this.sanitize(task.every)}`
+        ? `(${tsType})systemParameters.${this.sanitize(task.every)}`
         : `${task.every}UL`;
       const source = typeof task.every === 'string' ? `${task.every} (parameter)` : `every ${task.every}ms`;
       const calls = [
@@ -1188,12 +1170,12 @@ ${machineSetup}}`;
       ].join('\n');
 
       return `// Task "${task.name}" - ${source}.${task.description ? `\n// ${task.description}` : ''}
-static unsigned long dueAt_${base} = 0;
+static ${tsType} dueAt_${base} = 0;
 
 static void runTask_${base}() {
-  const unsigned long interval = ${interval};
-  const unsigned long now = millis();
-  if (now - dueAt_${base} < interval) return;
+  const ${tsType} interval = ${interval};
+  const ${tsType} nowMs = ${now};
+  if (nowMs - dueAt_${base} < interval) return;
 
   // Advance the deadline by whole intervals rather than restarting from now.
   // Restarting adds however long the loop took to come round to every period,
@@ -1203,7 +1185,7 @@ static void runTask_${base}() {
   // Unless we are already a full interval behind - a long blocking call, or
   // the interval was just shortened - in which case give up on catching up
   // and resync, rather than firing repeatedly in a burst.
-  if (now - dueAt_${base} >= interval) dueAt_${base} = now;
+  if (nowMs - dueAt_${base} >= interval) dueAt_${base} = nowMs;
 
 ${calls}
 }`;
@@ -1255,8 +1237,8 @@ ${[calls, raise, reply].filter(Boolean).join('\n')}
     });
 
     const unknown = set.reportUnknown === false ? '' : `
-  ${stream}.print("Unknown command: ");
-  ${stream}.println(line);`;
+  ${this.backend.printExpr(stream, '"Unknown command: "')};
+  ${this.backend.printlnExpr(stream, 'line')};`;
 
     return `// ============================================================================
 // COMMANDS
@@ -1288,12 +1270,12 @@ ${cases.join('\n')}${unknown}
  * running whether or not anyone is typing.
  */
 static void pollCommands() {
-  while (${stream}.available() > 0) {
-    const int next = ${stream}.read();
+  while (${this.backend.streamAvailableExpr(stream)} > 0) {
+    const int next = ${this.backend.streamReadExpr(stream)};
 
     if (next == '\\n' || next == '\\r') {
       if (commandOverflow) {
-        ${stream}.println("Command too long; ignored.");
+        ${this.backend.printlnExpr(stream, '"Command too long; ignored."')};
 several_reset
       } else if (commandLength > 0) {
         commandLine[commandLength] = '\\0';
@@ -1419,7 +1401,7 @@ several_reset
           return targets
             .map(t => {
               const pin = `${this.sanitizeUpper(String(t))}_PIN`;
-              return `  digitalWrite(${pin}, !digitalRead(${pin}));`;
+              return `  ${this.backend.digitalWriteExpr(pin, `!${this.backend.digitalReadExpr(pin)}`)};`;
             })
             .join('\n') + '\n  (void)ctx;';
         }
@@ -1435,7 +1417,7 @@ several_reset
         if (valueExpr === null) break;
 
         return targets
-          .map(t => `  digitalWrite(${this.sanitizeUpper(String(t))}_PIN, ${valueExpr});`)
+          .map(t => `  ${this.backend.digitalWriteExpr(`${this.sanitizeUpper(String(t))}_PIN`, valueExpr)};`)
           .join('\n') + '\n  (void)ctx;';
       }
 
@@ -1444,7 +1426,7 @@ several_reset
         if (this.isSensorComponent(deviceName)) {
           const pin   = `${this.sanitizeUpper(deviceName)}_PIN`;
           const field = `systemSensors.${this.sanitize(deviceName)}`;
-          return `  ${field} = analogRead(${pin});\n  (void)ctx;`;
+          return `  ${field} = ${this.backend.analogReadExpr(pin)};\n  (void)ctx;`;
         }
         break;
       }
@@ -1454,7 +1436,7 @@ several_reset
         if (this.isSensorComponent(deviceName)) {
           const pin   = `${this.sanitizeUpper(deviceName)}_PIN`;
           const field = `systemSensors.${this.sanitize(deviceName)}`;
-          return `  ${field} = (float)digitalRead(${pin});\n  (void)ctx;`;
+          return `  ${field} = (float)${this.backend.digitalReadExpr(pin)};\n  (void)ctx;`;
         }
         break;
       }
@@ -1476,24 +1458,11 @@ several_reset
         const isAvr   = /avr|uno|mega|nano|atmega|leonardo/.test(board);
         const isRp    = /rp2040|pico/.test(board);
 
-        // Always emit the ESP32 guard so the sketch compiles under g++ too.
-        // The isAvr/isRp check only affects the fallback, not the ESP32 path.
         if (isAvr || isRp) {
-          return `  analogWrite(${pinMacro}, ${dutyExpr});\n  (void)ctx;`;
+          return `  ${this.backend.analogWriteExpr(pinMacro, dutyExpr)};\n  (void)ctx;`;
         }
         // ESP32 (explicit or unknown board) — portable guard that compiles everywhere.
-        return [
-          '#ifdef ARDUINO_ARCH_ESP32',
-          '#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3',
-          `  ledcWrite(${pinMacro}, ${dutyExpr});`,
-          '#else',
-          `  ledcWrite(${channelMacro}, ${dutyExpr});`,
-          '#endif',
-          '#else',
-          `  analogWrite(${pinMacro}, ${dutyExpr});`,
-          '#endif',
-          '  (void)ctx;',
-        ].join('\n');
+        return this.backend.ledcWriteLines(pinMacro, channelMacro, dutyExpr, board) + '\n  (void)ctx;';
       }
 
       case 'console_help': {
@@ -1501,7 +1470,7 @@ several_reset
         const cmds = (this.project.system.commands?.commands ?? []).map(c => c.match);
         const stream = this.consoleStream();
         const list = cmds.length ? cmds.join(', ') : '(no commands declared)';
-        return `  ${stream}.println("Commands: ${list}");\n  (void)ctx;`;
+        return `  ${this.backend.printlnExpr(stream, `"Commands: ${list}"`)};` + '\n  (void)ctx;';
       }
     }
 
@@ -1546,8 +1515,8 @@ several_reset
       const pin   = `${this.sanitizeUpper(c.name)}_PIN`;
       const field = `systemSensors.${this.sanitize(c.name)}`;
       return c.type === 'analog_input'
-        ? `  ${field} = analogRead(${pin});`
-        : `  ${field} = (float)digitalRead(${pin});`;
+        ? `  ${field} = ${this.backend.analogReadExpr(pin)};`
+        : `  ${field} = (float)${this.backend.digitalReadExpr(pin)};`;
     });
 
     return `// Populate systemSensors before guards and actions read them.
@@ -1571,13 +1540,13 @@ ${reads.join('\n')}
 
     for (const segment of segments) {
       if (segment.kind === 'text') {
-        out.push(`${indent}${stream}.print(${JSON.stringify(segment.value)});`);
+        out.push(`${indent}${this.backend.printExpr(stream, JSON.stringify(segment.value))};`);
         continue;
       }
-      out.push(`${indent}${stream}.print(${this.logValue(segment.name)});`);
+      out.push(`${indent}${this.backend.printExpr(stream, this.logValue(segment.name))};`);
     }
 
-    out.push(`${indent}${stream}.println();`);
+    out.push(`${indent}${this.backend.printlnNoArgExpr(stream)};`);
     return out.join('\n');
   }
 
@@ -1683,6 +1652,8 @@ ${reads.join('\n')}
   private generateTimeouts(): string {
     if (this.timedBySource.size === 0) return '';
 
+    const tsType = this.backend.timestampType();
+    const now = this.backend.nowExpr();
     const transitions = this.project.system.transitions;
     const blocks: string[] = [];
 
@@ -1702,7 +1673,7 @@ ${reads.join('\n')}
         const guard = this.guards.get(idx);
         const target = this.states[this.resolveEntry(this.resolveRef(t.target, 'target'))];
         const duration = typeof t.after === 'string'
-          ? `(unsigned long)systemParameters.${this.sanitize(t.after)}`
+          ? `(${tsType})systemParameters.${this.sanitize(t.after)}`
           : `${t.after}UL`;
         const source = typeof t.after === 'string' ? `${t.after} (parameter)` : `${t.after} ms`;
 
@@ -1728,15 +1699,15 @@ ${fire}
       }
 
       blocks.push(`// Timers for "${flat.path}".
-static unsigned long ${since} = 0;
+static ${tsType} ${since} = 0;
 
 static void ${mark}() {
-  ${since} = millis();
+  ${since} = ${now};
 }
 
 static void ${tick}() {
   syncContext();
-  const unsigned long elapsed = millis() - ${since};
+  const ${tsType} elapsed = ${now} - ${since};
 
 ${body.join('\n\n')}
 }`);
@@ -1784,8 +1755,8 @@ ${blocks.join('\n\n')}`;
   // when PulseHSM.cpp was compiled without seeing PulseHSM_config.h. Silent
   // otherwise: transitions to a dropped state simply do nothing.
   if (${test}) {
-    ${stream}.println("FATAL: PulseHSM refused a state - its table is too small.");
-    ${stream}.println("       Keep PulseHSM_config.h beside PulseHSM.h and rebuild.");
+    ${this.backend.printlnExpr(stream, '"FATAL: PulseHSM refused a state - its table is too small."')};
+    ${this.backend.printlnExpr(stream, '"       Keep PulseHSM_config.h beside PulseHSM.h and rebuild."')};
   }
 `;
   }
@@ -1848,15 +1819,15 @@ ${blocks.join('\n\n')}`;
       ? '  syncContext();\n'
       : '';
 
+    const loopBody = `${sync}${body.join('\n')}`;
+
     return `// ============================================================================
 // MAIN LOOP
 // ============================================================================
 //
 // Never call delay() here: it stops everything below it from running.
 
-void loop() {
-${sync}${body.join('\n')}
-}`;
+${this.backend.renderLoop(loopBody)}`;
   }
 
   // =========================================================================
@@ -1926,7 +1897,7 @@ ${implementations}`;
       // reaching for a peripheral nobody asked for. Also suppressed when
       // target.debug is false (production builds).
       const trace = this.hasConsole && this.isVerbose
-        ? `  ${this.consoleStream()}.println("  -> Action: ${name}");\n`
+        ? `  ${this.backend.printlnExpr(this.consoleStream(), `"  -> Action: ${name}"`)};` + '\n'
         : '';
 
       const body = this.actionBody(action);
