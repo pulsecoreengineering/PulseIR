@@ -6,7 +6,6 @@ description: Arduino Mega 2560 with ATmega2560 — 54 digital I/O, 16 analog inp
 
 pins:
   # Onboard LED
-  LED:         GPIO13
   LED_BUILTIN: GPIO13
 
   # Digital pins 0-53

@@ -6,7 +6,6 @@ description: Raspberry Pi RP2040 microcontroller board
 
 pins:
   # Onboard LED
-  LED:         GPIO25
   LED_BUILTIN: GPIO25
 
   # GPIO (physical GP pin names)

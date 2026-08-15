@@ -7,7 +7,6 @@ description: Espressif ESP32-S3-DevKitC-1 development board
 
 pins:
   # Onboard LED (RGB via GPIO48 on DevKitC-1)
-  LED:         GPIO2
   LED_BUILTIN: GPIO2
 
   # GPIO

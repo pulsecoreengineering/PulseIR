@@ -6,7 +6,6 @@ description: Arduino Uno R3 with ATmega328P
 
 pins:
   # Onboard LED
-  LED:         GPIO13
   LED_BUILTIN: GPIO13
 
   # Digital pins

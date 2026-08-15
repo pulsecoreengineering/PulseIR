@@ -7,7 +7,6 @@ description: Espressif ESP32-WROOM-32 development board with 38 pins
 
 pins:
   # Onboard LED
-  LED:        GPIO2
   LED_BUILTIN: GPIO2
 
   # GPIO
