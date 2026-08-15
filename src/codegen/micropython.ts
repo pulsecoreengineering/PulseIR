@@ -1,0 +1,709 @@
+/**
+ * MicroPython code generator for PulseIR.
+ *
+ * Generates a self-contained `main.py` that runs on any MicroPython board.
+ * There is no C++ runtime dependency — the state machine is an inline Python
+ * class (`_HSM`) a few dozen lines long.
+ *
+ * Architecture diverges from the C++ path intentionally: PlatformBackend is
+ * C-expression-oriented, so MicroPython gets its own top-level Codegen class
+ * rather than a backend implementation.
+ *
+ * Hardware mapping:
+ *   digital_output  →  machine.Pin(pin, machine.Pin.OUT)
+ *   digital_input   →  machine.Pin(pin, machine.Pin.IN[, pull])
+ *   pwm_output      →  machine.PWM(machine.Pin(pin))
+ *   analog_input    →  machine.ADC(machine.Pin(pin))
+ *   i2c bus         →  machine.I2C(id, sda=…, scl=…, freq=…)
+ *   spi bus         →  machine.SPI(id, baudrate=…, sck=…, mosi=…, miso=…)
+ *   uart bus        →  machine.UART(port, baudrate=…)
+ */
+
+import type {
+  PulseProject,
+  Action,
+  Task,
+  Transition,
+} from '../model/index.js';
+import type { GeneratedProject, GeneratedFile } from './index.js';
+import { flattenStates, type FlatStateInfo } from '../analysis/states.js';
+
+// ---------------------------------------------------------------------------
+// Name helpers
+// ---------------------------------------------------------------------------
+
+function pyName(s: string): string {
+  return s.replace(/[^a-zA-Z0-9]/g, '_').replace(/^(\d)/, '_$1').toLowerCase();
+}
+
+function pyConst(s: string): string {
+  return s.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase();
+}
+
+function extractPin(raw: unknown): string {
+  const s = String(raw ?? '');
+  return s.replace(/^GPIO\s*/i, '').replace(/^D(\d+)$/i, '$1');
+}
+
+function banner(title: string): string {
+  const fill = Math.max(0, 77 - title.length - 4);
+  return `# ── ${title} ${'─'.repeat(fill)}`;
+}
+
+// ---------------------------------------------------------------------------
+// MicroPythonCodegen
+// ---------------------------------------------------------------------------
+
+export class MicroPythonCodegen {
+  private project!: PulseProject;
+  private flat: FlatStateInfo[] = [];
+  private byPath = new Map<string, FlatStateInfo>();
+
+  /** Every unique action encountered, keyed by action.name. */
+  private allActions = new Map<string, Action>();
+  /** Every unique guard encountered: name → description. */
+  private allGuards = new Map<string, string>();
+
+  // ── Public API ────────────────────────────────────────────────────────────
+
+  generate(project: PulseProject): string {
+    this.init(project);
+    return this.buildMain();
+  }
+
+  generateFiles(project: PulseProject): GeneratedProject {
+    this.init(project);
+    return {
+      needsRuntime: false,
+      generated: [{ path: 'main.py', contents: this.buildMain() }],
+      scaffolds: [],
+    };
+  }
+
+  // ── Initialisation ────────────────────────────────────────────────────────
+
+  private init(project: PulseProject): void {
+    this.project = project;
+    this.flat = flattenStates(project.system.states ?? []);
+    this.byPath = new Map(this.flat.map(f => [f.path, f]));
+    this.allActions.clear();
+    this.allGuards.clear();
+    this.indexActionsAndGuards();
+  }
+
+  private indexActionsAndGuards(): void {
+    const sys = this.project.system;
+
+    const addActions = (actions: Action[] | undefined) => {
+      for (const a of actions ?? []) {
+        this.allActions.set(a.name, a);
+      }
+    };
+
+    for (const t of sys.transitions ?? []) {
+      addActions(t.actions);
+      if (t.guard) this.allGuards.set(t.guard.name, t.guard.description ?? '');
+    }
+    for (const task of sys.tasks ?? []) {
+      addActions(task.actions);
+    }
+    for (const cmd of sys.commands?.commands ?? []) {
+      addActions(cmd.actions);
+    }
+  }
+
+  private get hasMachine(): boolean {
+    return this.flat.length > 0;
+  }
+
+  // ── Top-level builder ─────────────────────────────────────────────────────
+
+  private buildMain(): string {
+    const parts: string[] = [
+      this.sectionHeader(),
+      this.sectionImports(),
+    ];
+
+    const params = this.sectionParameters();
+    if (params) parts.push(params);
+
+    const hw = this.sectionHardware();
+    if (hw) parts.push(hw);
+
+    if (this.hasMachine) {
+      parts.push(this.sectionHSMClass());
+    }
+
+    if (this.allGuards.size > 0) {
+      parts.push(this.sectionGuards());
+    }
+
+    if (this.allActions.size > 0) {
+      parts.push(this.sectionActions());
+    }
+
+    if (this.hasMachine) {
+      parts.push(this.sectionStateDispatch());
+      parts.push(this.sectionHSMInit());
+    }
+
+    const tasks = this.sectionTasks();
+    if (tasks) parts.push(tasks);
+
+    const cmds = this.sectionCommands();
+    if (cmds) parts.push(cmds);
+
+    parts.push(this.sectionMainLoop());
+
+    return parts.join('\n\n') + '\n';
+  }
+
+  // ── Sections ──────────────────────────────────────────────────────────────
+
+  private sectionHeader(): string {
+    const { name, version, description } = this.project;
+    const lines = [
+      '# Generated by PulseIR — do not edit.',
+      `# Model:  ${name} v${version}`,
+      '# Target: MicroPython',
+    ];
+    if (description) lines.push(`# ${description}`);
+    return lines.join('\n');
+  }
+
+  private sectionImports(): string {
+    const lines = ['import utime', 'import machine'];
+    if (this.project.system.commands) {
+      lines.push('import uselect');
+      lines.push('import sys');
+    }
+    return lines.join('\n');
+  }
+
+  private sectionParameters(): string {
+    const params = this.project.system.parameters ?? [];
+    if (params.length === 0) return '';
+
+    const lines = [banner('Parameters')];
+    for (const p of params) {
+      const comment = [
+        p.type,
+        p.min !== undefined && p.max !== undefined ? `[${p.min}..${p.max}]` : '',
+        p.unit ?? '',
+        p.description ?? '',
+      ].filter(Boolean).join('  ');
+      lines.push(`${pyConst(p.name)} = ${p.default}${comment ? '  # ' + comment : ''}`);
+    }
+    return lines.join('\n');
+  }
+
+  private sectionHardware(): string {
+    const components = this.project.system.components ?? [];
+    const resources = this.project.system.resources ?? [];
+    if (components.length === 0 && resources.length === 0) return '';
+
+    const lines = [banner('Hardware')];
+
+    for (const res of resources) {
+      const v = pyName(res.name);
+      const b = res.binding ?? {};
+      switch (String(res.interface).toLowerCase()) {
+        case 'i2c': {
+          const sda = extractPin(b.sda);
+          const scl = extractPin(b.scl);
+          const freq = b.freq ?? b.frequency ?? 100000;
+          lines.push(`${v} = machine.I2C(0, sda=machine.Pin(${sda}), scl=machine.Pin(${scl}), freq=${freq})`);
+          break;
+        }
+        case 'spi': {
+          const sck  = extractPin(b.sck ?? b.clk);
+          const mosi = extractPin(b.mosi);
+          const miso = extractPin(b.miso);
+          const baud = b.baud ?? b.baudrate ?? 1_000_000;
+          lines.push(`${v} = machine.SPI(1, baudrate=${baud}, sck=machine.Pin(${sck}), mosi=machine.Pin(${mosi}), miso=machine.Pin(${miso}))`);
+          break;
+        }
+        case 'uart': {
+          const port = b.port ?? 0;
+          const baud = b.baud ?? b.baudrate ?? 9600;
+          lines.push(`${v} = machine.UART(${port}, baudrate=${baud})`);
+          break;
+        }
+        default:
+          lines.push(`# ${v}: ${res.interface} — configure manually`);
+      }
+    }
+
+    for (const comp of components) {
+      const v = pyName(comp.name);
+      if (comp.bus) {
+        lines.push(`# ${v}: on bus ${comp.bus} — initialise with your driver`);
+        continue;
+      }
+      const cfg = comp.config ?? {};
+      const pin = extractPin(cfg.pin);
+      switch (comp.type) {
+        case 'digital_output':
+          lines.push(`${v} = machine.Pin(${pin}, machine.Pin.OUT)`);
+          break;
+        case 'digital_input': {
+          const mode = String(cfg.mode ?? '').toUpperCase();
+          const pull = mode.includes('PULLUP') ? ', machine.Pin.PULL_UP'
+            : mode.includes('PULLDOWN') ? ', machine.Pin.PULL_DOWN'
+            : '';
+          lines.push(`${v} = machine.Pin(${pin}, machine.Pin.IN${pull})`);
+          break;
+        }
+        case 'pwm_output':
+          lines.push(`${v} = machine.PWM(machine.Pin(${pin}))`);
+          break;
+        case 'analog_input':
+          lines.push(`${v} = machine.ADC(machine.Pin(${pin}))`);
+          break;
+        default:
+          lines.push(`# ${v}: ${comp.type} on pin ${pin} — configure manually`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  private sectionHSMClass(): string {
+    return [
+      banner('State machine runtime'),
+      ``,
+      `class _HSM:`,
+      `    def __init__(self, initial):`,
+      `        self.state = initial`,
+      `        self._entered = utime.ticks_ms()`,
+      `        self._queue = []`,
+      ``,
+      `    def post(self, event):`,
+      `        self._queue.append(event)`,
+      ``,
+      `    def transition(self, next_state, *actions):`,
+      `        for act in actions:`,
+      `            act()`,
+      `        self.state = _resolve_leaf(next_state)`,
+      `        self._entered = utime.ticks_ms()`,
+      ``,
+      `    def elapsed(self):`,
+      `        return utime.ticks_diff(utime.ticks_ms(), self._entered)`,
+      ``,
+      `    def in_state(self, prefix):`,
+      `        return self.state == prefix or self.state.startswith(prefix + '/')`,
+      ``,
+      `    def step(self):`,
+      `        if self._queue:`,
+      `            ev = self._queue.pop(0)`,
+      `            _dispatch(ev)`,
+      `        _check_timers()`,
+    ].join('\n');
+  }
+
+  private sectionGuards(): string {
+    const lines = [banner('Guards')];
+    lines.push('');
+    for (const [name, desc] of this.allGuards) {
+      if (desc) lines.push(`# ${desc}`);
+      lines.push(`def guard_${pyName(name)}():`);
+      lines.push(`    return False  # TODO: implement`);
+      lines.push('');
+    }
+    while (lines[lines.length - 1] === '') lines.pop();
+    return lines.join('\n');
+  }
+
+  private sectionActions(): string {
+    const lines = [banner('Actions')];
+    lines.push('');
+    for (const [name, action] of this.allActions) {
+      lines.push(`def action_${pyName(name)}():`);
+      const body = this.actionBody(action);
+      for (const line of body) {
+        lines.push(`    ${line}`);
+      }
+      lines.push('');
+    }
+    while (lines[lines.length - 1] === '') lines.pop();
+    return lines.join('\n');
+  }
+
+  private actionBody(action: Action): string[] {
+    const driver = action.driver;
+    const params = action.params ?? {};
+
+    switch (driver) {
+      case 'gpio_control': {
+        const rawDevice  = params.device  as string | undefined;
+        const rawDevices = params.devices as string[] | undefined;
+        const targets = rawDevices ?? (rawDevice ? [rawDevice] : []);
+        const value = String(params.value ?? '').toUpperCase();
+        if (targets.length === 0) return ['pass  # TODO: no device specified'];
+
+        return targets.map(t => {
+          const v = pyName(t);
+          if (value === 'HIGH' || value === '1') return `${v}.value(1)`;
+          if (value === 'LOW'  || value === '0') return `${v}.value(0)`;
+          if (value === 'TOGGLE') return `${v}.value(not ${v}.value())`;
+          return `${v}.value(1)  # TODO: check value "${params.value}"`;
+        });
+      }
+
+      case 'pwm_control': {
+        const dev = pyName(String(params.device ?? ''));
+        const raw = params.duty;
+        const duty = raw !== undefined
+          ? (this.isParam(String(raw)) ? pyConst(String(raw)) : String(raw))
+          : '0';
+        return [`${dev}.duty(${duty})`];
+      }
+
+      case 'adc_read': {
+        const dev = pyName(String(params.device ?? ''));
+        return [`_sensors['${dev}'] = ${dev}.read_u16()`];
+      }
+
+      case 'gpio_read': {
+        const dev = pyName(String(params.device ?? ''));
+        return [`_sensors['${dev}'] = ${dev}.value()`];
+      }
+
+      case 'console_help': {
+        const cmds = (this.project.system.commands?.commands ?? []).map(c => c.match);
+        const list = cmds.length ? cmds.join(', ') : '(none)';
+        return [`print('Commands: ${list}')`];
+      }
+
+      default:
+        return ['pass  # TODO: implement'];
+    }
+  }
+
+  private isParam(name: string): boolean {
+    return (this.project.system.parameters ?? []).some(p => p.name === name);
+  }
+
+  // ── State dispatch ─────────────────────────────────────────────────────────
+
+  private sectionStateDispatch(): string {
+    const transitions = this.project.system.transitions ?? [];
+    const eventTrans = transitions.filter(t => t.event !== undefined);
+    const timedTrans = transitions.filter(t => t.after !== undefined);
+
+    // Build _ENTRY map: composite path → initial leaf path
+    const entryMap = new Map<string, string>();
+    for (const info of this.flat) {
+      if (!info.isLeaf && info.initialChildPath) {
+        entryMap.set(info.path, this.resolveLeaf(info.initialChildPath));
+      }
+    }
+
+    const lines = [banner('State dispatch')];
+    lines.push('');
+
+    // _ENTRY dict for composite-state resolution
+    if (entryMap.size > 0) {
+      lines.push('_ENTRY = {');
+      for (const [composite, leaf] of entryMap) {
+        lines.push(`    '${composite}': '${leaf}',`);
+      }
+      lines.push('}');
+      lines.push('');
+    } else {
+      lines.push('_ENTRY = {}');
+      lines.push('');
+    }
+
+    // _resolve_leaf
+    lines.push('def _resolve_leaf(state):');
+    lines.push('    s, seen = state, set()');
+    lines.push('    while s in _ENTRY and s not in seen:');
+    lines.push('        seen.add(s)');
+    lines.push('        s = _ENTRY[s]');
+    lines.push('    return s');
+    lines.push('');
+
+    // _dispatch
+    this.emitDispatch(lines, eventTrans);
+    lines.push('');
+
+    // _check_timers
+    this.emitCheckTimers(lines, timedTrans);
+
+    return lines.join('\n');
+  }
+
+  private emitDispatch(lines: string[], eventTrans: Transition[]): void {
+    lines.push('def _dispatch(event):');
+
+    if (eventTrans.length === 0) {
+      lines.push('    pass');
+      return;
+    }
+
+    lines.push('    state = _hsm.state');
+
+    // Group by source
+    const bySource = new Map<string, Transition[]>();
+    for (const t of eventTrans) {
+      if (!bySource.has(t.source)) bySource.set(t.source, []);
+      bySource.get(t.source)!.push(t);
+    }
+
+    // Leaf states first (exact match, if/elif chain)
+    const leaves = this.flat.filter(f => f.isLeaf && bySource.has(f.path));
+    let firstLeaf = true;
+    for (const leaf of leaves) {
+      const kw = firstLeaf ? 'if' : 'elif';
+      firstLeaf = false;
+      lines.push(`    ${kw} state == '${leaf.path}':`);
+      const trans = bySource.get(leaf.path)!;
+      for (const t of trans) {
+        this.emitEventTransition(lines, t, 8);
+      }
+      if (trans.length === 0) lines.push('        pass');
+    }
+
+    // Composite states (in_state check, separate if blocks)
+    const composites = this.flat.filter(f => !f.isLeaf && bySource.has(f.path));
+    for (const comp of composites) {
+      const trans = bySource.get(comp.path)!;
+      lines.push(`    if _hsm.in_state('${comp.path}'):`);
+      for (const t of trans) {
+        this.emitEventTransition(lines, t, 8);
+      }
+    }
+
+    // Wildcard
+    if (bySource.has('*')) {
+      for (const t of bySource.get('*')!) {
+        this.emitEventTransition(lines, t, 4);
+      }
+    }
+  }
+
+  private emitEventTransition(lines: string[], t: Transition, indent: number): void {
+    const sp = ' '.repeat(indent);
+    lines.push(`${sp}if event == '${t.event}':`);
+    const body = `_hsm.transition('${t.target}'${this.fmtActions(t.actions)})`;
+    if (t.guard) {
+      lines.push(`${sp}    if guard_${pyName(t.guard.name)}():`);
+      lines.push(`${sp}        ${body}`);
+      lines.push(`${sp}        return`);
+    } else {
+      lines.push(`${sp}    ${body}`);
+      lines.push(`${sp}    return`);
+    }
+  }
+
+  private emitCheckTimers(lines: string[], timedTrans: Transition[]): void {
+    lines.push('def _check_timers():');
+
+    if (timedTrans.length === 0) {
+      lines.push('    pass');
+      return;
+    }
+
+    lines.push('    state = _hsm.state');
+    lines.push('    t = _hsm.elapsed()');
+
+    // Group by source
+    const bySource = new Map<string, Transition[]>();
+    for (const tr of timedTrans) {
+      if (!bySource.has(tr.source)) bySource.set(tr.source, []);
+      bySource.get(tr.source)!.push(tr);
+    }
+
+    let firstSrc = true;
+    for (const [src, trans] of bySource) {
+      const kw = firstSrc ? 'if' : 'elif';
+      firstSrc = false;
+      const isLeaf = this.byPath.get(src)?.isLeaf ?? false;
+      const cond = isLeaf ? `state == '${src}'` : `_hsm.in_state('${src}')`;
+      lines.push(`    ${kw} ${cond}:`);
+
+      // Group by 'after' value so multiple transitions with the same timer
+      // share one threshold check (first matching guard wins, rest fall through)
+      const byAfter = new Map<string, Transition[]>();
+      for (const tr of trans) {
+        const key = String(tr.after);
+        if (!byAfter.has(key)) byAfter.set(key, []);
+        byAfter.get(key)!.push(tr);
+      }
+
+      for (const afterTrans of byAfter.values()) {
+        const expr = this.afterExpr(afterTrans[0].after);
+        lines.push(`        if t >= ${expr}:`);
+        for (const tr of afterTrans) {
+          const body = `_hsm.transition('${tr.target}'${this.fmtActions(tr.actions)})`;
+          if (tr.guard) {
+            lines.push(`            if guard_${pyName(tr.guard.name)}():`);
+            lines.push(`                ${body}`);
+            lines.push(`                return`);
+          } else {
+            lines.push(`            ${body}`);
+            lines.push(`            return`);
+          }
+        }
+      }
+    }
+  }
+
+  private afterExpr(after: number | string | undefined): string {
+    if (after === undefined) return '0';
+    if (typeof after === 'number') return String(after);
+    return pyConst(after);  // parameter name → UPPER_SNAKE_CONST
+  }
+
+  private fmtActions(actions: Action[] | undefined): string {
+    if (!actions || actions.length === 0) return '';
+    return ', ' + actions.map(a => `action_${pyName(a.name)}`).join(', ');
+  }
+
+  private sectionHSMInit(): string {
+    const initial = this.resolveInitialState();
+    return `_hsm = _HSM('${initial}')`;
+  }
+
+  private resolveInitialState(): string {
+    if (this.flat.length === 0) return 'initial';
+    let cur = this.flat[0];
+    const seen = new Set<string>();
+    while (!cur.isLeaf && cur.initialChildPath && !seen.has(cur.path)) {
+      seen.add(cur.path);
+      const next = this.byPath.get(cur.initialChildPath);
+      if (!next) break;
+      cur = next;
+    }
+    return cur.path;
+  }
+
+  private resolveLeaf(path: string): string {
+    let cur = this.byPath.get(path);
+    if (!cur) return path;
+    const seen = new Set<string>();
+    while (!cur.isLeaf && cur.initialChildPath && !seen.has(cur.path)) {
+      seen.add(cur.path);
+      const next = this.byPath.get(cur.initialChildPath);
+      if (!next) break;
+      cur = next;
+    }
+    return cur.path;
+  }
+
+  // ── Tasks ──────────────────────────────────────────────────────────────────
+
+  private sectionTasks(): string {
+    const tasks = this.project.system.tasks ?? [];
+    if (tasks.length === 0) return '';
+
+    const lines = [banner('Tasks')];
+    lines.push('');
+
+    // Last-run timestamps
+    for (const task of tasks) {
+      lines.push(`_${pyName(task.name)}_last = utime.ticks_ms()`);
+    }
+
+    for (const task of tasks) {
+      lines.push('');
+      lines.push(`def _run_${pyName(task.name)}():`);
+      if (task.actions && task.actions.length > 0) {
+        for (const a of task.actions) {
+          lines.push(`    action_${pyName(a.name)}()`);
+        }
+      } else {
+        lines.push('    pass');
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  // ── Commands ───────────────────────────────────────────────────────────────
+
+  private sectionCommands(): string {
+    const cmdSet = this.project.system.commands;
+    if (!cmdSet) return '';
+
+    const lines = [banner('Command dispatch')];
+    lines.push('');
+    lines.push('_cmd_buf = bytearray()');
+    lines.push('_cmd_poll = uselect.poll()');
+    lines.push('_cmd_poll.register(sys.stdin, uselect.POLLIN)');
+    lines.push('');
+    lines.push('def _process_commands():');
+    lines.push('    global _cmd_buf');
+    lines.push('    while _cmd_poll.poll(0):');
+    lines.push('        ch = sys.stdin.read(1)');
+    lines.push("        if ch in ('\\n', '\\r'):");
+    lines.push('            line = _cmd_buf.decode().strip()');
+    lines.push('            _cmd_buf = bytearray()');
+    lines.push('            if line:');
+    lines.push('                _handle_command(line)');
+    lines.push('        else:');
+    lines.push('            _cmd_buf.extend(ch.encode())');
+    lines.push('');
+    lines.push('def _handle_command(line):');
+
+    for (const cmd of cmdSet.commands) {
+      lines.push(`    if line == '${cmd.match}':`);
+      for (const a of cmd.actions ?? []) {
+        lines.push(`        action_${pyName(a.name)}()`);
+      }
+      if (this.hasMachine && cmd.event) {
+        lines.push(`        _hsm.post('${cmd.event}')`);
+      }
+      if (!cmd.actions?.length && !cmd.event) {
+        lines.push('        pass  # TODO: implement');
+      }
+      lines.push('        return');
+    }
+
+    if (cmdSet.reportUnknown !== false) {
+      lines.push("    print('Unknown command:', line)");
+    }
+
+    return lines.join('\n');
+  }
+
+  // ── Main loop ──────────────────────────────────────────────────────────────
+
+  private sectionMainLoop(): string {
+    const tasks = this.project.system.tasks ?? [];
+    const hasCommands = !!this.project.system.commands;
+
+    const lines = [banner('Main loop')];
+    lines.push('');
+
+    if (this.hasMachine) {
+      lines.push('# Sensors — populated by gpio_read / adc_read actions.');
+      lines.push('_sensors = {}');
+      lines.push('');
+    }
+
+    lines.push('while True:');
+    lines.push('    now = utime.ticks_ms()');
+
+    for (const task of tasks) {
+      const last = `_${pyName(task.name)}_last`;
+      const interval = this.afterExpr(task.every);
+      lines.push(`    if utime.ticks_diff(now, ${last}) >= ${interval}:`);
+      lines.push(`        _run_${pyName(task.name)}()`);
+      lines.push(`        ${last} = now`);
+    }
+
+    if (this.hasMachine) {
+      lines.push('    _hsm.step()');
+    }
+
+    if (hasCommands) {
+      lines.push('    _process_commands()');
+    }
+
+    lines.push('    utime.sleep_ms(1)');
+
+    return lines.join('\n');
+  }
+}
