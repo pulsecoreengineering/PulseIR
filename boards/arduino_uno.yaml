@@ -1,0 +1,58 @@
+name: Arduino Uno
+mcu: atmega328p
+frameworks:
+  - arduino
+description: Arduino Uno R3 with ATmega328P
+
+pins:
+  # Onboard LED
+  LED:         GPIO13
+  LED_BUILTIN: GPIO13
+
+  # Digital pins
+  D0:  GPIO0
+  D1:  GPIO1
+  D2:  GPIO2
+  D3:  GPIO3
+  D4:  GPIO4
+  D5:  GPIO5
+  D6:  GPIO6
+  D7:  GPIO7
+  D8:  GPIO8
+  D9:  GPIO9
+  D10: GPIO10
+  D11: GPIO11
+  D12: GPIO12
+  D13: GPIO13
+
+  # Analog pins (also usable as digital)
+  A0: GPIO14
+  A1: GPIO15
+  A2: GPIO16
+  A3: GPIO17
+  A4: GPIO18
+  A5: GPIO19
+
+  # I2C (shares A4/A5 on 328P)
+  I2C_SDA: GPIO18
+  I2C_SCL: GPIO19
+  SDA:     GPIO18
+  SCL:     GPIO19
+
+  # SPI (hardware SPI)
+  SPI_MOSI: GPIO11
+  SPI_MISO: GPIO12
+  SPI_SCK:  GPIO13
+  SPI_CS:   GPIO10
+  MOSI:     GPIO11
+  MISO:     GPIO12
+  SCK:      GPIO13
+
+  # UART0
+  TX0: GPIO1
+  RX0: GPIO0
+
+defaults:
+  i2c_frequency: 100000
+  spi_frequency: 4000000
+  uart_baud: 9600

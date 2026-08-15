@@ -1,0 +1,75 @@
+name: ESP32 DevKit V4
+mcu: esp32
+frameworks:
+  - arduino
+  - espidf
+description: Espressif ESP32-WROOM-32 development board with 38 pins
+
+pins:
+  # Onboard LED
+  LED:        GPIO2
+  LED_BUILTIN: GPIO2
+
+  # GPIO
+  D0:  GPIO0
+  D1:  GPIO1
+  D2:  GPIO2
+  D3:  GPIO3
+  D4:  GPIO4
+  D5:  GPIO5
+  D12: GPIO12
+  D13: GPIO13
+  D14: GPIO14
+  D15: GPIO15
+  D16: GPIO16
+  D17: GPIO17
+  D18: GPIO18
+  D19: GPIO19
+  D21: GPIO21
+  D22: GPIO22
+  D23: GPIO23
+  D25: GPIO25
+  D26: GPIO26
+  D27: GPIO27
+  D32: GPIO32
+  D33: GPIO33
+  D34: GPIO34
+  D35: GPIO35
+  D36: GPIO36
+  D39: GPIO39
+
+  # Analog inputs (ADC1, usable with WiFi)
+  A0:  GPIO36
+  A1:  GPIO39
+  A2:  GPIO34
+  A3:  GPIO35
+  A4:  GPIO32
+  A5:  GPIO33
+
+  # I2C default pins
+  I2C_SDA: GPIO21
+  I2C_SCL: GPIO22
+  SDA:     GPIO21
+  SCL:     GPIO22
+
+  # SPI default pins (VSPI)
+  SPI_MOSI: GPIO23
+  SPI_MISO: GPIO19
+  SPI_SCK:  GPIO18
+  SPI_CS:   GPIO5
+  MOSI:     GPIO23
+  MISO:     GPIO19
+  SCK:      GPIO18
+
+  # UART0 (USB serial)
+  TX0: GPIO1
+  RX0: GPIO3
+
+  # UART2
+  TX2: GPIO17
+  RX2: GPIO16
+
+defaults:
+  i2c_frequency: 100000
+  spi_frequency: 1000000
+  uart_baud: 115200

@@ -1,0 +1,116 @@
+name: Arduino Mega 2560
+mcu: atmega2560
+frameworks:
+  - arduino
+description: Arduino Mega 2560 with ATmega2560 — 54 digital I/O, 16 analog inputs
+
+pins:
+  # Onboard LED
+  LED:         GPIO13
+  LED_BUILTIN: GPIO13
+
+  # Digital pins 0-53
+  D0:  GPIO0
+  D1:  GPIO1
+  D2:  GPIO2
+  D3:  GPIO3
+  D4:  GPIO4
+  D5:  GPIO5
+  D6:  GPIO6
+  D7:  GPIO7
+  D8:  GPIO8
+  D9:  GPIO9
+  D10: GPIO10
+  D11: GPIO11
+  D12: GPIO12
+  D13: GPIO13
+  D14: GPIO14
+  D15: GPIO15
+  D16: GPIO16
+  D17: GPIO17
+  D18: GPIO18
+  D19: GPIO19
+  D20: GPIO20
+  D21: GPIO21
+  D22: GPIO22
+  D23: GPIO23
+  D24: GPIO24
+  D25: GPIO25
+  D26: GPIO26
+  D27: GPIO27
+  D28: GPIO28
+  D29: GPIO29
+  D30: GPIO30
+  D31: GPIO31
+  D32: GPIO32
+  D33: GPIO33
+  D34: GPIO34
+  D35: GPIO35
+  D36: GPIO36
+  D37: GPIO37
+  D38: GPIO38
+  D39: GPIO39
+  D40: GPIO40
+  D41: GPIO41
+  D42: GPIO42
+  D43: GPIO43
+  D44: GPIO44
+  D45: GPIO45
+  D46: GPIO46
+  D47: GPIO47
+  D48: GPIO48
+  D49: GPIO49
+  D50: GPIO50
+  D51: GPIO51
+  D52: GPIO52
+  D53: GPIO53
+
+  # Analog inputs (A0-A15)
+  A0:  GPIO54
+  A1:  GPIO55
+  A2:  GPIO56
+  A3:  GPIO57
+  A4:  GPIO58
+  A5:  GPIO59
+  A6:  GPIO60
+  A7:  GPIO61
+  A8:  GPIO62
+  A9:  GPIO63
+  A10: GPIO64
+  A11: GPIO65
+  A12: GPIO66
+  A13: GPIO67
+  A14: GPIO68
+  A15: GPIO69
+
+  # I2C (D20/D21 on Mega)
+  I2C_SDA: GPIO20
+  I2C_SCL: GPIO21
+  SDA:     GPIO20
+  SCL:     GPIO21
+
+  # SPI (hardware SPI on D50-D53)
+  SPI_MOSI: GPIO51
+  SPI_MISO: GPIO50
+  SPI_SCK:  GPIO52
+  SPI_CS:   GPIO53
+  MOSI:     GPIO51
+  MISO:     GPIO50
+  SCK:      GPIO52
+
+  # UART0 (USB serial)
+  TX0: GPIO1
+  RX0: GPIO0
+
+  # Additional UARTs
+  TX1: GPIO18
+  RX1: GPIO19
+  TX2: GPIO16
+  RX2: GPIO17
+  TX3: GPIO14
+  RX3: GPIO15
+
+defaults:
+  i2c_frequency: 100000
+  spi_frequency: 4000000
+  uart_baud: 9600
