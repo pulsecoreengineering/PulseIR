@@ -248,7 +248,7 @@ function emitValue(out: Emitter, line: string, from: number, flowDepth: number, 
       const colon = findKeyColon(line, i, true);
       if (colon !== -1) {
         const rawKey = line.slice(i, colon);
-        out.push(keywords.has(rawKey.trim()) ? 'key' : 'identifier', rawKey);
+        out.push('key', rawKey);
         out.push('punct', ':');
         i = colon + 1;
         continue;
@@ -337,12 +337,7 @@ export function highlight(source: string, keywords?: ReadonlySet<string>): strin
     const colon = findKeyColon(line, i, false);
     if (colon !== -1) {
       const rawKey = line.slice(i, colon);
-      let keyKind: TokenKind;
-      if (/^["']/.test(rawKey.trim())) {
-        keyKind = 'string';
-      } else {
-        keyKind = kw.has(rawKey.trim()) ? 'key' : 'identifier';
-      }
+      const keyKind: TokenKind = /^["']/.test(rawKey.trim()) ? 'string' : 'key';
       out.push(keyKind, rawKey);
       out.push('punct', ':');
       i = colon + 1;

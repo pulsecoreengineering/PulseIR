@@ -1788,19 +1788,23 @@ function init(): void {
   const rerender = debounce(render, 150);
 
   source.addEventListener('input', () => {
+    workspace.files[workspace.active] = source.value;
+    paint();
+    rerender();
+    // Normalize tabs → spaces and other fixups. Done after the first paint so
+    // the overlay is never stale, even when normalization is skipped.
     const raw = source.value;
     const fixed = normalizeYaml(raw);
-    if (fixed !== raw) {
-      // Preserve cursor: count how many spaces were inserted before each end
-      // of the selection by normalizing only the text up to that point.
-      const ss = source.selectionStart ?? raw.length;
-      const se = source.selectionEnd ?? raw.length;
-      const shiftStart = normalizeYaml(raw.slice(0, ss)).length - ss;
-      const shiftEnd   = normalizeYaml(raw.slice(0, se)).length - se;
-      source.value = fixed;
-      source.setSelectionRange(ss + shiftStart, se + shiftEnd);
-    }
-    workspace.files[workspace.active] = source.value;
+    if (fixed === raw) return;
+    // Preserve cursor: count how many characters were inserted before each end
+    // of the selection by normalizing only the text up to that point.
+    const ss = source.selectionStart ?? raw.length;
+    const se = source.selectionEnd ?? raw.length;
+    const shiftStart = normalizeYaml(raw.slice(0, ss)).length - ss;
+    const shiftEnd   = normalizeYaml(raw.slice(0, se)).length - se;
+    source.value = fixed;
+    source.setSelectionRange(ss + shiftStart, se + shiftEnd);
+    workspace.files[workspace.active] = fixed;
     paint();
     rerender();
   });
@@ -1886,6 +1890,9 @@ function init(): void {
         // No selection: insert two spaces at the cursor.
         source.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
         source.selectionStart = source.selectionEnd = selectionStart + 2;
+        workspace.files[workspace.active] = source.value;
+        paint();
+        rerender();
       } else {
         // Selection: indent every touched line by two spaces.
         const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
@@ -1894,10 +1901,10 @@ function init(): void {
         source.value = value.slice(0, lineStart) + indented + value.slice(selectionEnd);
         source.selectionStart = lineStart;
         source.selectionEnd = lineStart + indented.length;
+        workspace.files[workspace.active] = source.value;
+        paint();
+        rerender();
       }
-      workspace.files[workspace.active] = source.value;
-      paint();
-      rerender();
       return;
     }
 

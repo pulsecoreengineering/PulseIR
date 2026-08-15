@@ -1,0 +1,78 @@
+name: ESP32-S3 DevKit
+mcu: esp32s3
+frameworks:
+  - arduino
+  - espidf
+description: Espressif ESP32-S3-DevKitC-1 development board
+
+pins:
+  # Onboard LED (RGB via GPIO48 on DevKitC-1)
+  LED_BUILTIN: GPIO2
+
+  # GPIO
+  D0:  GPIO0
+  D1:  GPIO1
+  D2:  GPIO2
+  D3:  GPIO3
+  D4:  GPIO4
+  D5:  GPIO5
+  D6:  GPIO6
+  D7:  GPIO7
+  D8:  GPIO8
+  D9:  GPIO9
+  D10: GPIO10
+  D11: GPIO11
+  D12: GPIO12
+  D13: GPIO13
+  D14: GPIO14
+  D15: GPIO15
+  D16: GPIO16
+  D17: GPIO17
+  D18: GPIO18
+  D21: GPIO21
+  D35: GPIO35
+  D36: GPIO36
+  D37: GPIO37
+  D38: GPIO38
+  D39: GPIO39
+  D40: GPIO40
+  D41: GPIO41
+  D42: GPIO42
+  D43: GPIO43
+  D44: GPIO44
+  D45: GPIO45
+  D46: GPIO46
+  D47: GPIO47
+  D48: GPIO48
+
+  # I2C default
+  I2C_SDA: GPIO8
+  I2C_SCL: GPIO9
+  SDA:     GPIO8
+  SCL:     GPIO9
+
+  # SPI default (SPI2 / FSPI)
+  SPI_MOSI: GPIO11
+  SPI_MISO: GPIO13
+  SPI_SCK:  GPIO12
+  SPI_CS:   GPIO10
+  MOSI:     GPIO11
+  MISO:     GPIO13
+  SCK:      GPIO12
+
+  # UART0 (USB-CDC)
+  TX0: GPIO43
+  RX0: GPIO44
+
+  # Analog inputs (ADC1)
+  A0: GPIO1
+  A1: GPIO2
+  A2: GPIO3
+  A3: GPIO4
+  A4: GPIO5
+  A5: GPIO6
+
+defaults:
+  i2c_frequency: 100000
+  spi_frequency: 1000000
+  uart_baud: 115200

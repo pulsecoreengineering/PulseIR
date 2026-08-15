@@ -26,13 +26,16 @@ import { FileResolver } from './parser/fs-resolver.js';
 import type { SourceResolver } from './parser/resolver.js';
 import { Codegen } from './codegen/index.js';
 import type { GeneratedProject } from './codegen/index.js';
+import type { PulseProject } from './model/index.js';
 import type { PlatformBackend } from './codegen/backend.js';
 import { ArduinoBackend } from './codegen/arduino.js';
 import { EspIdfBackend } from './codegen/espidf.js';
 import { MicroPythonCodegen } from './codegen/micropython.js';
 import { TopicEmitter } from './emit/topics.js';
 import { LibraryEmitter } from './emit/libraries.js';
+import { CmakeEmitter } from './emit/cmake.js';
 import { Validator } from './analysis/validate.js';
+import { loadBoard, resolveBoard, checkFrameworkCompatibility } from './parser/board-resolver.js';
 
 // ---------------------------------------------------------------------------
 // TrackingFileResolver — records every file path that the parser reads so
@@ -73,6 +76,10 @@ Generate options:
                          arduino     Arduino / Arduino-compatible boards
                          espidf      Espressif IoT Development Framework (ESP32)
                          micropython MicroPython (generates main.py)
+  --board <id>         Board profile for logical pin resolution (e.g. esp32_devkit_v4)
+                         Logical names (LED, I2C_SDA) are resolved to physical pins
+                         before codegen. Physical GPIO names pass through unchanged.
+  --cmake              Generate CMakeLists.txt alongside the code (ESP-IDF only)
   --outdir <dir>       Write a ready-to-build sketch folder (recommended)
   --output <file>      Write a single self-contained sketch
   --topics <file>      Write the MQTT topic manifest (JSON)
@@ -243,11 +250,13 @@ async function cmdGenerate(args: string[]): Promise<void> {
   const targetName    = flag('--target') ?? 'arduino';
   const isMicroPython = /^micropython$/i.test(targetName.replace(/[-_]/g, ''));
   const backend       = isMicroPython ? null : resolveBackend(targetName);
+  const boardId       = flag('--board');
   const outputFile    = flag('--output');
   const outDir        = flag('--outdir');
   const topicsFile    = flag('--topics');
   const librariesFile = flag('--libraries');
   const namespace     = flag('--namespace');
+  const emitCmake     = hasFlag('--cmake');
   const watch         = hasFlag('--watch');
 
   const build = (): Set<string> => {
@@ -255,11 +264,28 @@ async function cmdGenerate(args: string[]): Promise<void> {
     try {
       console.log(`📖 Reading ${inputFile}...`);
       const parser = new Parser();
-      const project = parser.parseFrom(path.resolve(inputFile), resolver);
+      let project = parser.parseFrom(path.resolve(inputFile), resolver);
       console.log(`✓ Parsed project: ${project.name}`);
 
       for (const warning of parser.warnings) {
         console.warn(`⚠️  ${warning}`);
+      }
+
+      // Board resolution: translate logical pin names to physical GPIO identifiers.
+      const effectiveBoardId = boardId ?? project.target?.board;
+      if (effectiveBoardId) {
+        try {
+          const board = loadBoard(effectiveBoardId);
+          console.log(`📋 Board: ${board.name}`);
+          const compat = checkFrameworkCompatibility(board, targetName);
+          if (compat) console.warn(`⚠️  ${compat}`);
+          project = resolveBoard(project, board);
+        } catch (err) {
+          if (err instanceof Error) {
+            console.error(`❌ Board error: ${err.message}`);
+          }
+          if (!watch) process.exit(1);
+        }
       }
 
       const validationResult = new Validator().validate(project, parser.warnings);
@@ -306,9 +332,16 @@ async function cmdGenerate(args: string[]): Promise<void> {
         console.log(`✓ Written to ${lp}`);
       }
 
+      const isEspIdf = /^(espidf|idf)$/i.test(targetName.replace(/[-_]/g, ''));
+
       if (outDir) {
         console.log('🔨 Generating sketch folder...');
-        writeProject(path.resolve(outDir), new Codegen(backend!).generateFiles(project));
+        const resolvedOutDir = path.resolve(outDir);
+        writeProject(resolvedOutDir, new Codegen(backend!).generateFiles(project));
+
+        if (emitCmake && isEspIdf) {
+          writeCmake(resolvedOutDir, project);
+        }
       }
 
       if (outputFile || !(outDir || topicsFile || librariesFile)) {
@@ -325,6 +358,10 @@ async function cmdGenerate(args: string[]): Promise<void> {
             const configPath = path.join(path.dirname(op), 'PulseHSM_config.h');
             fs.writeFileSync(configPath, codegen.generateConfigHeader());
             console.log(`✓ Written to ${configPath} (keep it beside PulseHSM.h)`);
+          }
+
+          if (emitCmake && isEspIdf) {
+            writeCmake(path.dirname(op), project);
           }
         } else {
           console.log(cppCode);
@@ -424,6 +461,21 @@ function writeProject(dir: string, project: GeneratedProject): void {
   }
 
   console.log(`✓ Sketch folder ready at ${dir}`);
+}
+
+function writeCmake(dir: string, project: PulseProject): void {
+  const cmake  = new CmakeEmitter().generate(project);
+  const mainDir = path.join(dir, 'main');
+  fs.mkdirSync(mainDir, { recursive: true });
+
+  const topPath  = path.join(dir, 'CMakeLists.txt');
+  const mainPath = path.join(mainDir, 'CMakeLists.txt');
+
+  fs.writeFileSync(topPath,  cmake.topLevel);
+  fs.writeFileSync(mainPath, cmake.mainComponent);
+
+  console.log('  ✓ CMakeLists.txt');
+  console.log('  ✓ main/CMakeLists.txt');
 }
 
 function resolveBackend(target: string): PlatformBackend {
