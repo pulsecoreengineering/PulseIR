@@ -77,6 +77,11 @@ export function loadBoard(idOrPath: string): BoardDefinition {
 
   const obj = raw as Record<string, unknown>;
 
+  // Follow a one-level alias (cross-platform alternative to symlinks).
+  if (typeof obj['alias'] === 'string') {
+    return loadBoard(obj['alias']);
+  }
+
   if (typeof obj['name'] !== 'string') {
     throw new Error(`Board file ${filePath} is missing a "name" field.`);
   }
