@@ -22,8 +22,9 @@ events:
   STOP:  { source: external }
 
 actions:
-  led_on:  { driver: gpio_control, params: { device: led, value: HIGH } }
-  led_off: { driver: gpio_control, params: { device: led, value: LOW  } }
+  led_on:    { driver: gpio_control, params: { device: led, value: HIGH } }
+  led_off:   { driver: gpio_control, params: { device: led, value: LOW  } }
+  show_help: { driver: console_print, params: { message: "Commands: start, stop, help" } }
 
 machine:
   initial: idle
