@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "npm run examples && tsc",
+    "postinstall": "npm run build",
     "examples": "node scripts/build-examples.mjs",
     "build:web": "npm run build && node scripts/build-web.mjs",
     "serve": "node scripts/serve.mjs",
