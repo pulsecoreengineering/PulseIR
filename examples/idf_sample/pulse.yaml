@@ -1,0 +1,42 @@
+pulseir: "1"
+
+project:
+  name: idf_sample
+  version: "1.0"
+  description: ESP-IDF sample — blink + serial console + two-state machine
+
+target:
+  board: esp32
+
+hardware:
+  buses:
+    console: { interface: uart, port: 0, baud: 115200 }
+  devices:
+    led: { type: digital_output, pin: LED_BUILTIN }
+
+parameters:
+  blink_ms: { type: int, default: 500, range: [100, 5000], unit: ms }
+
+events:
+  START: { source: external }
+  STOP:  { source: external }
+
+actions:
+  led_on:  { driver: gpio_control, params: { device: led, value: HIGH } }
+  led_off: { driver: gpio_control, params: { device: led, value: LOW  } }
+
+machine:
+  initial: idle
+  states:
+    idle:
+    blinking:
+  transitions:
+    - { from: idle,     on: START, to: blinking, do: led_on  }
+    - { from: blinking, on: STOP,  to: idle,     do: led_off }
+
+commands:
+  source: console
+  map:
+    start: { event: START }
+    stop:  { event: STOP  }
+    help:  show_help
