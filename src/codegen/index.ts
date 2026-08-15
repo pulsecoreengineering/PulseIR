@@ -764,16 +764,24 @@ SystemContext systemContext;`;
   }
 
   private declContextStruct(): string {
+    const hasCommands = !!this.project.system.commands;
+    const cmdMacro = hasCommands
+      ? '\n/** Maximum tokens in a command line (command + arguments). */\n#define PULSE_CMD_MAX_ARGS 8\n'
+      : '';
+    const cmdFields = hasCommands
+      ? `\n  int    argc;                         // Token count (0 outside a command handler)\n  char*  argv[PULSE_CMD_MAX_ARGS];     // argv[0] = command name, argv[1..] = arguments`
+      : '';
+
     return `// ============================================================================
 // SYSTEM CONTEXT (see FUNCTION_CONTRACT.md)
 // ============================================================================
-
+${cmdMacro}
 struct SystemContext {
   int currentState;                    // Current state index (compare with S_*)
   int previousState;                   // Previous state index (-1 before first transition)
   int32_t eventData;                   // Payload of the event being dispatched
   const SystemParameters* parameters;  // Read-only system parameters
-  const SystemSensors* sensors;        // Current sensor readings
+  const SystemSensors* sensors;        // Current sensor readings${cmdFields}
 };`;
   }
 
@@ -1223,7 +1231,7 @@ ${blocks.join('\n\n')}`;
         : '';
       const reply = command.log ? this.logLines(command.log, '    ') : '';
 
-      return `  if (strcmp(line, ${JSON.stringify(command.match)}) == 0) {${
+      return `  if (strcmp(cmd, ${JSON.stringify(command.match)}) == 0) {${
         command.description ? `\n    // ${command.description}` : ''
       }
 ${[calls, raise, reply].filter(Boolean).join('\n')}
@@ -1233,7 +1241,7 @@ ${[calls, raise, reply].filter(Boolean).join('\n')}
 
     const unknown = set.reportUnknown === false ? '' : `
   ${this.backend.printExpr(stream, '"Unknown command: "')};
-  ${this.backend.printlnExpr(stream, 'line')};`;
+  ${this.backend.printlnExpr(stream, 'cmd')};`;
 
     return `// ============================================================================
 // COMMANDS
@@ -1254,7 +1262,7 @@ static char commandLine[COMMAND_BUFFER];
 static uint8_t commandLength = 0;
 static bool commandOverflow = false;
 
-static void dispatchCommand(const char* line) {
+static void dispatchCommand(const char* cmd) {
 ${cases.join('\n')}${unknown}
 }
 
@@ -1271,11 +1279,21 @@ static void pollCommands() {
     if (next == '\\n' || next == '\\r') {
       if (commandOverflow) {
         ${this.backend.printlnExpr(stream, '"Command too long; ignored."')};
-several_reset
+        commandLength = 0;
+        commandOverflow = false;
       } else if (commandLength > 0) {
         commandLine[commandLength] = '\\0';
-        dispatchCommand(commandLine);
-several_reset
+        systemContext.argc = 0;
+        char* tok = strtok(commandLine, " \\t");
+        while (tok && systemContext.argc < PULSE_CMD_MAX_ARGS) {
+          systemContext.argv[systemContext.argc++] = tok;
+          tok = strtok(nullptr, " \\t");
+        }
+        if (systemContext.argc > 0) {
+          dispatchCommand(systemContext.argv[0]);
+        }
+        commandLength = 0;
+        commandOverflow = false;
       }
       continue;
     }
@@ -1287,7 +1305,7 @@ several_reset
     }
     commandLine[commandLength++] = (char)next;
   }
-}`.replace(/several_reset/g, '        commandLength = 0;\n        commandOverflow = false;');
+}`;
   }
 
   /**
@@ -1605,6 +1623,10 @@ ${reads.join('\n')}
     if (this.hasMachine) {
       lines.push('  //   ctx->currentState, ctx->previousState   (compare with S_*)');
       lines.push('  //   ctx->eventData   (payload of the event being dispatched)');
+    }
+
+    if (this.project.system.commands) {
+      lines.push('  //   ctx->argc, ctx->argv[]   (command tokens; argv[0] is the command name)');
     }
 
     if (lines.length === 0) return '';
