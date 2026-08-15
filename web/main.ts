@@ -1524,13 +1524,13 @@ commands:
     yaml:
 `hardware:
   buses:
-    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }`
+    i2c_bus: { interface: i2c, sda: I2C_SDA, scl: I2C_SCL }`
   },
   { group: 'Protocol', label: 'SPI bus',
     yaml:
 `hardware:
   buses:
-    spi_bus: { interface: spi, sck: GPIO18, miso: GPIO19, mosi: GPIO23, cs: GPIO5 }`
+    spi_bus: { interface: spi, sck: SPI_SCK, miso: SPI_MISO, mosi: SPI_MOSI, cs: SPI_CS }`
   },
   { group: 'Protocol', label: 'Wi-Fi',
     yaml:
@@ -1551,7 +1551,7 @@ commands:
     yaml:
 `hardware:
   devices:
-    led: { type: digital_output, pin: GPIO2 }`
+    led: { type: digital_output, pin: LED_BUILTIN }`
   },
   { group: 'Device', label: 'Digital input  (button, switch)',
     yaml:

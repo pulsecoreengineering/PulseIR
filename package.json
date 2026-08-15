@@ -4,6 +4,9 @@
   "description": "PulseHSM Intermediate Representation - YAML to C++ Code Generator",
   "main": "dist/index.js",
   "type": "module",
+  "bin": {
+    "pulse-ir": "dist/src/cli.js"
+  },
   "scripts": {
     "build": "npm run examples && tsc",
     "examples": "node scripts/build-examples.mjs",
