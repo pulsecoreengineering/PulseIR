@@ -9,6 +9,7 @@
  *   pulse-ir <file> [options]           Generate C++ (default)
  *
  * Generate options:
+ *   --target <name>      Target platform: arduino (default) | espidf
  *   --outdir <dir>       Write a ready-to-build sketch folder (recommended)
  *   --output <file>      Write a single self-contained sketch
  *   --topics <file>      Write the MQTT topic manifest (JSON)
@@ -25,6 +26,10 @@ import { FileResolver } from './parser/fs-resolver.js';
 import type { SourceResolver } from './parser/resolver.js';
 import { Codegen } from './codegen/index.js';
 import type { GeneratedProject } from './codegen/index.js';
+import type { PlatformBackend } from './codegen/backend.js';
+import { ArduinoBackend } from './codegen/arduino.js';
+import { EspIdfBackend } from './codegen/espidf.js';
+import { MicroPythonCodegen } from './codegen/micropython.js';
 import { TopicEmitter } from './emit/topics.js';
 import { LibraryEmitter } from './emit/libraries.js';
 import { Validator } from './analysis/validate.js';
@@ -64,6 +69,10 @@ Commands:
   <file>               Generate C++ from a model (default command)
 
 Generate options:
+  --target <name>      Code generation target (default: arduino)
+                         arduino     Arduino / Arduino-compatible boards
+                         espidf      Espressif IoT Development Framework (ESP32)
+                         micropython MicroPython (generates main.py)
   --outdir <dir>       Write a ready-to-build sketch folder (recommended)
   --output <file>      Write a single self-contained sketch
   --topics <file>      Write the MQTT topic manifest (JSON)
@@ -231,12 +240,15 @@ async function cmdGenerate(args: string[]): Promise<void> {
   };
   const hasFlag = (name: string): boolean => args.includes(name);
 
-  const outputFile  = flag('--output');
-  const outDir      = flag('--outdir');
-  const topicsFile  = flag('--topics');
+  const targetName    = flag('--target') ?? 'arduino';
+  const isMicroPython = /^micropython$/i.test(targetName.replace(/[-_]/g, ''));
+  const backend       = isMicroPython ? null : resolveBackend(targetName);
+  const outputFile    = flag('--output');
+  const outDir        = flag('--outdir');
+  const topicsFile    = flag('--topics');
   const librariesFile = flag('--libraries');
-  const namespace   = flag('--namespace');
-  const watch       = hasFlag('--watch');
+  const namespace     = flag('--namespace');
+  const watch         = hasFlag('--watch');
 
   const build = (): Set<string> => {
     const resolver = new TrackingFileResolver();
@@ -258,6 +270,26 @@ async function cmdGenerate(args: string[]): Promise<void> {
         console.warn(`⚠️  [${d.code}] ${d.message}`);
       }
 
+      // MicroPython target — Python codegen, no C++ artifacts.
+      if (isMicroPython) {
+        const mpCodegen = new MicroPythonCodegen();
+        if (outDir) {
+          console.log('🔨 Generating MicroPython project...');
+          writeProject(path.resolve(outDir), mpCodegen.generateFiles(project));
+        } else if (outputFile) {
+          console.log('🔨 Generating main.py...');
+          const py = mpCodegen.generate(project);
+          const op = path.resolve(outputFile);
+          fs.writeFileSync(op, py);
+          console.log(`✓ Written to ${op}`);
+        } else {
+          console.log(mpCodegen.generate(project));
+        }
+        console.log('✨ Done');
+        return resolver.loaded;
+      }
+
+      // C++ targets (arduino, espidf).
       if (topicsFile) {
         console.log('📡 Generating MQTT topic manifest...');
         const manifest = new TopicEmitter().toJSON(project, namespace ?? undefined);
@@ -276,12 +308,12 @@ async function cmdGenerate(args: string[]): Promise<void> {
 
       if (outDir) {
         console.log('🔨 Generating sketch folder...');
-        writeProject(path.resolve(outDir), new Codegen().generateFiles(project));
+        writeProject(path.resolve(outDir), new Codegen(backend!).generateFiles(project));
       }
 
       if (outputFile || !(outDir || topicsFile || librariesFile)) {
         console.log('🔨 Generating C++ code...');
-        const codegen = new Codegen();
+        const codegen = new Codegen(backend!);
         const cppCode = codegen.generate(project);
 
         if (outputFile) {
@@ -392,6 +424,17 @@ function writeProject(dir: string, project: GeneratedProject): void {
   }
 
   console.log(`✓ Sketch folder ready at ${dir}`);
+}
+
+function resolveBackend(target: string): PlatformBackend {
+  switch (target.toLowerCase().replace(/[-_]/g, '')) {
+    case 'arduino': return new ArduinoBackend();
+    case 'espidf':
+    case 'idf':    return new EspIdfBackend();
+    default:
+      console.error(`❌ Unknown target: "${target}". Supported: arduino, espidf`);
+      process.exit(1);
+  }
 }
 
 function printError(error: unknown): void {

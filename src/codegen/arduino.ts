@@ -106,6 +106,23 @@ export class ArduinoBackend implements PlatformBackend {
     return this.interfaces.declared(libraries);
   }
 
+  interfacesNote(): string {
+    return [
+      '// Pin arguments to begin() require an ESP32/ESP8266/RP2040 core; the fallbacks',
+      '// below cover cores without them. Adjust setupInterfaces() for other boards.',
+    ].join('\n');
+  }
+
+  entryPointDeclarations(): string {
+    return [
+      '// The Arduino IDE auto-prototypes these for .ino files, but a .cpp in src/',
+      '// needs them declared.',
+      'void setup();',
+      'void loop();',
+      'void setupInterfaces();',
+    ].join('\n');
+  }
+
   renderSetup(body: string): string {
     return `void setup() {\n${body}}`;
   }

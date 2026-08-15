@@ -93,7 +93,23 @@ export interface PlatformBackend {
   /** Normalise model-declared libraries for the includes section. */
   declaredLibraries(libraries: Library[] | undefined): ImpliedLibrary[];
 
+  /**
+   * The platform-specific comment inserted after the `// INTERFACES` banner.
+   * Arduino notes the `#ifdef` portability guards; ESP-IDF has no such guards.
+   * Must start with `//` (the leading `//\n` line is the caller's separator).
+   */
+  interfacesNote(): string;
+
   // ── Entry points ──────────────────────────────────────────────────────────
+
+  /**
+   * Function prototype declarations that the generated shared header must
+   * expose so other translation units (guards.cpp, actions.cpp) can see them.
+   *
+   * Arduino: `void setup(); void loop(); void setupInterfaces();`
+   * ESP-IDF: `extern "C" void app_main(void); void setupInterfaces();`
+   */
+  entryPointDeclarations(): string;
 
   /**
    * Wrap a body string in the platform's initialisation entry point.

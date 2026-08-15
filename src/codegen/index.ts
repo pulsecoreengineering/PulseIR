@@ -250,11 +250,7 @@ extern SystemParameters systemParameters;
 extern SystemSensors systemSensors;
 extern SystemContext systemContext;
 
-// The Arduino IDE auto-prototypes these for .ino files, but a .cpp in src/
-// needs them declared.
-void setup();
-void loop();
-void setupInterfaces();${this.declInterfaceGlobals()}`,
+${this.backend.entryPointDeclarations()}${this.declInterfaceGlobals()}`,
       this.generateGuardDeclarations(),
       this.generateActionDeclarations(),
       `#endif  // ${guard}`,
@@ -563,8 +559,7 @@ ${this.defInterfaces()}`;
 // INTERFACES
 // ============================================================================
 //
-// Pin arguments to begin() require an ESP32/ESP8266/RP2040 core; the fallbacks
-// below cover cores without them. Adjust setupInterfaces() for other boards.
+${this.backend.interfacesNote()}
 ${todoBlock}
 ${blocks.join('\n\n')}`;
   }
