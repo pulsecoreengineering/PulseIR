@@ -599,6 +599,7 @@ export class Parser {
         max: range ? range[1] : (def.max as number | undefined),
         unit: def.unit as string | undefined,
         description: def.description as string | undefined,
+        persist: def.persist === true ? true : undefined,
       };
     });
   }
@@ -1348,6 +1349,7 @@ export class Parser {
       max: p.max as number | undefined,
       unit: p.unit as string | undefined,
       description: p.description as string | undefined,
+      persist: p.persist === true ? true : undefined,
     }));
   }
 

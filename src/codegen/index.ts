@@ -180,6 +180,7 @@ export class Codegen {
       this.generateTasks(),
       this.generateCommands(),
       this.generateMqttWiring(),
+      this.generateStorageWiring(),
       this.generateReadSensors(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
@@ -277,6 +278,7 @@ ${this.backend.entryPointDeclarations()}${this.declInterfaceGlobals()}`,
       this.generateTasks(),
       this.generateCommands(),
       this.generateMqttWiring(),
+      this.generateStorageWiring(),
       this.generateReadSensors(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
@@ -1084,10 +1086,14 @@ ${this.hasConsole && this.isVerbose ? `
   ${this.backend.printlnExpr(stream, 'fsm.getCurrentName()')};
 ` : ''}`;
 
+    const loadCall = this.persistedParameters().length > 0
+      ? '\n  // Restore persisted parameters from NVS.\n  loadParameters();\n'
+      : '';
+
     const setupBody = `  // Buses and peripherals declared as resources. Nothing else is opened: a
   // peripheral the model did not declare has no business appearing here.
   setupInterfaces();
-
+${loadCall}
   // Wire up the context handed to every action
   systemContext.parameters = &systemParameters;
   systemContext.sensors = &systemSensors;
@@ -1506,6 +1512,88 @@ static void pollCommands() {
   }
 
   // =========================================================================
+  // STORAGE WIRING (persist: true parameters)
+  // =========================================================================
+
+  /** Parameters the model has marked persist:true. */
+  private persistedParameters() {
+    return (this.project.system.parameters || []).filter(p => p.persist === true);
+  }
+
+  /**
+   * Generate loadParameters() / saveParameters() using the Arduino Preferences
+   * library (ESP32-native, wraps NVS).  On non-ESP32 targets the functions are
+   * still emitted but wrapped in #ifdef ARDUINO_ARCH_ESP32, so the sketch
+   * compiles everywhere while the persistence calls are simply no-ops on AVR
+   * or RP2040 boards — the user can swap in EEPROM.h calls there.
+   *
+   * NVS key names are limited to 15 characters; keys are truncated with a
+   * comment so the user can see the mapping.
+   */
+  private generateStorageWiring(): string {
+    const persisted = this.persistedParameters();
+    if (persisted.length === 0) return '';
+
+    const ns = this.topicSegment(this.project.name).slice(0, 15);  // NVS namespace max 15 chars
+
+    const prefsGet = (p: typeof persisted[0]): string => {
+      const field = `systemParameters.${this.sanitize(p.name)}`;
+      const key   = this.sanitize(p.name).slice(0, 15);
+      const dflt  = this.cLiteral(p);
+      switch (p.type) {
+        case 'float':  return `  ${field} = _prefs.getFloat("${key}", ${dflt});`;
+        case 'bool':   return `  ${field} = _prefs.getBool("${key}", ${dflt});`;
+        default:       return `  ${field} = _prefs.getInt("${key}", ${dflt});`;
+      }
+    };
+
+    const prefsPut = (p: typeof persisted[0]): string => {
+      const field = `systemParameters.${this.sanitize(p.name)}`;
+      const key   = this.sanitize(p.name).slice(0, 15);
+      switch (p.type) {
+        case 'float':  return `  _prefs.putFloat("${key}", ${field});`;
+        case 'bool':   return `  _prefs.putBool("${key}", ${field});`;
+        default:       return `  _prefs.putInt("${key}", ${field});`;
+      }
+    };
+
+    const loadBody = persisted.map(prefsGet).join('\n');
+    const saveBody = persisted.map(prefsPut).join('\n');
+
+    return `// ============================================================================
+// STORAGE WIRING (persist: true parameters)
+// ============================================================================
+//
+// Parameters marked persist:true are loaded from NVS at boot and saved
+// whenever they change. Call saveParameters() after any write to these fields
+// (the MQTT setpoint handler does this automatically when both are present).
+//
+// Requires the Preferences library — included with the ESP32 Arduino core.
+// Non-ESP32 targets compile but skip NVS calls; replace with EEPROM.h if needed.
+
+#ifdef ARDUINO_ARCH_ESP32
+#include <Preferences.h>
+static Preferences _prefs;
+#endif
+
+static void loadParameters() {
+#ifdef ARDUINO_ARCH_ESP32
+  _prefs.begin("${ns}", true);  // read-only
+${loadBody}
+  _prefs.end();
+#endif
+}
+
+static void saveParameters() {
+#ifdef ARDUINO_ARCH_ESP32
+  _prefs.begin("${ns}", false);  // read-write
+${saveBody}
+  _prefs.end();
+#endif
+}`;
+  }
+
+  // =========================================================================
   // SENSOR READS
   // =========================================================================
 
@@ -1608,6 +1696,8 @@ ${reads.join('\n')}
 
     // ── onMqttMessage ──────────────────────────────────────────────────────
 
+    const hasPersistAndMqtt = parameters.some(p => p.persist) && hasSubscriptions;
+
     const setpointCases = parameters.map(p => {
       const seg = this.topicSegment(p.name);
       const field = `systemParameters.${this.sanitize(p.name)}`;
@@ -1617,7 +1707,9 @@ ${reads.join('\n')}
         case 'bool':   conv = `${field} = buf[0] == '1' || strcmp(buf, "true") == 0;`; break;
         default:       conv = `${field} = (int)atol(buf);`;                             break;
       }
-      return `  if (strcmp(suffix, "/setpoint/${seg}") == 0) { ${conv} return; }`;
+      // If any parameter is persisted, save after every setpoint update.
+      const save = hasPersistAndMqtt ? ' saveParameters();' : '';
+      return `  if (strcmp(suffix, "/setpoint/${seg}") == 0) { ${conv}${save} return; }`;
     });
 
     const eventCases = mqttEvents.map(e => {

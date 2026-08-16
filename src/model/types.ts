@@ -106,6 +106,8 @@ export interface Parameter {
   max?: number;
   unit?: string;
   description?: string;
+  /** When true, this parameter is loaded from NVS/EEPROM at boot and saved on change. */
+  persist?: boolean;
   metadata?: Metadata;
 }
 
