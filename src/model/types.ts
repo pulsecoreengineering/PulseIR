@@ -346,6 +346,58 @@ export interface CommandSet {
   reportUnknown?: boolean;
 }
 
+/**
+ * Runtime health and observability configuration.
+ *
+ * These are all data — thresholds, GPIO numbers, log levels. No logic is
+ * evaluated here: the generated code wires up platform APIs, nothing more.
+ */
+export interface Diagnostics {
+  /** Hardware watchdog. Reset every loop; panic when the loop stalls. */
+  watchdog?: {
+    /** Seconds before the watchdog fires. Default: 5. */
+    timeout_s?: number;
+  };
+  /** LED blink to prove the main loop is running. */
+  heartbeat?: {
+    /** GPIO pin to toggle. Default: 2 (built-in LED on most dev boards). */
+    pin?: number | string;
+    /** Toggle interval in milliseconds (literal or int parameter). Default: 1000. */
+    interval_ms?: number | string;
+  };
+  /** Serial verbosity. Applies to generated trace prints. Default: "info". */
+  log_level?: 'verbose' | 'info' | 'warning' | 'error' | 'none';
+}
+
+/**
+ * One sensor channel to publish over MQTT.
+ */
+export interface TelemetryChannel {
+  /** Name of a declared sensor component. */
+  sensor: string;
+  /** Override the global interval for this channel (ms or int parameter). */
+  interval_ms?: number | string;
+  /** Absolute MQTT topic override. Auto-derived from the prefix + sensor name if absent. */
+  topic?: string;
+}
+
+/**
+ * Selective, per-channel MQTT telemetry.
+ *
+ * Without a `telemetry:` block the existing behaviour holds: `publishMqtt()`
+ * dumps every declared sensor at one fixed interval. With `telemetry:` each
+ * channel gets its own deadline so a fast temperature sensor and a slow
+ * diagnostic counter can coexist in the same sketch.
+ */
+export interface Telemetry {
+  /** Default publish interval (ms or int parameter). Required if any channel omits its own. */
+  interval_ms?: number | string;
+  /** MQTT topic prefix. Defaults to the project name. */
+  topic_prefix?: string;
+  /** Channels to publish. */
+  channels: TelemetryChannel[];
+}
+
 export interface PulseSystem {
   name: string;
   version?: string;
@@ -367,6 +419,11 @@ export interface PulseSystem {
   resources?: Resource[];
   parameters?: Parameter[];
   libraries?: Library[];
+
+  /** Runtime health: watchdog, heartbeat LED, log level. */
+  diagnostics?: Diagnostics;
+  /** Selective MQTT publishing per sensor, each with its own interval. */
+  telemetry?: Telemetry;
 
   metadata?: Metadata;
 }

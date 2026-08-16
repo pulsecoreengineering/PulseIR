@@ -23,6 +23,9 @@ import type {
   Task,
   Command,
   CommandSet,
+  Diagnostics,
+  Telemetry,
+  TelemetryChannel,
 } from '../model/index.js';
 import type { SourceResolver } from './resolver.js';
 import { findPinConflicts, describePinConflict } from '../analysis/pins.js';
@@ -491,7 +494,10 @@ export class Parser {
     const actionCatalogue = this.parseActionCatalogue(raw.actions);
     actionCatalogue.forEach((_, name) => this.actionNames.add(name));
 
-    const transitions = this.parseTransitionList(machine.transitions, actionCatalogue);
+    // State-level `every: N  do: [...]` is sugar for a transition from that state.
+    const shorthands = this.extractStatePeriodicShorthands(machine.states);
+    const explicitList = this.asList(machine.transitions, 'machine.transitions') ?? [];
+    const transitions = this.parseTransitionList([...shorthands, ...explicitList], actionCatalogue);
     const tasks = this.parseTaskMap(raw.tasks, actionCatalogue);
     const commands = this.parseCommands(raw.commands, actionCatalogue);
 
@@ -526,6 +532,9 @@ export class Parser {
       }
     }
 
+    const diagnostics = this.parseDiagnostics(raw.diagnostics, parameters || []);
+    const telemetry   = this.parseTelemetry(raw.telemetry, components || [], parameters || []);
+
     return {
       name: (raw.name as string) || ((raw.project as Record<string, unknown>)?.name as string) || 'unnamed',
       description: machine.description as string | undefined,
@@ -538,6 +547,8 @@ export class Parser {
       resources,
       parameters,
       libraries,
+      diagnostics,
+      telemetry,
     };
   }
 
@@ -610,6 +621,28 @@ export class Parser {
    * `states:` under it. The type is inferred from that; declaring it is
    * optional and only useful for future kinds.
    */
+  /**
+   * Walk the raw state map and collect any state that carries `every:` + `do:`
+   * directly — these are shorthands for `{ from: <path>, every: N, do: [...] }`.
+   * Recurses into composite states using their full hierarchical path as `from`.
+   */
+  private extractStatePeriodicShorthands(
+    raw: unknown,
+    prefix: string = ''
+  ): Record<string, unknown>[] {
+    const result: Record<string, unknown>[] = [];
+    for (const [name, def] of this.mapEntries(raw, 'states')) {
+      const path = prefix ? `${prefix}/${name}` : name;
+      if (def.every !== undefined) {
+        result.push({ from: path, every: def.every, do: def.do });
+      }
+      if (def.states) {
+        result.push(...this.extractStatePeriodicShorthands(def.states, path));
+      }
+    }
+    return result;
+  }
+
   private parseStateMap(raw: unknown): State[] {
     return this.mapEntries(raw, 'states').map(([name, def]) => {
       const children = this.parseStateMap(def.states);
@@ -898,6 +931,148 @@ export class Parser {
       commands,
       reportUnknown: raw.report_unknown === undefined ? true : Boolean(raw.report_unknown),
     };
+  }
+
+  private parseDiagnostics(raw: unknown, parameters: Parameter[]): Diagnostics | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (!isPlainObject(raw)) {
+      throw new ParseError('diagnostics: must be a mapping (watchdog:, heartbeat:, log_level:)');
+    }
+
+    const result: Diagnostics = {};
+
+    if (raw.watchdog !== undefined) {
+      const w = isPlainObject(raw.watchdog) ? raw.watchdog : {};
+      const timeout_s = w.timeout_s !== undefined ? Number(w.timeout_s) : 5;
+      if (!Number.isFinite(timeout_s) || timeout_s <= 0) {
+        throw new ParseError('diagnostics.watchdog.timeout_s must be a positive number of seconds');
+      }
+      result.watchdog = { timeout_s };
+    }
+
+    if (raw.heartbeat !== undefined) {
+      const h = isPlainObject(raw.heartbeat) ? raw.heartbeat as Record<string, unknown> : {};
+      const interval_ms = h.interval_ms !== undefined
+        ? this.parseInterval(h.interval_ms, 'diagnostics.heartbeat.interval_ms')
+        : 1000;
+      result.heartbeat = { pin: h.pin as number | string | undefined, interval_ms };
+    }
+
+    if (raw.log_level !== undefined) {
+      const level = String(raw.log_level);
+      const valid = ['verbose', 'info', 'warning', 'error', 'none'] as const;
+      if (!valid.includes(level as any)) {
+        throw new ParseError(
+          `diagnostics.log_level "${level}" is not recognised. Use one of: ${valid.join(', ')}`
+        );
+      }
+      result.log_level = level as Diagnostics['log_level'];
+    }
+
+    this.assertDiagnosticsIntervals(result, parameters);
+    return Object.keys(result).length > 0 ? result : undefined;
+  }
+
+  private parseTelemetry(
+    raw: unknown,
+    components: Component[],
+    parameters: Parameter[]
+  ): Telemetry | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (!isPlainObject(raw)) {
+      throw new ParseError('telemetry: must be a mapping (interval_ms:, channels:)');
+    }
+
+    const interval_ms = raw.interval_ms !== undefined
+      ? this.parseInterval(raw.interval_ms, 'telemetry.interval_ms')
+      : undefined;
+
+    const topic_prefix = raw.topic_prefix !== undefined ? String(raw.topic_prefix) : undefined;
+
+    const rawChannels = raw.channels;
+    if (rawChannels === undefined || rawChannels === null) {
+      throw new ParseError('telemetry: declares no "channels"');
+    }
+    if (!isPlainObject(rawChannels)) {
+      throw new ParseError(
+        'telemetry.channels must be a mapping of sensor name to channel options:\n' +
+        '  channels:\n    temperature:\n    humidity:\n      interval_ms: 10000'
+      );
+    }
+
+    const sensorNames = new Set(
+      components.filter(c => String(c.class) === 'sensor').map(c => c.name)
+    );
+
+    const channels: TelemetryChannel[] = Object.entries(rawChannels as Record<string, unknown>).map(
+      ([sensor, def]) => {
+        if (!sensorNames.has(sensor)) {
+          const available = [...sensorNames].join(', ') || '(none declared)';
+          throw new ParseError(
+            `telemetry channel "${sensor}" is not a declared sensor. Available: ${available}`
+          );
+        }
+        const ch: TelemetryChannel = { sensor };
+        if (def !== null && isPlainObject(def)) {
+          const d = def as Record<string, unknown>;
+          if (d.interval_ms !== undefined) {
+            ch.interval_ms = this.parseInterval(d.interval_ms, `telemetry.channels.${sensor}.interval_ms`);
+          }
+          if (d.topic !== undefined) {
+            ch.topic = String(d.topic);
+          }
+        }
+        if (ch.interval_ms === undefined && interval_ms === undefined) {
+          throw new ParseError(
+            `telemetry channel "${sensor}" has no interval_ms and telemetry.interval_ms is not set. ` +
+            'Every channel needs an interval — set a default at the top level or one per channel.'
+          );
+        }
+        return ch;
+      }
+    );
+
+    if (channels.length === 0) {
+      throw new ParseError('telemetry.channels is empty — add at least one sensor channel');
+    }
+
+    this.assertTelemetryIntervals({ interval_ms, topic_prefix, channels }, parameters);
+    return { interval_ms, topic_prefix, channels };
+  }
+
+  /** Validate that heartbeat interval references a declared int parameter. */
+  private assertDiagnosticsIntervals(diag: Diagnostics, parameters: Parameter[]): void {
+    const iv = diag.heartbeat?.interval_ms;
+    if (typeof iv !== 'string') return;
+    const param = parameters.find(p => p.name === iv);
+    if (!param) {
+      throw new ParseError(
+        `diagnostics.heartbeat.interval_ms "${iv}" is not a declared parameter`
+      );
+    }
+    if (param.type !== 'int') {
+      throw new ParseError(
+        `diagnostics.heartbeat.interval_ms "${iv}" must be an int parameter (got ${param.type})`
+      );
+    }
+  }
+
+  /** Validate that telemetry intervals reference declared int parameters. */
+  private assertTelemetryIntervals(tel: Telemetry, parameters: Parameter[]): void {
+    const check = (iv: number | string | undefined, where: string) => {
+      if (typeof iv !== 'string') return;
+      const param = parameters.find(p => p.name === iv);
+      if (!param) {
+        throw new ParseError(`${where} "${iv}" is not a declared parameter`);
+      }
+      if (param.type !== 'int') {
+        throw new ParseError(`${where} "${iv}" must be an int parameter (got ${param.type})`);
+      }
+    };
+    check(tel.interval_ms, 'telemetry.interval_ms');
+    for (const ch of tel.channels) {
+      check(ch.interval_ms, `telemetry.channels.${ch.sensor}.interval_ms`);
+    }
   }
 
   /** `log: "temp={temp}C"` - checked for shape here, for names later. */

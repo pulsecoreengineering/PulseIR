@@ -182,8 +182,10 @@ export class Codegen {
       this.generateTasks(),
       this.generateCommands(),
       this.generateMqttWiring(),
+      this.generateTelemetry(),
       this.generateStorageWiring(),
       this.generateReadSensors(),
+      this.generateDiagnostics(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
       this.generateGuardImplementations(),
@@ -280,8 +282,10 @@ ${this.backend.entryPointDeclarations()}${this.declInterfaceGlobals()}`,
       this.generateTasks(),
       this.generateCommands(),
       this.generateMqttWiring(),
+      this.generateTelemetry(),
       this.generateStorageWiring(),
       this.generateReadSensors(),
+      this.generateDiagnostics(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
     ].join('\n\n') + '\n';
@@ -1016,6 +1020,172 @@ ${cases.join('\n')}
   }
 
   // =========================================================================
+  // DIAGNOSTICS — watchdog, heartbeat LED, log level
+  // =========================================================================
+
+  private generateDiagnostics(): string {
+    const diag = this.project.system.diagnostics;
+    if (!diag) return '';
+
+    const setupLines: string[] = [];
+    const loopLines: string[] = [];
+    const includeLines: string[] = [];
+
+    if (diag.watchdog) {
+      const timeout = diag.watchdog.timeout_s ?? 5;
+      includeLines.push(
+        '#ifdef ARDUINO_ARCH_ESP32',
+        '#include <esp_task_wdt.h>',
+        '#endif',
+      );
+      setupLines.push(
+        '  // Hardware watchdog — panics if the loop stalls.',
+        '#ifdef ARDUINO_ARCH_ESP32',
+        `  esp_task_wdt_init(${timeout}, true);`,
+        '  esp_task_wdt_add(NULL);',
+        '#endif',
+      );
+      loopLines.push(
+        '  // Feed the hardware watchdog.',
+        '#ifdef ARDUINO_ARCH_ESP32',
+        '  esp_task_wdt_reset();',
+        '#endif',
+      );
+    }
+
+    if (diag.heartbeat) {
+      const pin = diag.heartbeat.pin ?? 2;
+      const pinExpr = typeof pin === 'number' ? String(pin) : `HEARTBEAT_PIN`;
+      const ivRaw = diag.heartbeat.interval_ms ?? 1000;
+      const ivExpr = typeof ivRaw === 'number'
+        ? `${ivRaw}UL`
+        : `(unsigned long)systemParameters.${this.sanitize(String(ivRaw))}`;
+
+      if (typeof pin !== 'number') {
+        // Named pin — emit a #define so the user can override it.
+        setupLines.unshift(`  // Heartbeat pin — override HEARTBEAT_PIN if needed.`);
+        includeLines.push(`#ifndef HEARTBEAT_PIN\n#define HEARTBEAT_PIN ${pin}\n#endif`);
+      }
+
+      setupLines.push(
+        `  // Heartbeat LED on pin ${pinExpr}.`,
+        `  pinMode(${pinExpr}, OUTPUT);`,
+      );
+      loopLines.push(
+        `  // Toggle heartbeat LED every ${typeof ivRaw === 'number' ? `${ivRaw}ms` : ivRaw + ' ms'}.`,
+        '  {',
+        '    static unsigned long _heartAt = 0;',
+        `    const unsigned long _iv = ${ivExpr};`,
+        `    if (${this.backend.nowExpr()} - _heartAt >= _iv) {`,
+        '      _heartAt += _iv;',
+        `      if (${this.backend.nowExpr()} - _heartAt >= _iv) _heartAt = ${this.backend.nowExpr()};`,
+        `      digitalWrite(${pinExpr}, !digitalRead(${pinExpr}));`,
+        '    }',
+        '  }',
+      );
+    }
+
+    if (setupLines.length === 0 && loopLines.length === 0) return '';
+
+    const lines: string[] = [
+      '// ============================================================================',
+      '// DIAGNOSTICS',
+      '// ============================================================================',
+      ...(diag.log_level ? [`//\n// log_level: ${diag.log_level}`] : []),
+    ];
+
+    if (includeLines.length > 0) {
+      lines.push('', ...includeLines);
+    }
+
+    if (setupLines.length > 0) {
+      lines.push(
+        '',
+        `static void setupDiagnostics() {\n${setupLines.join('\n')}\n}`,
+      );
+    }
+
+    if (loopLines.length > 0) {
+      lines.push(
+        '',
+        `static void runDiagnostics() {\n${loopLines.join('\n')}\n}`,
+      );
+    }
+
+    return lines.join('\n');
+  }
+
+  // =========================================================================
+  // TELEMETRY — per-channel MQTT publishing with individual intervals
+  // =========================================================================
+
+  private generateTelemetry(): string {
+    const tel = this.project.system.telemetry;
+    if (!tel) return '';
+
+    const mqtt = this.mqttResource();
+    if (!mqtt) {
+      // Parser should have caught this, but guard defensively.
+      return '// telemetry: declared but no MQTT bus found';
+    }
+
+    const client = this.mqttClientVar(mqtt);
+
+    const channelBlocks: string[] = [];
+    for (const ch of tel.channels) {
+      const ivRaw = ch.interval_ms ?? tel.interval_ms!;
+      const ivExpr = typeof ivRaw === 'number'
+        ? `${ivRaw}UL`
+        : `(unsigned long)systemParameters.${this.sanitize(String(ivRaw))}`;
+
+      const field = `systemSensors.${this.sanitize(ch.sensor)}`;
+      const topicPart = ch.topic
+        ? `"${ch.topic}"`
+        : `"%s/${this.topicSegment(ch.sensor)}", _mqttPrefix`;
+
+      const publishCall = ch.topic
+        ? `snprintf(_t, sizeof(_t), ${topicPart});`
+        : `snprintf(_t, sizeof(_t), "${this.topicSegment(ch.sensor)}", _mqttPrefix);`;
+
+      channelBlocks.push(
+        `  // ${ch.sensor}${typeof ivRaw === 'number' ? ` — every ${ivRaw}ms` : ` — every \${${ivRaw}}ms`}`,
+        '  {',
+        '    static unsigned long _due = 0;',
+        `    const unsigned long _iv = ${ivExpr};`,
+        `    if (${this.backend.nowExpr()} - _due >= _iv) {`,
+        '      _due += _iv;',
+        `      if (${this.backend.nowExpr()} - _due >= _iv) _due = ${this.backend.nowExpr()};`,
+        ch.topic
+          ? `      snprintf(_t, sizeof(_t), "${ch.topic}");`
+          : `      snprintf(_t, sizeof(_t), "%s/${this.topicSegment(ch.sensor)}", _mqttPrefix);`,
+        `      snprintf(_v, sizeof(_v), "%.4g", (double)${field});`,
+        `      ${client}.publish(_t, _v);`,
+        '    }',
+        '  }',
+      );
+    }
+
+    const body = [
+      `  if (!${client}.connected()) return;`,
+      '  char _t[128];',
+      '  char _v[32];',
+      '',
+      ...channelBlocks,
+    ].join('\n');
+
+    return `// ============================================================================
+// TELEMETRY
+// ============================================================================
+//
+// Per-channel MQTT publishing. Each sensor has its own deadline so a fast
+// reading and a slow diagnostic can coexist without either blocking the other.
+
+static void runTelemetry() {
+${body}
+}`;
+  }
+
+  // =========================================================================
   // SETUP
   // =========================================================================
 
@@ -1095,10 +1265,12 @@ ${this.hasConsole && this.isVerbose ? `
       ? '\n  // Restore persisted parameters from NVS.\n  loadParameters();\n'
       : '';
 
+    const diagSetup = this.project.system.diagnostics ? '\n  setupDiagnostics();\n' : '';
+
     const setupBody = `  // Buses and peripherals declared as resources. Nothing else is opened: a
   // peripheral the model did not declare has no business appearing here.
   setupInterfaces();
-${loadCall}
+${diagSetup}${loadCall}
   // Wire up the context handed to every action
   systemContext.parameters = &systemParameters;
   systemContext.sensors = &systemSensors;
@@ -1687,7 +1859,10 @@ ${reads.join('\n')}
     );
 
     const hasSubscriptions = parameters.length > 0 || mqttEvents.length > 0;
-    const hasPublications  = sensors.length > 0 || this.hasMachine;
+    // When telemetry: is declared, sensor publishing moves to runTelemetry(),
+    // so publishMqtt() only needs to exist for machine-state publishing.
+    const telemetryDeclared = !!this.project.system.telemetry;
+    const hasPublications  = (!telemetryDeclared && sensors.length > 0) || this.hasMachine;
 
     if (!hasSubscriptions && !hasPublications) return '';
 
@@ -1771,7 +1946,8 @@ ${reads.join('\n')}
     // ── publishMqtt ────────────────────────────────────────────────────────
 
     const publishLines: string[] = [];
-    if (sensors.length > 0) {
+    // Sensors move to runTelemetry() when telemetry: is declared.
+    if (!telemetryDeclared && sensors.length > 0) {
       publishLines.push('  // Sensor readings.');
       for (const s of sensors) {
         const seg   = this.topicSegment(s.name);
@@ -1789,10 +1965,11 @@ ${reads.join('\n')}
       publishLines.push(`  ${client}.publish(_t, fsm.getCurrentName());`);
     }
 
+    const effectiveSensors = telemetryDeclared ? [] : sensors;
     const publishBody = [
       `  if (!${client}.connected()) return;`,
       '  char _t[128];',
-      ...(sensors.length > 0 ? ['  char _v[32];'] : []),
+      ...(effectiveSensors.length > 0 ? ['  char _v[32];'] : []),
       '',
       ...publishLines,
     ].join('\n');
@@ -2141,6 +2318,11 @@ ${blocks.join('\n\n')}`;
   private generateLoopFunction(): string {
     const body: string[] = [];
 
+    // Diagnostics first: watchdog reset must fire every loop without fail.
+    if (this.project.system.diagnostics) {
+      body.push('  runDiagnostics();');
+    }
+
     // MQTT reconnect + message pump (must come before everything that may
     // dispatch events, so an incoming MQTT message can be acted on this tick).
     const mqttRes = this.mqttResource();
@@ -2149,7 +2331,10 @@ ${blocks.join('\n\n')}`;
       const sensors = (this.project.system.components || []).filter(
         c => String(c.class) === 'sensor'
       );
-      const hasPublications = sensors.length > 0 || this.hasMachine;
+      const telemetryDeclared = !!this.project.system.telemetry;
+      // When telemetry: is declared, sensors are published by runTelemetry() at
+      // per-channel intervals; publishMqtt() is only needed for machine state.
+      const hasPublications = (!telemetryDeclared && sensors.length > 0) || this.hasMachine;
       body.push(
         `  // Maintain MQTT connection and pump incoming messages.`,
         `  {`,
@@ -2172,6 +2357,9 @@ ${blocks.join('\n\n')}`;
           `    }`,
           `  }`,
         );
+      }
+      if (telemetryDeclared) {
+        body.push(`  runTelemetry();`);
       }
     }
 
