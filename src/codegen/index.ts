@@ -140,6 +140,8 @@ export class Codegen {
   private transitionsBySource: Map<number, number[]> = new Map();
   /** state index → timed ("after") transitions leaving it, in model order */
   private timedBySource: Map<number, number[]> = new Map();
+  /** state index → periodic ("every") transitions, in model order */
+  private periodicBySource: Map<number, number[]> = new Map();
 
   private readonly backend: PlatformBackend;
   /** resource name → what its interface contributes to the sketch */
@@ -179,6 +181,8 @@ export class Codegen {
       this.generateTimeouts(),
       this.generateTasks(),
       this.generateCommands(),
+      this.generateMqttWiring(),
+      this.generateStorageWiring(),
       this.generateReadSensors(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
@@ -275,6 +279,8 @@ ${this.backend.entryPointDeclarations()}${this.declInterfaceGlobals()}`,
       this.generateTimeouts(),
       this.generateTasks(),
       this.generateCommands(),
+      this.generateMqttWiring(),
+      this.generateStorageWiring(),
       this.generateReadSensors(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
@@ -325,6 +331,7 @@ ${this.generateActionImplementations()}
     this.actionNames = new Set();
     this.transitionsBySource = new Map();
     this.timedBySource = new Map();
+    this.periodicBySource = new Map();
     this.emissions = new Map();
     this.libraries = new Map();
   }
@@ -764,16 +771,24 @@ SystemContext systemContext;`;
   }
 
   private declContextStruct(): string {
+    const hasCommands = !!this.project.system.commands;
+    const cmdMacro = hasCommands
+      ? '\n/** Maximum tokens in a command line (command + arguments). */\n#define PULSE_CMD_MAX_ARGS 8\n'
+      : '';
+    const cmdFields = hasCommands
+      ? `\n  int    argc;                         // Token count (0 outside a command handler)\n  char*  argv[PULSE_CMD_MAX_ARGS];     // argv[0] = command name, argv[1..] = arguments`
+      : '';
+
     return `// ============================================================================
 // SYSTEM CONTEXT (see FUNCTION_CONTRACT.md)
 // ============================================================================
-
+${cmdMacro}
 struct SystemContext {
   int currentState;                    // Current state index (compare with S_*)
   int previousState;                   // Previous state index (-1 before first transition)
   int32_t eventData;                   // Payload of the event being dispatched
   const SystemParameters* parameters;  // Read-only system parameters
-  const SystemSensors* sensors;        // Current sensor readings
+  const SystemSensors* sensors;        // Current sensor readings${cmdFields}
 };`;
   }
 
@@ -948,7 +963,7 @@ ${handlers.join('\n\n')}`;
 
         const t = transitions[idx];
         const guard = this.guards.get(idx);
-        const target = this.states[this.resolveEntry(this.resolveRef(t.target, 'target'))];
+        const target = this.states[this.resolveEntry(this.resolveRef(t.target!, 'target'))];
         const calls = (t.actions || [])
           .map(a => `        action_${this.sanitize(a.name)}(&systemContext);`)
           .join('\n');
@@ -1037,10 +1052,12 @@ ${cases.join('\n')}
         const timed = this.timedBySource.get(flat.index)?.length
           ? this.timerNames(flat)
           : null;
+        const hasPeriodic = (this.periodicBySource.get(flat.index)?.length ?? 0) > 0;
+        const hasUpdate = timed || hasPeriodic;
 
         return `  ${flat.symbol} = fsm.addState(
       "${flat.path}",
-      ${timed ? `${timed.tick},   // update - checks the "after" timers` : 'nullptr,   // update'}
+      ${hasUpdate ? `${this.timerNames(flat).tick},   // update - "after" timers and "every" periodics` : 'nullptr,   // update'}
       ${timed ? `${timed.mark},  // entry - starts the "after" clock` : 'nullptr,   // entry'}
       nullptr,   // exit
       0,         // timeoutMs - unused; see generateTimeouts()
@@ -1074,10 +1091,14 @@ ${this.hasConsole && this.isVerbose ? `
   ${this.backend.printlnExpr(stream, 'fsm.getCurrentName()')};
 ` : ''}`;
 
+    const loadCall = this.persistedParameters().length > 0
+      ? '\n  // Restore persisted parameters from NVS.\n  loadParameters();\n'
+      : '';
+
     const setupBody = `  // Buses and peripherals declared as resources. Nothing else is opened: a
   // peripheral the model did not declare has no business appearing here.
   setupInterfaces();
-
+${loadCall}
   // Wire up the context handed to every action
   systemContext.parameters = &systemParameters;
   systemContext.sensors = &systemSensors;
@@ -1223,7 +1244,7 @@ ${blocks.join('\n\n')}`;
         : '';
       const reply = command.log ? this.logLines(command.log, '    ') : '';
 
-      return `  if (strcmp(line, ${JSON.stringify(command.match)}) == 0) {${
+      return `  if (strcmp(cmd, ${JSON.stringify(command.match)}) == 0) {${
         command.description ? `\n    // ${command.description}` : ''
       }
 ${[calls, raise, reply].filter(Boolean).join('\n')}
@@ -1233,7 +1254,7 @@ ${[calls, raise, reply].filter(Boolean).join('\n')}
 
     const unknown = set.reportUnknown === false ? '' : `
   ${this.backend.printExpr(stream, '"Unknown command: "')};
-  ${this.backend.printlnExpr(stream, 'line')};`;
+  ${this.backend.printlnExpr(stream, 'cmd')};`;
 
     return `// ============================================================================
 // COMMANDS
@@ -1254,7 +1275,7 @@ static char commandLine[COMMAND_BUFFER];
 static uint8_t commandLength = 0;
 static bool commandOverflow = false;
 
-static void dispatchCommand(const char* line) {
+static void dispatchCommand(const char* cmd) {
 ${cases.join('\n')}${unknown}
 }
 
@@ -1271,11 +1292,21 @@ static void pollCommands() {
     if (next == '\\n' || next == '\\r') {
       if (commandOverflow) {
         ${this.backend.printlnExpr(stream, '"Command too long; ignored."')};
-several_reset
+        commandLength = 0;
+        commandOverflow = false;
       } else if (commandLength > 0) {
         commandLine[commandLength] = '\\0';
-        dispatchCommand(commandLine);
-several_reset
+        systemContext.argc = 0;
+        char* tok = strtok(commandLine, " \\t");
+        while (tok && systemContext.argc < PULSE_CMD_MAX_ARGS) {
+          systemContext.argv[systemContext.argc++] = tok;
+          tok = strtok(nullptr, " \\t");
+        }
+        if (systemContext.argc > 0) {
+          dispatchCommand(systemContext.argv[0]);
+        }
+        commandLength = 0;
+        commandOverflow = false;
       }
       continue;
     }
@@ -1287,7 +1318,7 @@ several_reset
     }
     commandLine[commandLength++] = (char)next;
   }
-}`.replace(/several_reset/g, '        commandLength = 0;\n        commandOverflow = false;');
+}`;
   }
 
   /**
@@ -1486,6 +1517,88 @@ several_reset
   }
 
   // =========================================================================
+  // STORAGE WIRING (persist: true parameters)
+  // =========================================================================
+
+  /** Parameters the model has marked persist:true. */
+  private persistedParameters() {
+    return (this.project.system.parameters || []).filter(p => p.persist === true);
+  }
+
+  /**
+   * Generate loadParameters() / saveParameters() using the Arduino Preferences
+   * library (ESP32-native, wraps NVS).  On non-ESP32 targets the functions are
+   * still emitted but wrapped in #ifdef ARDUINO_ARCH_ESP32, so the sketch
+   * compiles everywhere while the persistence calls are simply no-ops on AVR
+   * or RP2040 boards — the user can swap in EEPROM.h calls there.
+   *
+   * NVS key names are limited to 15 characters; keys are truncated with a
+   * comment so the user can see the mapping.
+   */
+  private generateStorageWiring(): string {
+    const persisted = this.persistedParameters();
+    if (persisted.length === 0) return '';
+
+    const ns = this.topicSegment(this.project.name).slice(0, 15);  // NVS namespace max 15 chars
+
+    const prefsGet = (p: typeof persisted[0]): string => {
+      const field = `systemParameters.${this.sanitize(p.name)}`;
+      const key   = this.sanitize(p.name).slice(0, 15);
+      const dflt  = this.cLiteral(p);
+      switch (p.type) {
+        case 'float':  return `  ${field} = _prefs.getFloat("${key}", ${dflt});`;
+        case 'bool':   return `  ${field} = _prefs.getBool("${key}", ${dflt});`;
+        default:       return `  ${field} = _prefs.getInt("${key}", ${dflt});`;
+      }
+    };
+
+    const prefsPut = (p: typeof persisted[0]): string => {
+      const field = `systemParameters.${this.sanitize(p.name)}`;
+      const key   = this.sanitize(p.name).slice(0, 15);
+      switch (p.type) {
+        case 'float':  return `  _prefs.putFloat("${key}", ${field});`;
+        case 'bool':   return `  _prefs.putBool("${key}", ${field});`;
+        default:       return `  _prefs.putInt("${key}", ${field});`;
+      }
+    };
+
+    const loadBody = persisted.map(prefsGet).join('\n');
+    const saveBody = persisted.map(prefsPut).join('\n');
+
+    return `// ============================================================================
+// STORAGE WIRING (persist: true parameters)
+// ============================================================================
+//
+// Parameters marked persist:true are loaded from NVS at boot and saved
+// whenever they change. Call saveParameters() after any write to these fields
+// (the MQTT setpoint handler does this automatically when both are present).
+//
+// Requires the Preferences library — included with the ESP32 Arduino core.
+// Non-ESP32 targets compile but skip NVS calls; replace with EEPROM.h if needed.
+
+#ifdef ARDUINO_ARCH_ESP32
+#include <Preferences.h>
+static Preferences _prefs;
+#endif
+
+static void loadParameters() {
+#ifdef ARDUINO_ARCH_ESP32
+  _prefs.begin("${ns}", true);  // read-only
+${loadBody}
+  _prefs.end();
+#endif
+}
+
+static void saveParameters() {
+#ifdef ARDUINO_ARCH_ESP32
+  _prefs.begin("${ns}", false);  // read-write
+${saveBody}
+  _prefs.end();
+#endif
+}`;
+  }
+
+  // =========================================================================
   // SENSOR READS
   // =========================================================================
 
@@ -1519,6 +1632,209 @@ several_reset
 static void readSensors() {
 ${reads.join('\n')}
 }`;
+  }
+
+  // =========================================================================
+  // MQTT WIRING
+  // =========================================================================
+
+  /** Return the declared mqtt resource, or undefined. */
+  private mqttResource(): Resource | undefined {
+    return (this.project.system.resources || []).find(r => String(r.interface) === 'mqtt');
+  }
+
+  /**
+   * Sanitize a name for use as an MQTT topic segment.
+   * Mirrors the TopicEmitter.segment() logic: keep alphanumerics and ._-,
+   * replace everything else with underscore.
+   */
+  private topicSegment(name: string): string {
+    return name.trim().replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^_+|_+$/g, '');
+  }
+
+  /**
+   * Derive the PubSubClient variable name from the mqtt resource name.
+   * Mirrors the lower() helper in interfaces.ts:
+   *   "mqtt"      → "mqtt"
+   *   "broker"    → "broker"
+   *   "mqtt_bus"  → "mqttBus"
+   */
+  private mqttClientVar(resource: Resource): string {
+    const upper = this.sanitizeUpper(resource.name);
+    return upper.toLowerCase().replace(/_([a-z])/g, (_: string, c: string) => c.toUpperCase());
+  }
+
+  /**
+   * Generate the MQTT subscription/publication wiring:
+   *   - onMqttMessage()  — callback updating parameters or raising events
+   *   - connectMqtt()    — connect once + subscribe
+   *   - publishMqtt()    — publish sensor readings and current state
+   *
+   * Emitted only when an mqtt resource is declared AND there is something to
+   * subscribe to or publish (parameters, MQTT-sourced events, or sensors).
+   * The loop() generator injects the reconnect/loop/publish calls.
+   */
+  private generateMqttWiring(): string {
+    const mqtt = this.mqttResource();
+    if (!mqtt) return '';
+
+    const parameters  = this.project.system.parameters || [];
+    const mqttEvents  = (this.project.system.events || []).filter(
+      e => String(e.source) === 'mqtt'
+    );
+    const sensors = (this.project.system.components || []).filter(
+      c => String(c.class) === 'sensor'
+    );
+
+    const hasSubscriptions = parameters.length > 0 || mqttEvents.length > 0;
+    const hasPublications  = sensors.length > 0 || this.hasMachine;
+
+    if (!hasSubscriptions && !hasPublications) return '';
+
+    const client = this.mqttClientVar(mqtt);
+    const binding = mqtt.binding || {};
+
+    // The topic namespace — the project name by default, overridable in the model.
+    const ns = this.topicSegment(
+      typeof binding.prefix === 'string' ? String(binding.prefix) : this.project.name
+    );
+
+    // ── onMqttMessage ──────────────────────────────────────────────────────
+
+    const hasPersistAndMqtt = parameters.some(p => p.persist) && hasSubscriptions;
+
+    const setpointCases = parameters.map(p => {
+      const seg = this.topicSegment(p.name);
+      const field = `systemParameters.${this.sanitize(p.name)}`;
+      let conv: string;
+      switch (p.type) {
+        case 'float':  conv = `${field} = atof(buf);`;                                 break;
+        case 'bool':   conv = `${field} = buf[0] == '1' || strcmp(buf, "true") == 0;`; break;
+        default:       conv = `${field} = (int)atol(buf);`;                             break;
+      }
+      // If any parameter is persisted, save after every setpoint update.
+      const save = hasPersistAndMqtt ? ' saveParameters();' : '';
+      return `  if (strcmp(suffix, "/setpoint/${seg}") == 0) { ${conv}${save} return; }`;
+    });
+
+    const eventCases = mqttEvents.map(e => {
+      const seg   = this.topicSegment(e.name);
+      const evSym = `EVENT_${this.sanitizeUpper(e.name)}`;
+      const dispatch = this.hasMachine
+        ? `fsm.sendEvent(${evSym})`
+        : `/* no machine — ${e.name} cannot be dispatched */`;
+      return `  if (strcmp(suffix, "/event/${seg}") == 0) { ${dispatch}; return; }`;
+    });
+
+    const callbackBody = [
+      '  char buf[128];',
+      '  if (length >= sizeof(buf)) length = sizeof(buf) - 1;',
+      '  memcpy(buf, payload, length);',
+      '  buf[length] = \'\\0\';',
+      '',
+      '  const size_t prefixLen = strlen(_mqttPrefix);',
+      '  if (strncmp(topic, _mqttPrefix, prefixLen) != 0) return;',
+      '  const char* suffix = topic + prefixLen;',
+      '',
+      ...(setpointCases.length > 0 ? ['  // Setpoints → update parameters.', ...setpointCases, ''] : []),
+      ...(eventCases.length > 0    ? ['  // Events → dispatch to state machine.', ...eventCases] : []),
+    ].join('\n');
+
+    // ── connectMqtt ────────────────────────────────────────────────────────
+
+    const subscribeLines = [
+      ...parameters.map(p => {
+        const seg = this.topicSegment(p.name);
+        return `  snprintf(_t, sizeof(_t), "%s/setpoint/${seg}", _mqttPrefix);\n  ${client}.subscribe(_t);`;
+      }),
+      ...mqttEvents.map(e => {
+        const seg = this.topicSegment(e.name);
+        return `  snprintf(_t, sizeof(_t), "%s/event/${seg}", _mqttPrefix);\n  ${client}.subscribe(_t);`;
+      }),
+    ];
+
+    // client_id binding overrides MQTT_DEVICE_ID for the broker connection.
+    const clientIdExpr = typeof binding.client_id === 'string'
+      ? this.sanitizeUpper(mqtt.name) + '_CLIENT_ID'
+      : 'MQTT_DEVICE_ID';
+
+    const connectBody = [
+      `  if (${client}.connected()) return;`,
+      `  snprintf(_mqttPrefix, sizeof(_mqttPrefix), "${ns}/" MQTT_DEVICE_ID);`,
+      `  if (!${client}.connect(${clientIdExpr})) return;`,
+      '',
+      `  ${client}.setCallback(onMqttMessage);`,
+      '',
+      ...(subscribeLines.length > 0 ? ['  char _t[128];', ...subscribeLines] : []),
+    ].join('\n');
+
+    // ── publishMqtt ────────────────────────────────────────────────────────
+
+    const publishLines: string[] = [];
+    if (sensors.length > 0) {
+      publishLines.push('  // Sensor readings.');
+      for (const s of sensors) {
+        const seg   = this.topicSegment(s.name);
+        const field = `systemSensors.${this.sanitize(s.name)}`;
+        publishLines.push(
+          `  snprintf(_t, sizeof(_t), "%s/${seg}", _mqttPrefix);`,
+          `  snprintf(_v, sizeof(_v), "%.4g", ${field});`,
+          `  ${client}.publish(_t, _v);`,
+        );
+      }
+    }
+    if (this.hasMachine) {
+      publishLines.push('  // Current leaf state.');
+      publishLines.push(`  snprintf(_t, sizeof(_t), "%s/state", _mqttPrefix);`);
+      publishLines.push(`  ${client}.publish(_t, fsm.getCurrentName());`);
+    }
+
+    const publishBody = [
+      `  if (!${client}.connected()) return;`,
+      '  char _t[128];',
+      ...(sensors.length > 0 ? ['  char _v[32];'] : []),
+      '',
+      ...publishLines,
+    ].join('\n');
+
+    // ── assemble ───────────────────────────────────────────────────────────
+
+    const callbackSection = hasSubscriptions
+      ? `static void onMqttMessage(char* topic, uint8_t* payload, unsigned int length) {\n${callbackBody}\n}`
+      : '';
+
+    const connectSection  = hasSubscriptions
+      ? `static void connectMqtt() {\n${connectBody}\n}`
+      : `static void connectMqtt() {\n  if (${client}.connected()) return;\n  snprintf(_mqttPrefix, sizeof(_mqttPrefix), "${ns}/" MQTT_DEVICE_ID);\n  ${client}.connect(MQTT_DEVICE_ID);\n}`;
+
+    const publishSection  = hasPublications
+      ? `static void publishMqtt() {\n${publishBody}\n}`
+      : '';
+
+    const parts = [
+      `// ============================================================================
+// MQTT WIRING
+// ============================================================================
+//
+// The device identifies itself via MQTT_DEVICE_ID. Pass as a build flag:
+//   Arduino: -DMQTT_DEVICE_ID=\\"unit-001\\"    (in build_flags or compiler flags)
+//   IDF:     CONFIG_MQTT_DEVICE_ID in sdkconfig
+#include <string.h>   // memcpy, strlen, strcmp, strncmp
+#include <stdio.h>    // snprintf
+#include <stdlib.h>   // atof, atol
+
+#ifndef MQTT_DEVICE_ID
+#define MQTT_DEVICE_ID "device"
+#endif
+
+// Runtime topic prefix: "${ns}/<device_id>"
+static char _mqttPrefix[96];`,
+      callbackSection,
+      connectSection,
+      publishSection,
+    ].filter(Boolean);
+
+    return parts.join('\n\n');
   }
 
   /**
@@ -1607,6 +1923,10 @@ ${reads.join('\n')}
       lines.push('  //   ctx->eventData   (payload of the event being dispatched)');
     }
 
+    if (this.project.system.commands) {
+      lines.push('  //   ctx->argc, ctx->argv[]   (command tokens; argv[0] is the command name)');
+    }
+
     if (lines.length === 0) return '';
 
     return `  //\n  // Available on ctx:\n${lines.join('\n')}\n`;
@@ -1645,76 +1965,134 @@ ${reads.join('\n')}
    * clock, which is exactly the semantics a composite timeout needs.
    */
   private generateTimeouts(): string {
-    if (this.timedBySource.size === 0) return '';
+    if (this.timedBySource.size === 0 && this.periodicBySource.size === 0) return '';
 
     const tsType = this.backend.timestampType();
     const now = this.backend.nowExpr();
     const transitions = this.project.system.transitions;
     const blocks: string[] = [];
 
+    // Collect all states that need an update callback — either timed or periodic.
+    const allSources = new Set([
+      ...this.timedBySource.keys(),
+      ...this.periodicBySource.keys(),
+    ]);
+
     for (const flat of this.states) {
-      const owned = this.timedBySource.get(flat.index);
-      if (!owned || owned.length === 0) continue;
+      if (!allSources.has(flat.index)) continue;
+
+      const timedOwned = this.timedBySource.get(flat.index) || [];
+      const periodicOwned = this.periodicBySource.get(flat.index) || [];
 
       const { since, mark, tick } = this.timerNames(flat);
       const body: string[] = [];
 
+      // "after:" clauses — one-shot timed transitions.
       // Unlike an event handler, an earlier unguarded candidate does NOT
       // shadow the ones after it: they are reached at different elapsed times.
-      // "after 8s, trip" listed before "after 2s, proceed" still lets the
-      // shorter one fire, because at 2s the longer test is simply false.
-      for (const idx of owned) {
-        const t = transitions[idx];
-        const guard = this.guards.get(idx);
-        const target = this.states[this.resolveEntry(this.resolveRef(t.target, 'target'))];
-        const duration = typeof t.after === 'string'
-          ? `(${tsType})systemParameters.${this.sanitize(t.after)}`
-          : `${t.after}UL`;
-        const source = typeof t.after === 'string' ? `${t.after} (parameter)` : `${t.after} ms`;
+      if (timedOwned.length > 0) {
+        const elapsedLine = `  const ${tsType} elapsed = ${now} - ${since};`;
+        const timedBody: string[] = [elapsedLine];
 
-        const calls = (t.actions || [])
-          .map(a => `    action_${this.sanitize(a.name)}(&systemContext);`)
-          .join('\n');
+        for (const idx of timedOwned) {
+          const t = transitions[idx];
+          const guard = this.guards.get(idx);
+          const target = this.states[this.resolveEntry(this.resolveRef(t.target!, 'target'))];
+          const duration = typeof t.after === 'string'
+            ? `(${tsType})systemParameters.${this.sanitize(t.after)}`
+            : `${t.after}UL`;
+          const source = typeof t.after === 'string' ? `${t.after} (parameter)` : `${t.after} ms`;
 
-        const fire = [
-          calls,
-          `    fsm.transitionTo(${target.symbol});`,
-          '    return;',
-        ].filter(Boolean).join('\n');
+          const calls = (t.actions || [])
+            .map(a => `    action_${this.sanitize(a.name)}(&systemContext);`)
+            .join('\n');
 
-        // Guards see the live machine, same as in an event handler.
-        const condition = guard
-          ? `elapsed >= ${duration} && ${guard.fnName}(&systemContext)`
-          : `elapsed >= ${duration}`;
+          const fire = [
+            calls,
+            `    fsm.transitionTo(${target.symbol});`,
+            '    return;',
+          ].filter(Boolean).join('\n');
 
-        body.push(`  // after ${source} -> ${t.target}${guard ? ', if the guard allows' : ''}
+          const condition = guard
+            ? `elapsed >= ${duration} && ${guard.fnName}(&systemContext)`
+            : `elapsed >= ${duration}`;
+
+          timedBody.push(`  // after ${source} -> ${t.target}${guard ? ', if the guard allows' : ''}
   if (${condition}) {
 ${fire}
   }`);
+        }
+        body.push(...timedBody);
       }
 
-      blocks.push(`// Timers for "${flat.path}".
-static ${tsType} ${since} = 0;
+      // "every:" clauses — repeating in-state callbacks.
+      // Uses deadline-advance-by-interval to prevent drift (same as tasks:).
+      if (periodicOwned.length > 0) {
+        for (let i = 0; i < periodicOwned.length; i++) {
+          const idx = periodicOwned[i];
+          const t = transitions[idx];
+          const guard = this.guards.get(idx);
+          const interval = typeof t.every === 'string'
+            ? `(${tsType})systemParameters.${this.sanitize(t.every)}`
+            : `${t.every}UL`;
+          const source = typeof t.every === 'string' ? `${t.every} (parameter)` : `every ${t.every} ms`;
 
-static void ${mark}() {
+          const dueVar = `dueAt_${this.sanitize(flat.path)}_${i}`;
+
+          const calls = (t.actions || [])
+            .map(a => `    action_${this.sanitize(a.name)}(&systemContext);`)
+            .join('\n');
+
+          const guardCheck = guard ? `\n  if (!${guard.fnName}(&systemContext)) { ${dueVar} += _iv_${i}; return; }` : '';
+          const intervalVar = `_iv_${i}`;
+
+          body.push(`  // ${source}
+  {
+    const ${tsType} ${intervalVar} = ${interval};
+    if (${now} - ${dueVar} >= ${intervalVar}) {
+      ${dueVar} += ${intervalVar};
+      if (${now} - ${dueVar} >= ${intervalVar}) ${dueVar} = ${now};${guardCheck}
+${calls}
+    }
+  }`);
+        }
+      }
+
+      // "every:" deadline globals (one per periodic transition; survive state re-entry).
+      const periodicGlobals = periodicOwned.map((_, i) =>
+        `static ${tsType} dueAt_${this.sanitize(flat.path)}_${i} = 0;`
+      ).join('\n');
+
+      const hasTimed = timedOwned.length > 0;
+
+      // Only emit the entry-timestamp global and mark() when "after:" is present.
+      const sinceGlobal = hasTimed ? `static ${tsType} ${since} = 0;\n` : '';
+      const markFn = hasTimed ? `static void ${mark}() {
   ${since} = ${now};
 }
 
-static void ${tick}() {
+` : '';
+
+      blocks.push(`// Update tick for "${flat.path}".
+${sinceGlobal}${periodicGlobals}
+
+${markFn}static void ${tick}() {
   syncContext();
-  const ${tsType} elapsed = ${now} - ${since};
 
 ${body.join('\n\n')}
 }`);
     }
 
     return `// ============================================================================
-// TIMED TRANSITIONS
+// TIMED AND PERIODIC TRANSITIONS
 // ============================================================================
 //
-// Generated from "after:" in the model. Ancestors tick before their active
-// child, so when both a state and its parent time out on the same pass the
-// inner one wins - the same precedence event handling already has.
+// "after:" generates a one-shot timed transition. Ancestors tick before their
+// active child, so when both a state and its parent time out on the same pass
+// the inner one wins - the same precedence event handling already has.
+//
+// "every:" runs actions on a repeating interval while the machine stays in
+// that state. Uses deadline-advance-by-interval to prevent drift.
 //
 // Subtraction on unsigned long is correct across the millis() rollover.
 
@@ -1762,6 +2140,40 @@ ${blocks.join('\n\n')}`;
 
   private generateLoopFunction(): string {
     const body: string[] = [];
+
+    // MQTT reconnect + message pump (must come before everything that may
+    // dispatch events, so an incoming MQTT message can be acted on this tick).
+    const mqttRes = this.mqttResource();
+    if (mqttRes) {
+      const client = this.mqttClientVar(mqttRes);
+      const sensors = (this.project.system.components || []).filter(
+        c => String(c.class) === 'sensor'
+      );
+      const hasPublications = sensors.length > 0 || this.hasMachine;
+      body.push(
+        `  // Maintain MQTT connection and pump incoming messages.`,
+        `  {`,
+        `    static unsigned long _mqttReconnectAt = 0;`,
+        `    if (!${client}.connected() && ${this.backend.nowExpr()} - _mqttReconnectAt >= 5000UL) {`,
+        `      _mqttReconnectAt = ${this.backend.nowExpr()};`,
+        `      connectMqtt();`,
+        `    }`,
+        `    ${client}.loop();`,
+        `  }`,
+      );
+      if (hasPublications) {
+        body.push(
+          `  // Publish sensor readings and state periodically.`,
+          `  {`,
+          `    static unsigned long _mqttPublishAt = 0;`,
+          `    if (${this.backend.nowExpr()} - _mqttPublishAt >= 5000UL) {`,
+          `      _mqttPublishAt = ${this.backend.nowExpr()};`,
+          `      publishMqtt();`,
+          `    }`,
+          `  }`,
+        );
+      }
+    }
 
     // Sensor reads come first: guards and actions in the same pass see fresh values.
     const hasPinSensors = (this.project.system.components || []).some(
@@ -2087,12 +2499,18 @@ ${implementations.join('\n\n')}`;
         sourceIdx = this.resolveRef(t.source, 'source');
       }
 
-      // Validate the target eagerly so errors point at the model, not at C++.
-      this.resolveEntry(this.resolveRef(t.target, 'target'));
+      // Periodic ("every") transitions have no target — they stay in place.
+      // Validate the target only for transitions that actually leave the state.
+      if (t.every === undefined) {
+        this.resolveEntry(this.resolveRef(t.target!, 'target'));
+      }
 
       // Timed transitions never reach an onEvent handler - no event arrives -
       // so they are collected separately and become the state's update tick.
-      const bucket = t.after !== undefined ? this.timedBySource : this.transitionsBySource;
+      // Periodic transitions similarly land in the update tick.
+      const bucket = t.after !== undefined ? this.timedBySource
+                   : t.every !== undefined ? this.periodicBySource
+                   : this.transitionsBySource;
       const list = bucket.get(sourceIdx) || [];
       list.push(idx);
       bucket.set(sourceIdx, list);

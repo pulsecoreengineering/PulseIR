@@ -101,13 +101,34 @@ export function loadBoard(idOrPath: string): BoardDefinition {
     pins[k] = String(v);
   }
 
+  // Optional per-pin capability map.  Each value may be a single tag string or
+  // an array of tag strings; both are normalised to string[].
+  const pinCaps: Record<string, string[]> = {};
+  const rawCaps = obj['pin_caps'];
+  if (rawCaps && typeof rawCaps === 'object' && !Array.isArray(rawCaps)) {
+    for (const [k, v] of Object.entries(rawCaps as Record<string, unknown>)) {
+      if (Array.isArray(v)) {
+        pinCaps[k] = v.map(String);
+      } else if (typeof v === 'string') {
+        pinCaps[k] = [v];
+      }
+    }
+  }
+
+  // Optional list of physical GPIO identifiers that share ADC unit 2.
+  const adc2Pins: string[] = Array.isArray(obj['adc2_pins'])
+    ? (obj['adc2_pins'] as unknown[]).map(String)
+    : [];
+
   return {
     name:        obj['name'] as string,
     mcu:         obj['mcu'] as string,
     frameworks:  obj['frameworks'] as string[],
     description: typeof obj['description'] === 'string' ? obj['description'] : undefined,
     pins,
-    defaults:    obj['defaults'] as Record<string, string | number> | undefined,
+    pinCaps:  Object.keys(pinCaps).length > 0 ? pinCaps : undefined,
+    adc2Pins: adc2Pins.length > 0 ? adc2Pins : undefined,
+    defaults: obj['defaults'] as Record<string, string | number> | undefined,
   };
 }
 
@@ -161,6 +182,128 @@ export function resolveBoard(project: PulseProject, board: BoardDefinition): Pul
       ...(resources  && { resources }),
     },
   };
+}
+
+// Bus fields that carry a physical pin identifier and can therefore violate
+// reserved / input-only constraints.
+const BUS_PIN_FIELDS_LIST = ['sda', 'scl', 'mosi', 'miso', 'sck', 'cs', 'tx', 'rx', 'pin'];
+
+export interface PinViolation {
+  severity: 'error' | 'warning';
+  message: string;
+}
+
+/**
+ * Check that every device pin and bus pin used in the project is compatible
+ * with the board's declared capabilities.
+ *
+ * Called after resolveBoard() so all logical names have already been converted
+ * to their physical GPIO identifiers.
+ *
+ * Returns an array of violations; the caller decides how to report them.
+ * An empty array means no problems were found.
+ */
+export function checkPinCapabilities(
+  project: PulseProject,
+  board: BoardDefinition,
+): PinViolation[] {
+  const violations: PinViolation[] = [];
+  const caps     = board.pinCaps ?? {};
+  const adc2Pins = new Set(board.adc2Pins ?? []);
+
+  const OUTPUT_TYPES = new Set(['digital_output', 'pwm_output']);
+  const INPUT_TYPES  = new Set(['digital_input',  'analog_input']);
+
+  for (const device of project.system.components ?? []) {
+    const pin  = String(device.config?.pin ?? '');
+    if (!pin) continue;
+
+    const tags     = caps[pin] ?? [];
+    const isOutput = OUTPUT_TYPES.has(device.type ?? '');
+
+    if (tags.includes('input_only') && isOutput) {
+      violations.push({
+        severity: 'error',
+        message:
+          `Device "${device.name}" uses ${pin} as an output, but ${pin} is ` +
+          `input-only on ${board.name}. Choose a bidirectional GPIO.`,
+      });
+    }
+
+    if (tags.includes('reserved')) {
+      violations.push({
+        severity: 'error',
+        message:
+          `Device "${device.name}" uses ${pin}, which is reserved ` +
+          `(internal flash/PSRAM) on ${board.name} — do not use this pin.`,
+      });
+    }
+
+    if (tags.includes('strapping') && isOutput) {
+      violations.push({
+        severity: 'warning',
+        message:
+          `Device "${device.name}" uses ${pin}, a strapping pin on ${board.name}. ` +
+          `Driving it LOW at reset may prevent the board from booting.`,
+      });
+    }
+  }
+
+  // Check bus bindings for reserved / input-only pins.
+  for (const resource of project.system.resources ?? []) {
+    if (!resource.binding) continue;
+    for (const field of BUS_PIN_FIELDS_LIST) {
+      const pin = String((resource.binding as Record<string, unknown>)[field] ?? '');
+      if (!pin) continue;
+      const tags = caps[pin] ?? [];
+
+      if (tags.includes('reserved')) {
+        violations.push({
+          severity: 'error',
+          message:
+            `Bus "${resource.name}" uses ${pin} (field: ${field}), which is ` +
+            `reserved on ${board.name} — do not use this pin.`,
+        });
+      }
+      if (tags.includes('input_only')) {
+        // Only output directions (MOSI, TX, SDA when writing) matter; MISO/RX are
+        // inputs from the CPU's perspective.  Flag conservatively for any non-input field.
+        const isOutputDirection = !['miso', 'rx'].includes(field);
+        if (isOutputDirection) {
+          violations.push({
+            severity: 'error',
+            message:
+              `Bus "${resource.name}" uses ${pin} (field: ${field}), which is ` +
+              `input-only on ${board.name}.`,
+          });
+        }
+      }
+    }
+  }
+
+  // ADC2 vs Wi-Fi conflict (ESP32 family).
+  if (adc2Pins.size > 0) {
+    const hasWifi = (project.system.resources ?? []).some(r =>
+      ['mqtt', 'wifi'].includes(String(r.interface).toLowerCase())
+    );
+    if (hasWifi) {
+      for (const device of project.system.components ?? []) {
+        if (device.type !== 'analog_input') continue;
+        const pin = String(device.config?.pin ?? '');
+        if (adc2Pins.has(pin)) {
+          violations.push({
+            severity: 'warning',
+            message:
+              `Device "${device.name}" uses ${pin} (ADC2) on ${board.name}. ` +
+              `ADC2 is unavailable while Wi-Fi is active — use an ADC1 pin instead ` +
+              `(GPIO32–GPIO39 for ESP32).`,
+          });
+        }
+      }
+    }
+  }
+
+  return violations;
 }
 
 /**

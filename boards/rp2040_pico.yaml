@@ -76,6 +76,11 @@ pins:
   A1: GPIO27
   A2: GPIO28
 
+pin_caps:
+  # Internal — not broken out on the header; connected to SMPS and VBUS circuits
+  GPIO23: [internal]   # RT6150 PS pin (SMPS power-save mode)
+  GPIO24: [internal]   # VBUS detect (USB connector, read-only from user perspective)
+
 defaults:
   i2c_frequency: 100000
   spi_frequency: 1000000

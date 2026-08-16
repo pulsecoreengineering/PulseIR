@@ -33,9 +33,10 @@ import { EspIdfBackend } from './codegen/espidf.js';
 import { MicroPythonCodegen } from './codegen/micropython.js';
 import { TopicEmitter } from './emit/topics.js';
 import { LibraryEmitter } from './emit/libraries.js';
+import { DiagramEmitter } from './emit/diagram.js';
 import { CmakeEmitter } from './emit/cmake.js';
 import { Validator } from './analysis/validate.js';
-import { loadBoard, resolveBoard, checkFrameworkCompatibility } from './parser/board-resolver.js';
+import { loadBoard, resolveBoard, checkFrameworkCompatibility, checkPinCapabilities } from './parser/board-resolver.js';
 
 // ---------------------------------------------------------------------------
 // TrackingFileResolver — records every file path that the parser reads so
@@ -84,6 +85,7 @@ Generate options:
   --output <file>      Write a single self-contained sketch
   --topics <file>      Write the MQTT topic manifest (JSON)
   --libraries <file>   Write the library manifest (JSON)
+  --diagram <file>     Write a Mermaid state machine diagram (.md or .mmd)
   --namespace <name>   Topic namespace (defaults to the project name)
   --watch              Rebuild on model file changes
 
@@ -255,6 +257,7 @@ async function cmdGenerate(args: string[]): Promise<void> {
   const outDir        = flag('--outdir');
   const topicsFile    = flag('--topics');
   const librariesFile = flag('--libraries');
+  const diagramFile   = flag('--diagram');
   const namespace     = flag('--namespace');
   const emitCmake     = hasFlag('--cmake');
   const watch         = hasFlag('--watch');
@@ -280,6 +283,21 @@ async function cmdGenerate(args: string[]): Promise<void> {
           const compat = checkFrameworkCompatibility(board, targetName);
           if (compat) console.warn(`⚠️  ${compat}`);
           project = resolveBoard(project, board);
+
+          // Pin capability check — runs after resolution so physical GPIO
+          // identifiers are already in place (logical names like LED_BUILTIN
+          // have been rewritten to GPIO2 etc.).
+          const pinViolations = checkPinCapabilities(project, board);
+          for (const v of pinViolations) {
+            if (v.severity === 'error') {
+              console.error(`❌ [board] ${v.message}`);
+            } else {
+              console.warn(`⚠️  [board] ${v.message}`);
+            }
+          }
+          if (pinViolations.some(v => v.severity === 'error')) {
+            if (!watch) process.exit(1);
+          }
         } catch (err) {
           if (err instanceof Error) {
             console.error(`❌ Board error: ${err.message}`);
@@ -332,6 +350,17 @@ async function cmdGenerate(args: string[]): Promise<void> {
         console.log(`✓ Written to ${lp}`);
       }
 
+      if (diagramFile) {
+        console.log('📊 Generating Mermaid diagram...');
+        const emitter = new DiagramEmitter();
+        const dp = path.resolve(diagramFile);
+        // .md files get a fenced code block; raw .mmd files get the diagram body.
+        const isMd = /\.md$/i.test(dp);
+        const content = isMd ? emitter.toMarkdown(project) : emitter.emit(project);
+        fs.writeFileSync(dp, content);
+        console.log(`✓ Written to ${dp}`);
+      }
+
       const isEspIdf = /^(espidf|idf)$/i.test(targetName.replace(/[-_]/g, ''));
 
       if (outDir) {
@@ -344,7 +373,7 @@ async function cmdGenerate(args: string[]): Promise<void> {
         }
       }
 
-      if (outputFile || !(outDir || topicsFile || librariesFile)) {
+      if (outputFile || !(outDir || topicsFile || librariesFile || diagramFile)) {
         console.log('🔨 Generating C++ code...');
         const codegen = new Codegen(backend!);
         const cppCode = codegen.generate(project);

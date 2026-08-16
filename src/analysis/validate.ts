@@ -92,6 +92,7 @@ export class Validator {
     // Every transition target — normalised to a full path, then resolved to
     // the leaf it actually lands in.
     for (const t of system.transitions) {
+      if (t.target === undefined) continue;
       const fullPath = resolvePath(system.states, t.target);
       if (!fullPath) continue;
       const leaf = resolveEntryLeaf(system.states, fullPath);

@@ -72,6 +72,17 @@ pins:
   A4: GPIO5
   A5: GPIO6
 
+pin_caps:
+  # Strapping pins — sampled at reset to select boot/JTAG/voltage mode (ESP32-S3 TRM §2.4)
+  GPIO0:  [strapping]
+  GPIO3:  [strapping]
+  GPIO45: [strapping]
+  GPIO46: [strapping]
+
+  # USB Serial/JTAG D- / D+ — avoid for general I/O on USB-enabled boards
+  GPIO19: [internal]
+  GPIO20: [internal]
+
 defaults:
   i2c_frequency: 100000
   spi_frequency: 1000000

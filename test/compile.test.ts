@@ -1352,6 +1352,56 @@ test('the vendored runtime still reads PulseHSM_config.h', () => {
   );
 });
 
+test('"every:" periodic transitions run actions without leaving the state', () => {
+  const sketch = generate(path.join(repoRoot, 'test/fixtures/periodic.yaml'));
+
+  // The update callback must be registered for "monitoring".
+  assert(
+    sketch.includes('onUpdate_monitoring') || sketch.includes('tick_monitoring'),
+    'no update callback generated for the state with "every:" transitions'
+  );
+
+  // The deadline globals must exist.
+  assert(
+    sketch.includes('dueAt_monitoring_0') && sketch.includes('dueAt_monitoring_1'),
+    'deadline globals for "every:" transitions are missing'
+  );
+
+  const traced = withActionTrace(sketch);
+
+  const driver = `${DRIVER_PRELUDE}
+int main() {
+  setup();
+  report();
+
+  step(EVENT_START);   // idle -> monitoring
+
+  // 500ms: poll_ms fires once (sample_sensor, log_reading)
+  wait(500);
+  // 1000ms: both intervals fire (poll_ms x2 and 1000ms literal)
+  wait(500);
+
+  step(EVENT_STOP);    // monitoring -> done
+
+  wait(250);           // 250ms literal "after" exits done -> idle
+  return 0;
+}`;
+
+  const output = buildAndRun('periodic', traced, driver);
+
+  // States must not change during the "every" firings: still "monitoring".
+  assertTrace(
+    output,
+    ['idle', 'monitoring', 'monitoring', 'monitoring', 'done', 'idle'],
+    '"every" transitions must not cause state changes'
+  );
+
+  // Actions must have fired (action trace injected by withActionTrace).
+  assert(output.includes('Action: sample_sensor'), '"sample_sensor" action never ran');
+  assert(output.includes('Action: log_reading'),   '"log_reading" action never ran');
+  assert(output.includes('Action: heartbeat'),      '"heartbeat" action never ran');
+});
+
 // ============================================================================
 
 if (failures > 0) {
