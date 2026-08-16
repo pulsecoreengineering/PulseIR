@@ -1569,7 +1569,10 @@ commands:
     yaml:
 `hardware:
   devices:
-    button: { type: digital_input, pin: GPIO0 }`
+    # mode defaults to INPUT when omitted.
+    # Use INPUT_PULLUP for active-low buttons (no external resistor needed).
+    # Use INPUT_PULLDOWN for active-high buttons (ESP32 only).
+    button: { type: digital_input, pin: GPIO0, mode: INPUT_PULLUP }`
   },
   { group: 'Device', label: 'PWM output  (fan, motor, servo)',
     yaml:
