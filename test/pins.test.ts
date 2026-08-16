@@ -14,6 +14,7 @@ import { fileURLToPath } from 'url';
 import { Parser, ParseError } from '../src/parser/index.js';
 import { FileResolver } from '../src/parser/fs-resolver.js';
 import { normalizePin, collectPinClaims, findPinConflicts } from '../src/analysis/pins.js';
+import { loadBoard, resolveBoard, checkPinCapabilities } from '../src/parser/board-resolver.js';
 
 let failures = 0;
 
@@ -249,217 +250,247 @@ test('the shipped examples allocate pins cleanly', () => {
 });
 
 // ============================================================================
-// Board profile checks (ESP32)
+// Board resolver — loadBoard / resolveBoard / checkPinCapabilities
 // ============================================================================
 
-console.log('\n📋 Testing ESP32 board profile checks...\n');
+console.log('\n📋 Testing board-resolver (loadBoard / resolveBoard / checkPinCapabilities)...\n');
 
-// Shared header that declares target: esp32 — must be included in every profile
-// test fixture so the parser loads the ESP32 profile.
-const ESP32_HEAD = `project: {name: test, version: "1.0"}
-target: {board: esp32}
+const repoRoot2 = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+
+// --- loadBoard ---
+
+test('loadBoard: loads esp32_devkit_v4 by id', () => {
+  const board = loadBoard('esp32_devkit_v4');
+  equal(board.name, 'ESP32 DevKit V4', 'name');
+  equal(board.mcu, 'esp32', 'mcu');
+  assert(board.frameworks.includes('arduino'), 'supports arduino');
+  assert(board.pins['LED_BUILTIN'] === 'GPIO2', 'LED_BUILTIN → GPIO2');
+});
+
+test('loadBoard: resolves alias (esp32 → esp32_devkit_v4)', () => {
+  const board = loadBoard('esp32');
+  equal(board.name, 'ESP32 DevKit V4', 'alias resolves');
+});
+
+test('loadBoard: loads rp2040_pico by id', () => {
+  const board = loadBoard('rp2040_pico');
+  equal(board.mcu, 'rp2040', 'mcu');
+  assert(board.pins['LED_BUILTIN'] === 'GPIO25', 'LED_BUILTIN → GPIO25');
+});
+
+test('loadBoard: throws a descriptive error for an unknown board', () => {
+  let msg = '';
+  try { loadBoard('nonexistent_board_xyz'); } catch (e) { msg = (e as Error).message; }
+  assert(msg.includes('nonexistent_board_xyz'), 'names the missing board');
+  assert(msg.includes('Available boards'), 'lists what is available');
+});
+
+test('loadBoard: accepts an absolute path to a custom board file', () => {
+  const p = path.join(repoRoot2, 'boards', 'arduino_uno.yaml');
+  const board = loadBoard(p);
+  equal(board.mcu, 'atmega328p', 'loaded by path');
+});
+
+// --- resolveBoard (logical → physical pin rewrite) ---
+
+const BASE_YAML = `project: {name: t, version: "1.0"}
 events: {GO: {source: external}}
 machine: {states: {idle: {}}, transitions: []}
 `;
 
-function expectProfileError(yaml: string, needle: string, label: string): void {
-  let raised: Error | undefined;
-  try {
-    parse(yaml);
-  } catch (error) {
-    raised = error as Error;
-  }
-  if (!raised) throw new Error(`${label}: expected a profile error, but parsing succeeded`);
-  if (!(raised instanceof ParseError)) throw new Error(`${label}: unexpected error type: ${raised.name}`);
-  if (!raised.message.includes(needle)) {
-    throw new Error(`${label}: expected "${needle}" in message, got:\n${raised.message}`);
-  }
-}
-
-function expectProfileWarning(yaml: string, needle: string, label: string): void {
-  const parser = new Parser();
-  parser.parse(yaml);
-  const found = parser.warnings.some(w => w.includes(needle));
-  if (!found) {
-    throw new Error(`${label}: expected warning containing "${needle}", got:\n${parser.warnings.join('\n')}`);
-  }
-}
-
-function expectNoProfileDiagnostic(yaml: string, label: string): void {
-  let raised: Error | undefined;
-  try {
-    const parser = new Parser();
-    const project = parser.parse(yaml);
-    // Confirm no profile-related warnings either (collision warnings share the
-    // parse path, so any warning from the profile check would show up here).
-    const profileWarnings = parser.warnings.filter(
-      w => w.includes('input-only') || w.includes('SPI flash') || w.includes('ADC2'),
-    );
-    if (profileWarnings.length > 0) {
-      throw new Error(`unexpected profile warnings: ${profileWarnings.join('; ')}`);
-    }
-    void project;
-  } catch (error) {
-    raised = error as Error;
-  }
-  if (raised) throw new Error(`${label}: expected no diagnostic, got: ${raised.message}`);
-}
-
-// --- Flash-reserved (GPIO6–11) ---
-
-test('flash-reserved pin on a device is rejected', () => {
-  // GPIO7 is SD0 (SPI flash data line) on ESP32 — cannot be used by the app.
-  expectProfileError(`${ESP32_HEAD}
-hardware:
-  devices:
-    led: {type: digital_output, pin: GPIO7}
-`, 'integrated SPI flash', 'GPIO7 flash pin on device');
-});
-
-test('flash-reserved pin in a bus binding is rejected', () => {
-  expectProfileError(`${ESP32_HEAD}
+test('resolveBoard: translates logical pin names to physical GPIO identifiers', () => {
+  const project = parse(`${BASE_YAML}
 hardware:
   buses:
-    serial: {interface: uart, rx: GPIO16, tx: GPIO6}
-`, 'integrated SPI flash', 'GPIO6 flash pin on bus tx');
+    sensor_bus: {interface: i2c, sda: I2C_SDA, scl: I2C_SCL}
+  devices:
+    led: {type: digital_output, pin: LED_BUILTIN}
+`);
+  const board   = loadBoard('esp32_devkit_v4');
+  const resolved = resolveBoard(project, board);
+
+  const bus = resolved.system.resources?.find(r => r.name === 'sensor_bus');
+  equal((bus?.binding as Record<string, unknown>)?.sda, 'GPIO21', 'I2C_SDA → GPIO21');
+  equal((bus?.binding as Record<string, unknown>)?.scl, 'GPIO22', 'I2C_SCL → GPIO22');
+
+  const led = resolved.system.components?.find(c => c.name === 'led');
+  equal((led?.config as Record<string, unknown>)?.pin, 'GPIO2', 'LED_BUILTIN → GPIO2');
 });
 
-// --- Input-only (GPIO34, 35, 36, 39) ---
+test('resolveBoard: passes through physical GPIO names unchanged', () => {
+  // Models that already use GPIO25 don't need a board file and should not change.
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    pump: {type: digital_output, pin: GPIO25}
+`);
+  const board   = loadBoard('esp32_devkit_v4');
+  const resolved = resolveBoard(project, board);
+  const pump = resolved.system.components?.find(c => c.name === 'pump');
+  equal((pump?.config as Record<string, unknown>)?.pin, 'GPIO25', 'GPIO25 passes through');
+});
 
-test('output device on an input-only pin is rejected', () => {
-  // GPIO34 has no output driver on ESP32 — wiring a digital_output to it is wrong.
-  expectProfileError(`${ESP32_HEAD}
+test('resolveBoard: does not modify the original project', () => {
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    led: {type: digital_output, pin: LED_BUILTIN}
+`);
+  const board   = loadBoard('esp32_devkit_v4');
+  resolveBoard(project, board);
+  const led = project.system.components?.find(c => c.name === 'led');
+  equal((led?.config as Record<string, unknown>)?.pin, 'LED_BUILTIN', 'original unchanged');
+});
+
+// --- checkPinCapabilities ---
+
+test('checkPinCapabilities: output device on an input-only pin is an error', () => {
+  // GPIO34 is input_only on ESP32 — no output driver exists (ESP32 TRM §4.2).
+  const project = parse(`${BASE_YAML}
 hardware:
   devices:
     status_led: {type: digital_output, pin: GPIO34}
-`, 'input-only', 'digital_output on GPIO34');
+`);
+  const board      = loadBoard('esp32_devkit_v4');
+  const violations = checkPinCapabilities(project, board);
+  assert(
+    violations.some(v => v.severity === 'error' && v.message.includes('input-only')),
+    `expected input-only error, got ${JSON.stringify(violations)}`,
+  );
 });
 
-test('pwm_output on an input-only pin is rejected', () => {
-  expectProfileError(`${ESP32_HEAD}
+test('checkPinCapabilities: input device on an input-only pin is fine', () => {
+  // GPIO34 and GPIO35 are intentionally used as inputs in motor_controller.yaml.
+  const project = parse(`${BASE_YAML}
 hardware:
   devices:
-    motor: {type: pwm_output, pin: GPIO35, channel: 0, frequency: 1000, resolution: 8}
-`, 'input-only', 'pwm_output on GPIO35');
-});
-
-test('input device on an input-only pin is accepted', () => {
-  // GPIO34 and GPIO35 are intentionally input-only — use them for ADC or digital input.
-  // motor_controller.yaml already uses GPIO34 for analog_input and GPIO35 for digital_input.
-  expectNoProfileDiagnostic(`${ESP32_HEAD}
-hardware:
-  devices:
-    current_sense: {type: analog_input, pin: GPIO34, unit: A}
+    current_sense: {type: analog_input, pin: GPIO34}
     estop:         {type: digital_input, pin: GPIO35}
-`, 'input devices on input-only pins');
+`);
+  const board      = loadBoard('esp32_devkit_v4');
+  const violations = checkPinCapabilities(project, board);
+  const inputOnly  = violations.filter(v => v.message.includes('input-only'));
+  equal(inputOnly.length, 0, 'no input-only errors for input devices');
 });
 
-test('I2C SDA on an input-only pin is rejected', () => {
-  // SDA must drive the bus (open-drain output) — input-only GPIO cannot do this.
-  expectProfileError(`${ESP32_HEAD}
+test('checkPinCapabilities: reserved flash pin on a device is an error', () => {
+  // GPIO7 is wired to the integrated SPI flash controller.
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO7}
+`);
+  const board      = loadBoard('esp32_devkit_v4');
+  const violations = checkPinCapabilities(project, board);
+  assert(
+    violations.some(v => v.severity === 'error' && v.message.includes('reserved')),
+    `expected reserved error, got ${JSON.stringify(violations)}`,
+  );
+});
+
+test('checkPinCapabilities: reserved pin in a bus binding is an error', () => {
+  const project = parse(`${BASE_YAML}
 hardware:
   buses:
-    sensor_bus: {interface: i2c, sda: GPIO39, scl: GPIO22}
-`, 'input-only', 'I2C sda on GPIO39');
+    serial: {interface: uart, rx: GPIO16, tx: GPIO6}
+`);
+  const board      = loadBoard('esp32_devkit_v4');
+  const violations = checkPinCapabilities(project, board);
+  assert(
+    violations.some(v => v.severity === 'error' && v.message.includes('reserved')),
+    `expected reserved error on bus, got ${JSON.stringify(violations)}`,
+  );
 });
 
-test('SPI MISO on an input-only pin is accepted', () => {
-  // MISO is master-in/slave-out — the ESP32 only receives on this pin.
-  expectNoProfileDiagnostic(`${ESP32_HEAD}
+test('checkPinCapabilities: strapping pin used as output is a warning', () => {
+  // GPIO0 is a boot-mode strapping pin; driving it LOW at reset blocks startup.
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    relay: {type: digital_output, pin: GPIO0}
+`);
+  const board      = loadBoard('esp32_devkit_v4');
+  const violations = checkPinCapabilities(project, board);
+  assert(
+    violations.some(v => v.severity === 'warning' && v.message.includes('strapping')),
+    `expected strapping warning, got ${JSON.stringify(violations)}`,
+  );
+});
+
+test('checkPinCapabilities: SPI MISO on input-only pin is NOT an error', () => {
+  // MISO is master-in/slave-out — the CPU only receives on this pin.
+  const project = parse(`${BASE_YAML}
 hardware:
   buses:
     spi_bus: {interface: spi, sck: GPIO18, miso: GPIO36, mosi: GPIO23}
-`, 'SPI miso on input-only GPIO36');
+`);
+  const board      = loadBoard('esp32_devkit_v4');
+  const violations = checkPinCapabilities(project, board);
+  const inputOnly  = violations.filter(v => v.message.includes('input-only'));
+  equal(inputOnly.length, 0, 'MISO on input-only pin not flagged');
 });
 
-test('UART TX on an input-only pin is rejected', () => {
-  expectProfileError(`${ESP32_HEAD}
-hardware:
-  buses:
-    gps: {interface: uart, rx: GPIO16, tx: GPIO39}
-`, 'input-only', 'UART tx on GPIO39');
-});
-
-test('OneWire bus on an input-only pin is rejected', () => {
-  // OneWire is bidirectional — needs output capability.
-  expectProfileError(`${ESP32_HEAD}
-hardware:
-  buses:
-    one_wire: {interface: onewire, pin: GPIO36}
-`, 'input-only', 'onewire bus on GPIO36');
-});
-
-// --- ADC2 + Wi-Fi ---
-
-test('analog_input on ADC2 pin with Wi-Fi declared is a warning', () => {
-  // GPIO25 is ADC2_CH8 — ADC2 is borrowed by the Wi-Fi driver at runtime.
-  expectProfileWarning(`${ESP32_HEAD}
+test('checkPinCapabilities: analog_input on ADC2 pin with Wi-Fi is a warning', () => {
+  // GPIO25 is ADC2_CH8; ADC2 is disabled by the Wi-Fi driver on ESP32.
+  const project = parse(`${BASE_YAML}
 hardware:
   buses:
     wlan: {interface: wifi}
   devices:
     pressure: {type: analog_input, pin: GPIO25}
-`, 'ADC2', 'analog_input on ADC2 GPIO25 with WiFi');
+`);
+  const board      = loadBoard('esp32_devkit_v4');
+  const violations = checkPinCapabilities(project, board);
+  assert(
+    violations.some(v => v.severity === 'warning' && v.message.includes('ADC2')),
+    `expected ADC2 warning, got ${JSON.stringify(violations)}`,
+  );
 });
 
-test('analog_input on ADC2 pin without Wi-Fi is accepted', () => {
-  // Without a wifi resource the ADC2 conflict cannot arise.
-  expectNoProfileDiagnostic(`${ESP32_HEAD}
-hardware:
-  devices:
-    pressure: {type: analog_input, pin: GPIO25}
-`, 'ADC2 pin without WiFi');
-});
-
-test('digital_output on an ADC2 pin with Wi-Fi is accepted', () => {
-  // The ADC2/Wi-Fi restriction only affects analog reads, not digital I/O.
-  // GPIO26 is ADC2_CH9 but sensor_gateway.yaml uses it as a digital_output.
-  expectNoProfileDiagnostic(`${ESP32_HEAD}
+test('checkPinCapabilities: digital_output on ADC2 pin with Wi-Fi is fine', () => {
+  // ADC2/Wi-Fi only affects analog reads; digital I/O is unaffected.
+  const project = parse(`${BASE_YAML}
 hardware:
   buses:
     wlan: {interface: wifi}
   devices:
     relay: {type: digital_output, pin: GPIO26}
-`, 'digital_output on ADC2 pin with WiFi is fine');
+`);
+  const board      = loadBoard('esp32_devkit_v4');
+  const violations = checkPinCapabilities(project, board);
+  const adc2 = violations.filter(v => v.message.includes('ADC2'));
+  equal(adc2.length, 0, 'digital output on ADC2 pin not flagged');
 });
 
-test('analog_input on an ADC1 pin with Wi-Fi is accepted', () => {
-  // GPIO32 is ADC1_CH4 — ADC1 is unaffected by Wi-Fi.
-  expectNoProfileDiagnostic(`${ESP32_HEAD}
+test('checkPinCapabilities: RP2040 Pico — all standard GPIOs are fully bidirectional', () => {
+  // The RP2040 has no input-only pins on the user-accessible header.
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    pump:  {type: digital_output, pin: GPIO0}
+    valve: {type: pwm_output,     pin: GPIO15, channel: 0, frequency: 1000, resolution: 8}
+    sense: {type: analog_input,   pin: GPIO26}
+`);
+  const board      = loadBoard('rp2040_pico');
+  const violations = checkPinCapabilities(project, board);
+  const errors = violations.filter(v => v.severity === 'error');
+  equal(errors.length, 0, `no errors on Pico, got ${JSON.stringify(errors)}`);
+});
+
+test('checkPinCapabilities: no violations for a valid ESP32 device assignment', () => {
+  // GPIO25/27/32 are ordinary bidirectional output-capable pins on ESP32.
+  const project = parse(`${BASE_YAML}
 hardware:
   buses:
-    wlan: {interface: wifi}
+    one_wire: {interface: onewire, pin: GPIO4}
   devices:
-    temperature: {type: analog_input, pin: GPIO32}
-`, 'ADC1 pin with WiFi is fine');
-});
-
-// --- Profile scope ---
-
-test('profile checks are skipped when no board is declared', () => {
-  // Without target.board the profile is never loaded, so invalid GPIO numbers
-  // are not caught — but input-only violations pass silently too.
-  expectNoProfileDiagnostic(`
-project: {name: test, version: "1.0"}
-events: {GO: {source: external}}
-machine: {states: {idle: {}}, transitions: []}
-hardware:
-  devices:
-    led: {type: digital_output, pin: GPIO34}
-`, 'no board — profile not loaded');
-});
-
-test('profile checks are skipped for an unrecognised board', () => {
-  // "esp32s3" is NOT in the profile registry yet.
-  expectNoProfileDiagnostic(`
-project: {name: test, version: "1.0"}
-target: {board: esp32s3}
-events: {GO: {source: external}}
-machine: {states: {idle: {}}, transitions: []}
-hardware:
-  devices:
-    led: {type: digital_output, pin: GPIO34}
-`, 'unknown board — no profile match');
+    pump:   {type: digital_output, pin: GPIO25}
+    heater: {type: pwm_output,     pin: GPIO27, channel: 0, frequency: 5000, resolution: 8}
+    level:  {type: analog_input,   pin: GPIO32}
+`);
+  const board      = loadBoard('esp32_devkit_v4');
+  const violations = checkPinCapabilities(project, board);
+  equal(violations.length, 0, `expected clean, got ${JSON.stringify(violations)}`);
 });
 
 // ============================================================================
