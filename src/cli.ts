@@ -508,7 +508,14 @@ function writeZephyrProject(dir: string, project: PulseProject): void {
 
   console.log('  ✓ CMakeLists.txt');
   console.log('  ✓ prj.conf');
-  console.log('  (build with: west build -b native_sim)');
+
+  if (files.overlay) {
+    fs.writeFileSync(path.join(dir, 'app.overlay'), files.overlay);
+    console.log('  ✓ app.overlay');
+    console.log('  (build with: west build -b native_sim -- -DOVERLAY_CONFIG=app.overlay)');
+  } else {
+    console.log('  (build with: west build -b native_sim)');
+  }
 }
 
 function writeCmake(dir: string, project: PulseProject): void {
