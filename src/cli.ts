@@ -30,11 +30,13 @@ import type { PulseProject } from './model/index.js';
 import type { PlatformBackend } from './codegen/backend.js';
 import { ArduinoBackend } from './codegen/arduino.js';
 import { EspIdfBackend } from './codegen/espidf.js';
+import { ZephyrBackend } from './codegen/zephyr.js';
 import { MicroPythonCodegen } from './codegen/micropython.js';
 import { TopicEmitter } from './emit/topics.js';
 import { LibraryEmitter } from './emit/libraries.js';
 import { DiagramEmitter } from './emit/diagram.js';
 import { CmakeEmitter } from './emit/cmake.js';
+import { ZephyrProjectEmitter } from './emit/zephyr_project.js';
 import { Validator } from './analysis/validate.js';
 import { loadBoard, resolveBoard, checkFrameworkCompatibility, checkPinCapabilities } from './parser/board-resolver.js';
 
@@ -77,6 +79,7 @@ Generate options:
                          arduino     Arduino / Arduino-compatible boards
                          espidf      Espressif IoT Development Framework (ESP32)
                          micropython MicroPython (generates main.py)
+                         zephyr      Zephyr RTOS (west-compatible C++ project)
   --board <id>         Board profile for logical pin resolution (e.g. esp32_devkit_v4)
                          Logical names (LED, I2C_SDA) are resolved to physical pins
                          before codegen. Physical GPIO names pass through unchanged.
@@ -251,6 +254,7 @@ async function cmdGenerate(args: string[]): Promise<void> {
 
   const targetName    = flag('--target') ?? 'arduino';
   const isMicroPython = /^micropython$/i.test(targetName.replace(/[-_]/g, ''));
+  const isZephyr      = /^zephyr$/i.test(targetName.replace(/[-_]/g, ''));
   const backend       = isMicroPython ? null : resolveBackend(targetName);
   const boardId       = flag('--board');
   const outputFile    = flag('--output');
@@ -370,6 +374,10 @@ async function cmdGenerate(args: string[]): Promise<void> {
 
         if (emitCmake && isEspIdf) {
           writeCmake(resolvedOutDir, project);
+        }
+
+        if (isZephyr) {
+          writeZephyrProject(resolvedOutDir, project);
         }
       }
 
@@ -492,6 +500,17 @@ function writeProject(dir: string, project: GeneratedProject): void {
   console.log(`✓ Sketch folder ready at ${dir}`);
 }
 
+function writeZephyrProject(dir: string, project: PulseProject): void {
+  const files = new ZephyrProjectEmitter().generate(project);
+
+  fs.writeFileSync(path.join(dir, 'CMakeLists.txt'), files.cmake);
+  fs.writeFileSync(path.join(dir, 'prj.conf'), files.prjConf);
+
+  console.log('  ✓ CMakeLists.txt');
+  console.log('  ✓ prj.conf');
+  console.log('  (build with: west build -b native_sim)');
+}
+
 function writeCmake(dir: string, project: PulseProject): void {
   const cmake  = new CmakeEmitter().generate(project);
   const mainDir = path.join(dir, 'main');
@@ -512,8 +531,9 @@ function resolveBackend(target: string): PlatformBackend {
     case 'arduino': return new ArduinoBackend();
     case 'espidf':
     case 'idf':    return new EspIdfBackend();
+    case 'zephyr': return new ZephyrBackend();
     default:
-      console.error(`❌ Unknown target: "${target}". Supported: arduino, espidf`);
+      console.error(`❌ Unknown target: "${target}". Supported: arduino, espidf, zephyr`);
       process.exit(1);
   }
 }

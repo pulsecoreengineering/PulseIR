@@ -1,538 +1,218 @@
-# Adoption Plan: PulseIR as a system description language
+# PulseIR — Roadmap
 
-**Status**: Phase 0 complete. Phase 1 under way (pin checking done; board
-profiles next).
-**Supersedes**: the roadmap that used to live in INDEX.md
-
-This plan adopts the direction that PulseIR should describe *what an embedded
-system is*, with C/C++ remaining the language for *how arbitrary computation
-happens*. It is written to be executed in order, with a hard gate in the middle
-that stops feature work until the abstraction has been proven.
+**Status**: Multi-backend, all core features complete. Zephyr backend Phase 1 in progress.
+**Last updated**: August 2026
 
 ---
 
-## 0. The rule
+## The Rule (permanent)
 
 > **If it describes structure, relationships, configuration, state, events,
-> resources or system policy, it belongs in the model.**
+> resources or system policy — it belongs in the model.**
 >
-> **If it describes arbitrary computation, algorithms or data manipulation, it
+> **If it describes arbitrary computation, algorithms or data manipulation — it
 > belongs in C/C++.**
 
-This becomes the test every proposed feature must pass. The moment the model
-needs `if`, `for`, `while`, variables, functions or expressions, the answer is
-a named C function, not a schema extension.
-
-The rule is already partly enforced rather than merely stated:
-
-- guards and actions are **names of C functions**, never conditions or bodies
-- the schema has **no expression field**, and the parser rejects the retired
-  one with migration guidance
-- interfaces declare *how the board is wired*, never peripheral logic
-
-Phase 0 makes the rule canonical in `FUNCTION_CONTRACT.md` so it governs new
-sections too, not just guards and actions.
-
 ---
 
-## 1. What already exists
+## What is done
 
-Listed so we do not plan to build it twice.
+### Phase 0 — Schema and IR ✅
 
-| Proposed | Status |
-|---|---|
-| C/C++ escape hatch for behaviour | **Done.** Guards/actions are named C functions; the expression field was removed deliberately |
-| Multi-file models (`imports:`) | **Done.** `examples/boiler/` and `examples/greenhouse/` are the proposed layout |
-| Parameters → C struct | **Done** (`SystemParameters`, defaults from the model) |
-| Parameters → UI metadata for a dashboard | **Done.** `topics.json` carries type, unit, min, max per parameter |
-| MQTT publish/subscribe topic map | **Partly.** The manifest is generated; the firmware-side plumbing is not |
-| Hardware pins / buses | **Done** for declaration: `hardware.buses` / `hardware.devices` with logical types, generating includes, defines and `begin()` calls |
-| Validation of unknown state targets | **Done**, plus ambiguous names, duplicate names across files, include cycles, unknown interfaces |
-| Pin conflict detection | **Not done** — highest-value gap |
-| Board capability checks | **Not done.** `target.board` is carried; profiles are Phase 1 |
-| Telemetry / storage / diagnostics / safety | **Not done** |
+- Top-level split: `target` / `hardware` / `parameters` / `events` / `machine` / `actions` / `libraries`
+- `from` / `on` / `to` / `do` + `after:` for timed transitions
+- `tasks:` — periodic work without a state machine
+- `commands:` — text-to-action dispatch from a declared UART
+- `log:` template on tasks and commands
+- `imports:` for multi-file models (merge semantics, cycle detection)
+- `machine:` is optional — a blink or serial-only model generates no PulseHSM at all
+- Actions catalogue with `driver:` and `params:`; identity is the action name, not the driver
 
----
+### Phase 1 — Board, hardware, validation ✅
 
-## 2. Phase 0 — Reshape the schema ✅ DONE
+- Pin conflict detection (normalised GPIO spellings compare equal)
+- Board profiles: `boards/*.yaml` with logical pin maps and capability declarations
+- Board resolver: `--board <id>` or `target: board:` in the model
+- Pin capability checking: input-only, reserved, ADC2/WiFi conflict
+- Framework compatibility warnings (wrong backend for board)
+- `assertKnownInterface` covering: gpio, pwm, adc, uart, i2c, spi, can, onewire,
+  wifi, ethernet, ble, mqtt, eeprom, littlefs, ota, custom
 
-Decisions taken: old transition keywords dropped rather than kept as permanent
-aliases, `imports:` over `include:`, one release of deprecation for the retired
-shapes.
+### Gate — Five projects ✅
 
-Delivered:
+All five compile with `-Werror`, link against the real PulseHSM runtime, and run:
 
-- top level split into `target` / `hardware` / `parameters` / `events` /
-  `machine` / `actions` / `libraries`
-- sections carrying identity are keyed by name; transitions stay an ordered list
-- `from` / `on` / `to` / `do`, with `do:` taking one name or several
-- `imports:` replaces `include:`
-- `target: { board: }` carried into the IR, ready for Phase 1
-- devices declare a `type` that implies class and driver; an unfamiliar type
-  must state its class rather than be guessed at
-- the `actions:` catalogue is now real. It previously parsed for names only,
-  so declared `params` never reached the generated stub — they do now
-- an action's identity is its name, not its driver. Two actions sharing
-  `gpio_control` used to collide into one stub
-- examples migrated to the directory layout; retired shapes still parse for one
-  release and report a warning through `Parser.warnings`, shown by the CLI and
-  the editor
+| Project | States | What it exercises |
+|---|---|---|
+| `boiler/` | 4 | Hierarchy, guards, wildcard fault |
+| `traffic_light.yaml` | 6 | Timed phases, night mode |
+| `motor_controller.yaml` | 8 | Phases, wildcard trip |
+| `pump_tank.yaml` | 7 | Hysteresis, two timers on one state |
+| `sensor_gateway/` | 11 | Four buses, MQTT+TLS, degraded operation |
 
-The IR itself was left alone, so codegen, the emitters and the editor needed no
-changes — this was a change of surface, as intended.
+Key findings that came out of the gate and were fixed:
+- **Runtime sizing bug**: `PULSEHSM_MAX_STATES` not seen by `PulseHSM.cpp` → moved to `PulseHSM_config.h`
+- **`after:` on transitions** (not states): timed transitions with guards, actions, parameters
+- **`tasks:` and `commands:`**: machine-less projects work; all three sections compose correctly
+- **LEDC API fork**: ESP32 Arduino core 2.x vs 3.x have incompatible `ledcSetup` API; `#ifdef ESP_ARDUINO_VERSION_MAJOR` fork generated
 
-## 3. Phase 1 — Target, hardware model, and validation
+### Multi-backend ✅
 
-This is where the project stops being a code generator and starts being a
-compiler. Ordered by value-per-unit-effort.
-
-### 3.1 Pin conflict detection ✅ DONE
-
-Needs no board knowledge at all: two devices claiming one pin is an error
-regardless of board. Spellings are normalised, so `GPIO25`, `gpio_25` and `25`
-compare equal, and devices sharing a declared bus are correctly *not* reported.
-
-It paid for itself immediately by flagging `examples/greenhouse`, which
-declared GPIO25 as both a PWM bus and a `pwm_output` device. The underlying
-cause was that **devices generated no initialisation at all** - only buses did -
-so the model needed a fake "bus" to get its `ledcSetup`. Devices now initialise
-themselves, and the boiler finally emits the `pinMode` for its pump, which it
-never had.
-
-```
-ERROR: GPIO25 is assigned to both "pump" and "fan"
-       hardware.yaml:12  pump
-       hardware.yaml:19  fan
-```
-
-**Cost**: small. Walk devices and buses, collect pin claims, report collisions.
-This is the single most compelling demonstration that the compiler beats
-hand-written code, and it is nearly free.
-
-### 3.2 `target: { board: esp32 }` ✅ parsed in Phase 0
-
-The field is read into the IR. What remains is a backend that consumes it.
-
-### 3.3 Board profiles
-
-Data describing what each board's pins can do:
-
-```yaml
-# profiles/esp32.yaml
-board: esp32
-pins:
-  gpio34: { input_only: true }
-  gpio6:  { reserved: spi_flash }
-  # ...
-capabilities: { pwm_channels: 16, adc: [...], dac: [...] }
-```
-
-Then the compiler catches things that currently reach the bench:
-
-- an output assigned to an input-only pin
-- a pin wired to the integrated SPI flash
-- PWM requested on a pin or channel the board cannot provide
-- ADC2 used while Wi-Fi is declared
-
-⚠ **This data must come from vendor documentation, not from memory.** Writing a
-board profile from recall is exactly the failure this repo already suffered
-once, where documentation asserted behaviour the code did not have. A wrong
-profile is worse than no profile: it rejects valid designs and teaches students
-something false. Each profile ships with a citation and a test.
-
-**Cost**: moderate per board. Start with **one** board (esp32), verified.
-
-### 3.4 Logical device types ✅ DONE in Phase 0
-
-Landed early because the schema reshape had to decide the shape anyway:
-
-```yaml
-hardware:
-  board: esp32
-  buses:
-    sensor_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
-  devices:
-    temperature: { type: ds18b20, bus: one_wire, pin: GPIO4 }
-    pump:        { type: digital_output, pin: GPIO25 }
-    heater:      { type: pwm_output, pin: GPIO27, channel: 0 }
-```
-
-`buses` is today's `Resource`; `devices` is today's `Component` with a `type`
-that implies class, driver and init. A small registry of built-in types
-(`digital_output`, `digital_input`, `pwm_output`, `analog_input`) plus
-named driver types (`ds18b20`, `bme280`) that resolve to a library.
-
-**Cost**: moderate. Touches the interface backend, the topic emitter (sensor
-discovery) and the library emitter.
-
-**Portability caveat**: this makes the *model* portable, not the output. The
-Arduino backend assumes an Arduino core; a bare STM32 target needs a second
-backend, not just a second board profile. Worth saying plainly so `board:`
-is not oversold.
-
----
-
-## 4. The gate — five projects before any new domain
-
-Nothing from Phase 2 starts until the same model shape covers, without ugly
-workarounds:
-
-1. Boiler controller *(exists)*
-2. Traffic light
-3. Motor controller
-4. Pump / tank controller
-5. Industrial sensor gateway
-
-Each lands as a real example, generated, compiled, linked and run by the test
-suite — the same bar `boiler` and `greenhouse` already meet.
-
-The gate is the point of the plan. If a project needs a schema hack, that is
-the abstraction telling us something, and it is far cheaper to hear it now than
-after telemetry, storage, diagnostics and safety are all built on top.
-
-### 4.1 Result ✅ ALL FIVE PASS
-
-All five are modelled, generated, compiled with `-Werror`, linked against the
-real runtime, run, and checked against an expected dispatch trace. **No schema
-change was needed** — every project is written in the Phase 0 schema exactly as
-it stands.
-
-| Project | Files | States | Shape it exercises |
+| Backend | Target flag | File extension | Entry point |
 |---|---|---|---|
-| `boiler` | 4 | 4 | Hierarchy, guards, wildcard fault |
-| `traffic_light` | 1 | 6 | Timed phases, a parent-level mode switch |
-| `motor_controller` | 1 | 8 | Phases with the arithmetic left in C, wildcard trip |
-| `pump_tank` | 1 | 7 | Hysteresis, two timers on one state, a composite timer |
-| `sensor_gateway` | 3 | 11 | Four buses, MQTT + TLS, a retry loop, degraded operation |
+| Arduino | `--target arduino` (default) | `.ino` | `setup()` + `loop()` |
+| ESP-IDF | `--target espidf` | `.cpp` | `app_main()` (FreeRTOS) |
+| MicroPython | `--target micropython` | `.py` | `main()` (asyncio) |
 
-Passing is not the interesting part. Three things came out of it.
+### Driver gaps ✅
 
-#### Finding 1 — The runtime was silently sized wrong (fixed)
+Implemented after multi-backend, filling the main built-in driver gaps:
 
-`sensor_gateway` is the first model with more than eight states, and its ninth
-and tenth were **silently refused**. `PULSEHSM_MAX_STATES` was defined in the
-sketch only; `PulseHSM.cpp` is a separate translation unit, never saw it, and
-stayed on the default of `8`. `addState()` returned `-1`, `transitionTo(-1)` did
-nothing, and the machine simply ignored two of its own states. Nothing warned.
+| Gap | Drivers added | Notes |
+|---|---|---|
+| Gap 1: Bus sensor transactions | `adc_read`, I2C/SPI sensor init | Full `InterfaceEmission` per bus type |
+| Gap 2: Interrupt / ISR wiring | `attachInterrupt()` / IDF ISR | Generated in `setupInterfaces()` |
+| Gap 3: Display support | Adafruit SSD1306, ST7735, ILI9341 | Library stubs + init + TODO stubs |
+| Gap 4: Power management | `sleep_control` driver | `esp_deep_sleep_start()`, `esp_light_sleep_start()`, timer + ext0 wakeup |
+| Gap 5: HTTP client + OTA | `http_get`, `http_post`, `ota` interface | HTTPClient (bundled core), ArduinoOTA with `loop:` emission |
 
-Worse than the dropped states: the macro also sizes members of the `PulseHSM`
-class, so the two translation units disagreed about the object's layout. That
-is undefined behaviour in every model, not only large ones — the small ones were
-getting away with it.
+State `entry:` and `exit:` actions are now indexed correctly — they were
+invisible to action stub generation before Gap 4.
 
-Fixed by moving the sizes into a generated `PulseHSM_config.h` that
-`PulseHSM.h` picks up via `__has_include`, so every translation unit is
-compiled against the same numbers. Both output paths write it: `--outdir`
-beside the runtime it vendors, and `--output` beside the sketch — a single-file
-sketch still links against a separately compiled `PulseHSM.cpp`, so it had the
-identical bug.
+### Web editor ✅
 
-Belt and braces, since a config header can still be moved or go stale:
-`setup()` now checks that every `addState()` came back with a real index and
-prints a `FATAL` line if not. The failure was silent, which was the worst part
-of it; now it is not.
-
-A regression test builds `sensor_gateway` the way the Arduino IDE would and
-asserts no state index came back negative.
-
-This is the clearest evidence so far for the project's own argument: a
-hand-written version of this firmware would have had the same bug, with nothing
-to catch it.
-
-#### Finding 2 — A state cannot say how long it lasts ✅ FIXED
-
-Implemented as `after:` on a **transition**, not on a state. The first sketch
-put `after: { ms, to }` on the state itself and it did not survive contact with
-the traffic light: a timed transition needs `do:` (turn the lamps over) and a
-guard (is a pedestrian waiting?), and a state-level field has nowhere to put
-either. As a trigger it costs nothing — swap `on:` for `after:` and every other
-part of a transition keeps working.
-
-```yaml
-- from: operating/go
-  after: green_ms
-  to: operating/prepare_stop
-  do: [all_lamps_off, show_amber]
-```
-
-The four examples now declare their timing. `TIMER_EXPIRED` is gone from all of
-them, along with every hand-written `millis()` comparison.
-
-**It is generated rather than passed to `addState()`**, which was not the plan.
-Reading the runtime closely killed that idea four times over:
-
-1. `timeoutNext` is a state index needed *at registration time*, and states
-   register parents-first in declaration order. The traffic light's cycle —
-   go → prepare_stop → stop → go — refers forward to an index still `-1`.
-2. `update()` only checks `states[currentState].timeoutMs`, and `currentState`
-   is always a leaf. A timeout on a composite would never fire, which rules out
-   pump/tank's "the whole fill must not exceed max_fill_ms".
-3. One timeout per state cannot carry a guard, actions, or a second candidate.
-   The traffic light's `stop` phase needs all three.
-4. `timeoutMs` is captured once at registration, so a parameter changed at
-   runtime would be ignored until reboot.
-
-Instead the generator owns each timed state's `entry` and `update` callbacks:
-entry stamps a clock, update checks it. Entry only fires when a state is really
-entered, so a composite's clock survives its children changing — which is
-exactly the semantics point 2 needs, and it is pinned by a test.
-
-<details>
-<summary>The original finding, kept for the record</summary>
-
-Every one of the four new projects hit this, and it is the single biggest gap:
-
-| Project | Wants |
-|---|---|
-| `traffic_light` | green for `green_ms`, amber for `amber_ms`, … |
-| `motor_controller` | `restart_delay` before a trip can be reset |
-| `pump_tank` | trip after `dry_run_ms` without flow; after `max_fill_ms` filling |
-| `sensor_gateway` | retry the uplink after `retry_backoff` |
-
-`addState()` already takes `timeoutMs` and `timeoutNext`, and codegen already
-passes `0` and `-1` for them on every single state. The runtime supports this
-and the IR simply has no field. So the model declares a `TIMER_EXPIRED` event
-and a parameter, and the C code has to own the clock, compare it against
-`fsm.getStateElapsed()` and raise the event itself — for something the runtime
-would do for free.
-
-It also fails the §0 rule in the wrong direction: a duration is *data*, not
-logic, so pushing it into C is pushing declarative content into the escape
-hatch. **Recommendation: `after: { ms, to }` on a state, in Phase 1.** It is a
-two-field addition that maps onto arguments already being emitted, and it
-removes hand-written timing from four of five projects.
-
-</details>
-
-#### Finding 2c — Not everything is a state machine ✅ ADDRESSED
-
-The gate projects were all control systems, so all five wanted a state chart.
-That hid the fact that the IR *required* one: a blink, or a board that answers
-commands over the serial monitor, could not be expressed at all.
-
-`machine:` is now optional, and two sections cover what replaces it:
-
-- **`tasks:`** — `{ every: blink_ms, do: toggle_led }`. Scheduling is
-  configuration. This is also the `every:` that finding 2b deferred, arriving
-  for a reason that had nothing to do with timers on states.
-- **`commands:`** — a text-to-action dispatch table, read from a declared UART.
-
-A machine-less project emits no PulseHSM include, no `fsm`, no event enum and
-no sizing header. The two new examples are built by the test suite *without*
-linking `PulseHSM.cpp`, so a leftover reference to the runtime fails the build
-rather than merely being untidy.
-
-Two things this shook out:
-
-- `setup()` hardcoded `Serial.begin(115200)`, which silently overrode the baud
-  rate of a declared uart on port 0. Declaring the console as a bus now owns it,
-  and a test asserts the console is opened exactly once.
-- The generated command table is nothing but `strcmp`, and did not include
-  `<string.h>`. Most Arduino cores pull it in through `Arduino.h`; the host
-  compiler does not, and neither will every core.
-
-#### Finding 2d — The three did not compose
-
-`machine:`, `tasks:` and `commands:` were each covered alone, and that hid a
-real bug: `loop()` ran tasks and commands *before* `syncContext()`, so an action
-fired by either was handed whatever the last event dispatch left behind - a
-stale `currentState`, a stale `eventData`. Without a machine there was nothing
-to leave anything behind, and with a machine no test called an action from a
-task. `test/fixtures/combined.yaml` now exercises all three at once.
-
-The machine-less path leaked in the other direction too. `--outdir` was still
-vendoring `PulseHSM.h` and `.cpp` beside a blink, writing a `PulseHSM_config.h`
-sizing a table nothing allocates, scaffolding a `guards.cpp` for a project that
-can have no guards, and emitting `PulseHSM fsm;` into the multi-file header -
-the single-file path had been fixed and the folder path had not. `generateFiles`
-now reports `needsRuntime`, and a test asserts no generated file for a
-machine-less project mentions PulseHSM at all.
-
-#### Finding 2e — ledc's API changed under us, and the model kept building the wrong one
-
-Reported straight from a real Arduino IDE build, not the simulator: a `pwm_output`
-device compiled to `ledcSetup()` + `ledcAttachPin()`, and current ESP32 Arduino
-core (3.x) removed both — it only has `ledcAttach(pin, freq, resolution)` and
-`ledcWrite(pin, duty)`, no channel argument. Core 2.x has only the old,
-channel-addressed pair. There is no core version that accepts both, and no
-compiler flag in this project's control over which core the user's IDE has
-installed, so a fixed choice is always wrong for someone.
-
-Verified against espressif/arduino-esp32's own headers (`esp32-hal-ledc.h` on
-`master` vs. `release/v2.x`) rather than assumed from memory, per this
-project's rule about board-specific claims. `setupInterfaces()` now emits
-both calls, gated on `ESP_ARDUINO_VERSION_MAJOR` (defined by the core itself
-since 2.0.1; older cores that lack the macro only ever had the channel API,
-so the `#else` is their only path regardless). The `params:` hint for a pwm
-device's duty already pointed at `_PIN`, which happens to be exactly what the
-new `ledcWrite` wants — only the setup call needed the fork. A generated TODO
-now names both `ledcWrite` signatures next to the pin/channel macros, since
-that call is still the user's to write.
-
-#### Finding 2b — A state cannot repeat on a timer
-
-Surfaced while implementing `after:`, and left unsolved deliberately.
-
-`from: X, after: 500, to: X` is rejected. The clock is stamped on entry, and a
-self-transition never leaves the state, so it would fire on *every* pass rather
-than every 500 ms — a busy loop wearing a timer's clothes. Rejecting it beats
-generating it and being subtly wrong.
-
-The workaround is to alternate between two states, which `sensor_gateway` does
-for its retry backoff and which reads acceptably. But a genuinely periodic
-thing — the traffic light's night-mode amber flash, a heartbeat, a poll — has
-to stay in C for now.
-
-**Recommendation: `every:` alongside `after:`, but not yet.** It wants its own
-clock semantics (no transition, just a repeated action) and that overlaps with
-`telemetry:` in Phase 2. Better designed once, with both in view.
-
-#### Finding 3 — There are no internal transitions
-
-`traffic_light` wants "on `WALK_REQUEST`, latch the request, stay in `go`".
-`to:` is mandatory, so it is written as a self-transition. Harmless *today*,
-because states have no entry/exit actions — the moment they do, a self
-transition will re-run them and an internal one must not.
-
-Not urgent, and it should not be fixed by making `to:` optional, which reads as
-an omission rather than a decision. **Recommendation: defer until entry/exit
-actions exist, then add `to: self` (re-enter) alongside `stay` (internal).**
-
-#### What did *not* break
-
-Worth recording, because these were the parts I expected to bend:
-
-- **The binding rule held.** Every project wanted arithmetic somewhere — a
-  speed ramp, a debounce, a flow average — and every time it landed naturally
-  in a named action or guard. Nothing tempted the model toward an expression
-  field.
-- **Bus-attached devices needed no pin.** `line_pressure` on a Modbus register
-  has no GPIO at all, and the pin checker correctly stayed quiet.
-- **Action identity held.** `start_pump` and `stop_pump` share a driver and
-  stayed distinct stubs.
-- **Guard fall-through held.** `pump_tank` has a guarded `TIMER_EXPIRED` in a
-  leaf *and* in its parent; both blocking leaves the machine exactly where it
-  was, which is what the bubbling contract promises.
+- Live output: sketch + topics + libraries + diagram as you type
+- Multi-file model editing (tabs act as the filesystem)
+- Import/export as `.zip`; eight example projects in the dropdown
+- YAML syntax highlighting without editor libraries
+- `npm run check:editor` verifies pixel-alignment in a real browser
 
 ---
 
-## 5. Phase 2 — Additional domains, one at a time
+## In progress — Zephyr backend
 
-Only after the gate, and each one must pass the §0 rule before it is built.
+`--target zephyr` generates a west-compatible project that compiles on any
+Zephyr-supported board. See ARCHITECTURE.md §12 for the full design.
 
-| Domain | Notes |
-|---|---|
-| `communication:` | Highest value: the topic manifest exists, so this is generating the device side of a map that already exists. Closes the loop where a renamed sensor cannot break a dashboard |
-| `telemetry:` | Sources and intervals. Mostly scheduling, which PulseHSM can already express |
-| `storage:` | Which parameters persist to NVS/EEPROM. Small and self-contained |
-| `diagnostics:` | Watchdog, heartbeat, log level. Configuration, not logic |
-| `safety:` | **Most valuable and most dangerous — see §6** |
+### Phase 1 — Skeleton (current) 🔄
+
+**Goal**: `west build -b native_sim` passes. No hardware required.
+
+Files to create:
+- `src/codegen/zephyr.ts` — `ZephyrBackend implements PlatformBackend`
+- `src/codegen/zephyr_interfaces.ts` — `ZephyrInterfaceBackend`
+- `src/emit/zephyr_project.ts` — `ZephyrProjectEmitter` (CMakeLists.txt, prj.conf)
+- `test/harness/zephyr/` — stub headers for g++ compilation tests
+- Wire into `src/cli.ts`: case `'zephyr'` in `resolveBackend()`, new target in USAGE
+
+**Test**: new fixture suite in `test/backends.test.ts`; `west build -b native_sim`
+in a separate CI workflow using the Zephyr Docker image.
+
+### Phase 2 — GPIO, UART, I2C 🔲
+
+- Full `gpio_dt_spec` init in `ZephyrInterfaceBackend`
+- `gpio_pin_configure_dt()` in init, `gpio_pin_set_dt()` / `gpio_pin_get_dt()` in action bodies
+- Naming convention: `FOO_PIN` define → `FOO_GPIO` gpio_dt_spec; `digitalWriteExpr` derives by suffix
+- `app.overlay` generation (devicetree aliases from hardware bindings)
+- `prj.conf` derives `CONFIG_GPIO=y`, `CONFIG_I2C=y`, etc. from declared resources
+- Add `zephyr_board` field to all `boards/*.yaml`
+- Test on real hardware: ESP32 + nRF52840 DK
+
+### Phase 3 — Tasks → Zephyr threads 🔲
+
+- `tasks:` generate `K_TIMER_DEFINE` + `k_work_submit` (system workqueue)
+- No per-task stack sizing needed; simpler than `K_THREAD_DEFINE`
+- Main `while(1)` loop still runs for HSM ticking
+- Loop task-polling check skipped when Zephyr backend active
+
+### Phase 4 — WiFi, MQTT, HTTP, OTA 🔲
+
+Compilable stubs with targeted TODOs pointing to Zephyr documentation:
+
+| Interface | Zephyr mechanism | prj.conf |
+|---|---|---|
+| `wifi` | `net_mgmt` + board driver | `CONFIG_WIFI=y` |
+| `mqtt` | `zephyr/net/mqtt.h` | `CONFIG_MQTT_LIB=y` |
+| `http_get/post` | `zephyr/net/http/client.h` | `CONFIG_HTTP_CLIENT=y` |
+| `ota` | MCUboot + `dfu/mcuboot.h` | `CONFIG_BOOTLOADER_MCUBOOT=y` |
 
 ---
 
-## 6. Where I would push back
+## Board compatibility roadmap
 
-Recorded so these are decided deliberately rather than drifted into.
+### Currently supported (all backends)
 
-### 6.1 `limits:` quietly reintroduces evaluation
+`arduino_uno`, `arduino_mega`, `esp32`, `esp32_devkit_v4`, `esp32s3`,
+`esp32_s3_devkit`, `pico`, `rp2040_pico`
 
-This proposal:
+### Planned (Zephyr Phase 2+)
 
-```yaml
-limits:
-  boiler_temperature:
-    source: temperature_sensor
-    critical: { above: 75 }
-    action: { critical: [shutdown_all] }
-```
+These boards need a `boards/*.yaml` entry with a verified `zephyr_board` field
+and pin map sourced from vendor documentation:
 
-means the generated firmware evaluates `temperature > 75`. That is an
-expression — structured rather than parsed, but an expression. It is the exact
-camel's nose the rest of the document warns against, sitting inside the
-document's own proposal.
+| Board ID | Zephyr target | Priority |
+|---|---|---|
+| `nrf52840_dk` | `nrf52840dk_nrf52840` | High — popular Zephyr dev board |
+| `nrf5340_dk` | `nrf5340dk_nrf5340_cpuapp` | High |
+| `stm32f4_disco` | `stm32f4_disco` | Medium |
+| `nucleo_f767zi` | `nucleo_f767zi` | Medium |
+| `mimxrt1060_evk` | `mimxrt1060_evk` | Medium |
+| `bl5340_dvk` | `bl5340_dvk` | Low |
+| `bbc_microbit_v2` | `bbc_microbit_v2` | Low (educational) |
 
-There is a real argument for it: a safety limit is a *policy*, and a policy the
-compiler understands can be checked, documented and enforced in ways a hand-
-written `if` cannot. But once `above:` exists, `below:`, `between:`, `and:` and
-`rate_of_change:` all have obvious justifications, and the line is gone.
+Each board needs:
+1. `boards/<id>.yaml` with `zephyr_board:` field and full pin map
+2. At least one test model in `examples/` that runs on it
+3. A citation to the vendor's hardware user guide
 
-⚠ **Decision needed, and I would take it late — after the gate.** The
-alternative that keeps the rule intact: a limit names a guard, exactly as
-transitions do, and the *policy* metadata (severity, latching, response) stays
-declarative:
+---
+
+## Future domains (post-Zephyr)
+
+These extend the model schema. Each must pass the §1 rule before it is built.
+
+| Domain | Notes | Status |
+|---|---|---|
+| `communication:` | Firmware side of the existing topic manifest | Medium priority |
+| `telemetry:` | Sensor sampling intervals as model data | After communication |
+| `storage:` | Which parameters persist to NVS/EEPROM/LittleFS | Small, self-contained |
+| `diagnostics:` | Watchdog, heartbeat, log level | Config not logic |
+| `safety:` | Named guards + policy metadata (severity, latching) | Design needed first |
+
+### `safety:` design note
+
+`limits:` with `above:` / `below:` introduces an expression evaluator —
+a camel's nose for arithmetic, comparisons, and eventually `&&` and functions.
+The alternative that keeps the rule intact:
 
 ```yaml
 limits:
   over_temperature:
-    check: guard_over_safe_temp     # you implement this in C
+    check: guard_over_safe_temp   # you implement this in C
     severity: critical
     response: [shutdown_all]
     latching: true
 ```
 
-The compiler still knows this is a safety policy rather than an ordinary
-transition, still generates the wiring, still reports it — and evaluates
-nothing.
+The compiler knows this is a safety policy and generates the wiring. It evaluates nothing.
 
-### 6.2 Safety `priority` needs runtime support that does not exist
+### `to: stay` (internal transitions)
 
-`priority: critical` implies a safety event preempts normal dispatch. PulseHSM
-dispatches from the current leaf **upward**, so a handler at the root has the
-*lowest* precedence, not the highest. A wildcard `EMERGENCY_STOP` today only
-fires if no inner state consumed the event first.
-
-Making safety genuinely preemptive means checking safety events *before* normal
-dispatch — a change to the runtime or to the generated dispatch path, not a
-schema addition. Worth knowing before `safety:` is designed, because the schema
-would otherwise promise something the runtime does not deliver.
-
-### 6.3 The proposal is larger than its own advice
-
-The document warns against scope creep and then proposes seven new top-level
-domains. Its own recommendation — *"start with a very strong core: hardware +
-events + HSM + actions + parameters + validation + C/C++ escape hatch"* — is
-the right one, and it excludes telemetry, storage, diagnostics and safety from
-the first phase. This plan follows the advice rather than the list.
-
-### 6.4 `${MQTT_BROKER}` substitution
-
-Environment substitution is a good idea and fits the existing rule that
-credentials are never baked into generated code. Worth adopting — but as a
-general mechanism (`${VAR}` resolved at generate time, absent variables
-reported, never silently empty), not as an MQTT-specific feature.
+`traffic_light` uses self-transitions to latch pedestrian requests. When
+entry/exit actions exist, a self-transition re-runs them; an internal one must not.
+Defer until entry/exit actions are implemented, then add `to: stay` (internal)
+alongside the existing `to: self` self-transition.
 
 ---
 
-## 7. Order of work
+## Decisions record
 
-```
-Phase 0   schema reshape                  breaking, cheap now
-   │      top-level domains
-   │      from/on/to/do
-   │      rule made canonical
-   ▼
-Phase 1   pin conflicts                   cheap, high value
-   │      target: board:
-   │      board profile (esp32 only)
-   │      logical device types
-   ▼
-GATE      five projects, compiled and run
-   │
-   ▼
-Phase 2   communication → telemetry → storage → diagnostics → safety
-          one at a time, each tested against the §0 rule
-```
-
----
-
-## 8. Decisions needed before Phase 0 starts
-
-1. **Aliases** — keep `source/event/target/actions` forever, or drop them when
-   `system:` is dropped? *(I lean: drop.)*
-2. **`include:` or `imports:`** — cosmetic, cheapest to settle now.
-3. **Deprecation window** — how long does the parser accept the old `system:`
-   shape? *(I lean: one release, with a deprecation note naming the file.)*
-4. **First board profile** — esp32 classic, or esp32s3? Only one gets verified
-   first, and it should be the one most projects target.
-5. **`limits:`** — defer the evaluation question to after the gate, as
-   recommended? *(I lean: yes.)*
+| Decision | Choice | Rationale |
+|---|---|---|
+| Expression field | Removed permanently | Any evaluable condition grows into a language |
+| `after:` location | On transitions, not states | States can't carry guards or actions |
+| Tasks | k_timer + workqueue (Zephyr) | No per-thread stack sizing debates |
+| GPIO (Zephyr) | gpio_dt_spec + naming convention | DT-backed; `_PIN → _GPIO` suffix derives variable |
+| prj.conf | Model-driven | Users shouldn't need to know which CONFIG_* their model needs |
+| Board data | From vendor docs, cited | A wrong profile is worse than no profile |
+| Credentials | Never baked in | Models belong in version control; passwords do not |

@@ -12,6 +12,8 @@ import { Parser } from '../src/parser/index.js';
 import { Codegen } from '../src/codegen/index.js';
 import { EspIdfBackend } from '../src/codegen/espidf.js';
 import { MicroPythonCodegen } from '../src/codegen/micropython.js';
+import { ZephyrBackend } from '../src/codegen/zephyr.js';
+import { ZephyrProjectEmitter } from '../src/emit/zephyr_project.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1215,6 +1217,226 @@ test('http_get/post: includes HTTPClient library header', () => {
 test('http_get: wrapped in ESP32/ESP8266 guard', () => {
   const code = new Codegen().generate(parse(HTTP_YAML));
   has(code, '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)');
+});
+
+// ---------------------------------------------------------------------------
+// Zephyr backend — tasks-only model
+// ---------------------------------------------------------------------------
+
+console.log('\n⚡ Testing Zephyr backend...\n');
+
+test('Zephyr: entry point is int main(void) with while(1) + k_msleep(1)', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, 'int main(void)');
+  has(code, 'while (1) {');
+  has(code, 'k_msleep(1)');
+  hasNot(code, 'void setup()');
+  hasNot(code, 'void loop()');
+  hasNot(code, 'app_main');
+  hasNot(code, 'for (;;)');
+});
+
+test('Zephyr: setup is a static helper called once from main', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, 'static void _setup()');
+  has(code, '_setup()');
+});
+
+test('Zephyr: timing uses k_uptime_get(), not millis() or esp_timer_get_time()', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, 'k_uptime_get()');
+  // millis() may appear in platform-agnostic comments — check executable lines only
+  const execLines = code.split('\n')
+    .filter(l => { const t = l.trimStart(); return !t.startsWith('//') && !t.startsWith('*'); })
+    .join('\n');
+  assert(!execLines.includes('millis()'), 'expected no millis() call in Zephyr generated code');
+  hasNot(code, 'esp_timer_get_time()');
+});
+
+test('Zephyr: timestamp variable is typed int64_t, not unsigned long', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, 'int64_t');
+});
+
+test('Zephyr: includes Zephyr kernel, GPIO and UART headers', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, '#include <zephyr/kernel.h>');
+  has(code, '#include <zephyr/drivers/gpio.h>');
+  has(code, '#include <zephyr/drivers/uart.h>');
+  hasNot(code, '#include "freertos/FreeRTOS.h"');
+  hasNot(code, '#include <Arduino.h>');
+});
+
+test('Zephyr: provides pulseIrPrint helpers routing through printk', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, 'static inline void pulseIrPrint(const char *s)');
+  has(code, 'static inline void pulseIrPrintln(');
+  has(code, 'printk(');
+  hasNot(code, 'Serial.print');
+  hasNot(code, 'printf(');
+});
+
+test('Zephyr: tasks-only model does not include PulseHSM', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  hasNot(code, '#include "PulseHSM.h"');
+  hasNot(code, 'PULSEHSM_MAX_STATES');
+});
+
+// ---------------------------------------------------------------------------
+// Zephyr backend — state machine model
+// ---------------------------------------------------------------------------
+
+test('Zephyr: state machine model includes PulseHSM and sizing macros', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  has(code, '#include "PulseHSM.h"');
+  has(code, 'PULSEHSM_MAX_STATES');
+  has(code, 'PULSEHSM_MAX_EVENTS');
+  has(code, 'PULSEHSM_MAX_DEPTH');
+});
+
+test('Zephyr: sizing macros appear before the Zephyr kernel header', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  const sizingPos = code.indexOf('PULSEHSM_MAX_STATES');
+  const kernelPos = code.indexOf('#include <zephyr/kernel.h>');
+  assert(sizingPos < kernelPos, 'PULSEHSM_MAX_STATES must appear before <zephyr/kernel.h>');
+});
+
+test('Zephyr: GPIO write uses gpio_pin_set with DEVICE_DT_GET(DT_NODELABEL(gpio0))', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  has(code, 'gpio_pin_set(DEVICE_DT_GET(DT_NODELABEL(gpio0))');
+  has(code, '(gpio_pin_t)');
+});
+
+test('Zephyr: GPIO read uses gpio_pin_get with DEVICE_DT_GET(DT_NODELABEL(gpio0))', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  has(code, 'gpio_pin_get(DEVICE_DT_GET(DT_NODELABEL(gpio0))');
+});
+
+test('Zephyr: state machine model still uses while(1) + k_msleep', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  has(code, 'int main(void)');
+  has(code, 'while (1) {');
+  has(code, 'k_msleep(1)');
+});
+
+// ---------------------------------------------------------------------------
+// Zephyr backend — GPIO interface init
+// ---------------------------------------------------------------------------
+
+const GPIO_IFACE_YAML = `
+pulseir: "1"
+project:
+  name: gpio_init_test
+  version: "1.0"
+
+hardware:
+  buses:
+    btn: { interface: gpio, pin: GPIO2, mode: input }
+
+tasks:
+  poll: { every: 100, do: noop }
+
+actions:
+  noop: { driver: logger }
+`;
+
+test('Zephyr: GPIO bus resource generates gpio_pin_configure in setupInterfaces', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(GPIO_IFACE_YAML));
+  has(code, 'gpio_pin_configure(DEVICE_DT_GET(DT_NODELABEL(gpio0))');
+  has(code, 'GPIO_INPUT');
+});
+
+test('Zephyr: GPIO output mode uses GPIO_OUTPUT_INACTIVE flag', () => {
+  const outputYaml = GPIO_IFACE_YAML.replace('mode: input', 'mode: output');
+  const code = new Codegen(new ZephyrBackend()).generate(parse(outputYaml));
+  has(code, 'GPIO_OUTPUT_INACTIVE');
+});
+
+// ---------------------------------------------------------------------------
+// ZephyrProjectEmitter — CMakeLists.txt and prj.conf
+// ---------------------------------------------------------------------------
+
+console.log('\n⚡ Testing ZephyrProjectEmitter...\n');
+
+test('ZephyrProjectEmitter: cmake starts with cmake_minimum_required and find_package(Zephyr)', () => {
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.cmake, 'cmake_minimum_required(');
+  has(files.cmake, 'find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})');
+  has(files.cmake, 'project(blink)');
+});
+
+test('ZephyrProjectEmitter: cmake uses target_sources(app PRIVATE src/main.cpp)', () => {
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.cmake, 'target_sources(app PRIVATE');
+  has(files.cmake, 'src/main.cpp');
+});
+
+test('ZephyrProjectEmitter: cmake adds PulseHSM.cpp when machine is declared', () => {
+  const project = parse(SIGNAL_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.cmake, 'PulseHSM.cpp');
+});
+
+test('ZephyrProjectEmitter: cmake omits PulseHSM.cpp for machine-less models', () => {
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  hasNot(files.cmake, 'PulseHSM.cpp');
+});
+
+test('ZephyrProjectEmitter: prj.conf always includes C++ support flags', () => {
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.prjConf, 'CONFIG_CPP=y');
+  has(files.prjConf, 'CONFIG_STD_CPP17=y');
+  has(files.prjConf, 'CONFIG_NEWLIB_LIBC=y');
+});
+
+test('ZephyrProjectEmitter: prj.conf adds CONFIG_GPIO=y for digital_output devices', () => {
+  // BLINK_YAML has a digital_output device.
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.prjConf, 'CONFIG_GPIO=y');
+});
+
+test('ZephyrProjectEmitter: prj.conf adds CONFIG_I2C=y for i2c bus resources', () => {
+  const i2cYaml = `
+pulseir: "1"
+project:
+  name: i2c_test
+  version: "1.0"
+hardware:
+  buses:
+    sensor_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+tasks:
+  poll: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`;
+  const project = parse(i2cYaml);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.prjConf, 'CONFIG_I2C=y');
+});
+
+test('ZephyrProjectEmitter: prj.conf does NOT add GPIO for a model with no gpio/devices', () => {
+  const noGpioYaml = `
+pulseir: "1"
+project:
+  name: no_gpio
+  version: "1.0"
+hardware:
+  buses:
+    serial: { interface: uart, port: 0, baud: 115200 }
+tasks:
+  poll: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`;
+  const project = parse(noGpioYaml);
+  const files = new ZephyrProjectEmitter().generate(project);
+  hasNot(files.prjConf, 'CONFIG_GPIO=y');
+  has(files.prjConf, 'CONFIG_SERIAL=y');
 });
 
 // ---------------------------------------------------------------------------

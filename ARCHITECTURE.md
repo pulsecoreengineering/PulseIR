@@ -1,591 +1,479 @@
-# PulseIR - Architecture & Design Decisions
+# PulseIR — Architecture Reference
 
-**Status**: MVP Complete (August 2026)  
-**Version**: 0.1.0
-
----
-
-## 1. What is PulseIR?
-
-PulseIR is a **unified intermediate representation (IR) for embedded systems automation**. It solves a critical problem in the PulseCore ecosystem:
-
-**Problem**: Each tool (PulseCore IDE, PulseSim, PulseDash, PulseHSM runtime) was building its own format for describing systems. This created friction and inconsistency.
-
-**Solution**: Define a **single, language-agnostic IR** that all tools consume and produce. YAML is just one serialization format—the real value is the model.
+**Status**: Active development · August 2026
+**Backends**: Arduino ✅ · ESP-IDF ✅ · MicroPython ✅ · Zephyr 🔄
 
 ---
 
-## 2. The Three-Layer Architecture
+## 1. The Core Rule
 
-```
-Layer 1: PulseModel (IR Types)
-   ↓ (Language-agnostic data structures)
-   
-Layer 2: Parser (YAML → IR)
-   ↓ (Load, parse, validate)
-   
-Layer 3: Codegen (IR → C++)
-   ↓ (Generate Arduino sketches)
-```
+> **If it describes structure, relationships, configuration, state, events,
+> resources or system policy — it belongs in the model.**
+>
+> **If it describes arbitrary computation, algorithms or data manipulation — it
+> belongs in C/C++.**
 
-### Layer 1: PulseModel (`src/model/types.ts`)
-
-**What it is**: Pure data structures. No logic, no assumptions.
-
-**Core concepts**:
-- **States** (SIMPLE, COMPOSITE, ORTHOGONAL) — hierarchical state machine
-- **Events** (EXTERNAL, TIMER, SENSOR, MQTT, INTERNAL, CUSTOM) — system events
-- **Transitions** (source → event → target) — state changes
-- **Guards** (name + optional description) — conditional transitions
-- **Actions** (type + driver) — things that happen
-- **Components** (SENSOR, ACTUATOR, SERVICE) — system parts
-- **Resources** (GPIO, UART, I2C, SPI, CAN, MQTT, CUSTOM) — hardware interfaces
-- **Parameters** (configuration values) — system tuning
-
-**Why this design**:
-- **Extensible**: New event sources, action types, or resource interfaces don't require schema changes
-- **Reusable**: Same model used by parser, codegen, simulator, visualizer
-- **Language-agnostic**: Can serialize to YAML, JSON, protobuf, or anything else
-- **Metadata-friendly**: Every concept can carry arbitrary metadata for future tools
-
-### Layer 2: Parser (`src/parser/index.ts`)
-
-**What it does**:
-1. Load YAML file
-2. Map to PulseModel types
-3. Validate references (events exist, transitions point to real states, etc.)
-4. Return `PulseProject` or `ParseError` with line numbers
-
-**Key decisions**:
-- **StateRef is a string**: Supports both flat ("idle") and hierarchical ("running/heating") notation
-- **Two-pass validation**: Parse first, then validate references (catches typos early)
-- **Clear error messages**: Line numbers and specific reference issues
-
-**What it doesn't do** (yet):
-- Validate guard expressions (out of scope - guards are names, see §3.2)
-- Type-check action parameters (drivers define their own schemas)
-- Resolve dependencies between components (planned for v1.1)
-
-### Layer 3: Codegen (`src/codegen/index.ts`)
-
-**What it does**:
-1. Take validated `PulseProject`
-2. Generate complete Arduino sketch
-3. Register the state hierarchy with PulseHSM and wire up per-state handlers
-4. Stub guard and action handlers (user fills in logic)
-
-**Generated code includes**:
-- `PULSEHSM_MAX_*` sizing macros, emitted above the include so they take effect
-- Event enum (`uint8_t`, to match `sendEvent` / `EventCb`)
-- `SystemParameters`, `SystemSensors` and `SystemContext`
-- One `addState()` registration per state, parents before children
-- One `onEvent` handler per state with outgoing transitions
-- Guard and action stubs ready for implementation
-- Serial logging for debugging
-
-**Design**:
-- **Drives the real runtime**: dispatch, entry/exit chains and LCA handling
-  belong to PulseHSM; codegen does not reimplement them
-- **Hierarchy comes from the library**: event bubbling makes an inner
-  transition outrank an enclosing one, so there is no precedence logic to write
-- **Always transitions to a leaf**: composite targets are resolved through
-  their initial children before `transitionTo()`
-- **Extensible stubs**: guards and actions are pre-declared, user fills in
-- **Zero assumptions**: Doesn't assume specific hardware, pins, or libraries
+Guards and actions are **names of C functions**, never conditions or bodies.
+The schema has no expression field. This is enforced, not merely stated.
 
 ---
 
-## 3. Key Design Decisions & Why
+## 2. System Architecture
 
-### 3.1 "Stable Core + Extensible Domains"
-
-**Decision**: Keep the core HSM schema minimal and stable. Extend via plugins.
-
-**Why**: 
-- The core (states, events, transitions, guards, actions) is rarely wrong
-- New sensors, actuators, interfaces come constantly
-- Hard-coding them into the schema creates maintenance burden
-
-**How**:
-```yaml
-# Instead of:
-type: ds18b20
-type: max6675
-type: dht21
-
-# We do:
-components:
-  water_temp:
-    class: sensor
-    driver: ds18b20    # ← plugin reference, not hard-coded
-    config:
-      interface: onewire
-      pin: GPIO4
 ```
-
-### 3.2 "Guards Are Names, Not Conditions"
-
-**Decision**: Don't make YAML itself a programming language. There is no
-expression field in the schema.
-
-**Why**: YAML is for data, not code. An evaluable condition never stays one
-comparison — it grows precedence, scoping, type rules, `&&`, function calls
-and arithmetic, until it is a language with no debugger and no IDE support.
-It would also be one more dialect for a learner to absorb on top of the C
-they already need, which is the cost PulseIR exists to remove.
-
-An earlier version of this schema carried
-`expression: "temperature >= setpoint"` and emitted it as a comment. That was
-the worst option available: the model looked executable, but nothing ran it.
-
-**How**:
-```yaml
-guard: temp_at_setpoint
-```
-
-With the intent recorded as prose, copied into the generated stub as a comment
-and never parsed:
-```yaml
-guard:
-  name: temp_at_setpoint
-  description: water temperature has reached the setpoint
-```
-
-The condition itself lives in C, where it is type-checked and steppable:
-```c
-bool guard_temp_at_setpoint(const SystemContext* ctx) {
-  return ctx->sensors->temperature_sensor >= ctx->parameters->setpoint;
-}
-```
-
-See FUNCTION_CONTRACT.md §6.
-
-### 3.3 "Action Type + Driver Pattern"
-
-**Decision**: Actions reference drivers by name, not hard-coded in schema.
-
-**Why**: Same as components—new actions come constantly. Don't bind the schema to specific implementations.
-
-**How**:
-```yaml
-actions:
-  start_pump:
-    type: driver
-    driver: gpio_control      # ← plugin
-    params:
-      pin: PUMP
-      value: HIGH
-```
-
-### 3.4 "StateRef as String with Hierarchy Notation"
-
-**Decision**: Use "running/heating" instead of separate state IDs.
-
-**Why**:
-- Human-readable
-- Works with flat and hierarchical states
-- Compiler turns it into enums anyway
-
-**How**:
-```yaml
-states:
-  running:
-    type: composite
-    initial: heating
-    states:
-      heating:
-      cooling:
-
-transitions:
-  - source: running/heating    # ← works naturally
-    event: TEMP_REACHED
-    target: running/maintaining
+YAML model(s)
+    ↓ Parser (src/parser/)
+PulseProject IR                ← runtime-neutral, platform-neutral
+    ↓ Board Resolver            logical pin names → physical GPIO
+    ↓ Validator                 semantic rules, pin conflicts
+    ↓ Codegen (src/codegen/)
+        ↓ PlatformBackend ─────→ Arduino (.ino)
+                         ─────→ ESP-IDF (.cpp + FreeRTOS)
+                         ─────→ MicroPython (main.py)
+                         ─────→ Zephyr (.cpp + prj.conf + CMakeLists.txt) ← in progress
+    ↓ Emitters (src/emit/)
+        TopicEmitter  → MQTT topic manifest (topics.json)
+        LibraryEmitter → library manifest (libraries.json)
+        DiagramEmitter → Mermaid state diagram (.md / .mmd)
+        CmakeEmitter   → ESP-IDF CMakeLists.txt
+        ZephyrProjectEmitter → CMakeLists.txt + prj.conf + app.overlay  ← in progress
 ```
 
 ---
 
-## 4. The Extensibility Model
+## 3. Layer 1 — The IR (`src/model/`)
 
-### 4.1 Adding a New Event Source
+Pure data structures. No logic, no platform assumptions.
 
-**Today**: EXTERNAL, TIMER, SENSOR, MQTT, INTERNAL
+| Concept | What it represents |
+|---|---|
+| `State` | HSM state: name, entry/exit actions, nested regions, initial child |
+| `Event` | Named trigger with source (`external`, `sensor`, `mqtt`, …) |
+| `Transition` | `from` + `on`/`after` + `guard` + `do` + `to` |
+| `Action` | Named call to a C function; carries `driver` and `params` |
+| `Guard` | Named C predicate; description becomes a stub comment |
+| `Resource` | Declared hardware interface (gpio, i2c, uart, ota, …) |
+| `Component` | Typed device: `digital_output`, `ds18b20`, … |
+| `Parameter` | Named configuration value with type, range, default, unit |
+| `Task` | Periodic work: interval + action list + optional log template |
+| `Command` | Text-in → action/event dispatch from a declared UART |
+| `PulseProject` | The root: project + target + hardware + parameters + events + machine + actions + libraries |
 
-**To add a new source** (e.g., CAN bus):
-
-1. Add to enum:
-```typescript
-export enum EventSource {
-  // ...
-  CAN = "can",
-}
-```
-
-2. Parser automatically accepts it
-3. Codegen includes it in event logging
-4. Done ✓
-
-### 4.2 Adding a New Action Type
-
-**Today**: `type: driver` + `driver: name`
-
-**To add a new type** (e.g., `type: mqtt_publish`):
-
-1. Add to enum:
-```typescript
-export enum ActionType {
-  DRIVER = "driver",
-  MQTT_PUBLISH = "mqtt_publish",
-}
-```
-
-2. Codegen handles it:
-```typescript
-switch (action.type) {
-  case 'driver':
-    // existing logic
-  case 'mqtt_publish':
-    // new logic
-}
-```
-
-3. No schema changes needed ✓
-
-### 4.3 Adding a New Resource Interface
-
-**Today**: GPIO, UART, I2C, SPI, CAN, MQTT, ONEWIRE
-
-**To add BLE, NB-IoT, etc.**:
-
-1. Add to enum
-2. Parser validates it
-3. Codegen includes it
-4. Components can reference it
-5. No schema changes ✓
+The IR is **intentionally frozen between backends**. Changing the model schema
+never requires touching the backends.
 
 ---
 
-## 5. Data Flow Through the System
+## 4. Layer 2 — Parser and Board Resolver (`src/parser/`)
 
-### 5.1 From YAML to Arduino
+### 4.1 Parser (`index.ts`)
 
-```
-human writes boiler.yaml
-        ↓
-parser.parse(yaml)
-  - Load YAML
-  - Map to PulseModel types
-  - Validate event/state references
-        ↓
-PulseProject object (fully validated IR)
-        ↓
-codegen.generate(project)
-  - Flatten state tree
-  - Index all actions
-  - Generate state/event enums
-  - Generate transition table
-  - Generate setup/loop/event processing
-        ↓
-boiler.ino (Arduino sketch, 238 lines)
-        ↓
-user fills in action implementations
-        ↓
-Arduino IDE → upload → ESP32 runs it
-```
+Two-pass:
+1. Load YAML; map each section to IR types
+2. Validate all references (unknown events, unknown states, transition targets,
+   action catalogue membership, pin conflicts, import cycles)
 
-### 5.2 From IR to Multiple Tools (Future)
+Errors include file + section context. `Parser.warnings` carries soft notices
+(deprecated shapes, possible oversights) that the CLI prints as `⚠️` lines.
 
-```
-PulseProject (IR)
-    ├→ Codegen → Arduino C++
-    ├→ PulseSim → Browser simulation
-    ├→ PulseDash → HMI configuration
-    ├→ Visualizer → Diagram
-    └→ Documentation → Auto-docs
-```
+### 4.2 Board Resolver (`board-resolver.ts`)
 
----
-
-## 6. MVP Scope (What's In)
-
-✅ **Complete**:
-- Core HSM: states, events, transitions, guards, actions
-- Hierarchical states (COMPOSITE type)
-- Wildcard transitions (from any state)
-- Component model (sensors, actuators, services)
-- Resource model (GPIO, UART, I2C, etc.)
-- Parameters (configuration values)
-- YAML parser with validation
-- C++ code generator (Arduino compatible)
-- CLI interface
-
-**Not in scope (v1.1+)**:
-- ❌ Orthogonal regions (parallel states)
-- ❌ State history
-- ❌ Dependency graph validation
-- ❌ Guard expression validation (out of scope by design)
-- ❌ Component driver plugin system
-- ❌ PulseSim integration
-- ❌ PulseDash integration
-- ❌ Web UI / PulseCore IDE serialization
-
----
-
-## 7. How to Use It
-
-### 7.1 Write YAML
-
-```yaml
-project:
-  name: boiler_control
-  version: 1.0
-
-system:
-  events:
-    - name: START
-      source: external
-    - name: TEMP_REACHED
-      source: sensor
-
-  states:
-    - name: idle
-      type: simple
-    - name: running
-      type: composite
-      initial: heating
-      states:
-        - name: heating
-          type: simple
-        - name: cooling
-          type: simple
-
-  transitions:
-    - source: idle
-      event: START
-      target: running
-      actions:
-        - start_pump
-
-  actions:
-    start_pump:
-      type: driver
-      driver: gpio_control
-      params:
-        pin: PUMP
-        value: HIGH
-
-  components:
-    - name: pump
-      class: actuator
-      driver: gpio_control
-      config:
-        pin: GPIO25
-```
-
-### 7.2 Parse & Generate
+Translates **logical pin names** to **physical GPIO identifiers** before
+codegen runs. A model that says `pin: LED_BUILTIN` becomes `pin: GPIO2` when
+compiled for `esp32`.
 
 ```bash
-# Build
-npm run build
-
-# Parse and generate
-node dist/src/cli.js examples/boiler.yaml --output boiler.ino
-
-# Or use in code
-import { Parser } from './src/parser/index.js';
-import { Codegen } from './src/codegen/index.js';
-
-const parser = new Parser();
-const project = parser.parse(yamlContent);
-
-const codegen = new Codegen();
-const code = codegen.generate(project);
+pulse-ir model.yaml --board esp32_devkit_v4
 ```
 
-### 7.3 Implement Actions
+Board profiles live in `boards/*.yaml`:
 
-The generated .ino includes action stubs:
+```yaml
+# boards/esp32.yaml
+id: esp32
+name: "ESP32 (generic)"
+framework: arduino          # or: espidf, micropython, zephyr
+zephyr_board: esp32_devkitc_wroom  # west build -b <this>
+pins:
+  LED_BUILTIN: GPIO2
+  I2C_SDA: GPIO21
+  I2C_SCL: GPIO22
+  A0: GPIO36
+capabilities:
+  adc: [GPIO32, GPIO33, GPIO34, GPIO35, GPIO36, GPIO39]
+  pwm_channels: 16
+  input_only: [GPIO34, GPIO35, GPIO36, GPIO39]
+  reserved: [GPIO6, GPIO7, GPIO8, GPIO9, GPIO10, GPIO11]
+```
 
-```cpp
-void action_start_pump(SystemContext* ctx) {
-  Serial.print("  -> Action: start_pump");
-  
-  // TODO: Implement action logic
-  // Parameters: { "pin": "PUMP", "value": "HIGH" }
-  
-  // Add your code:
-  digitalWrite(PUMP_PIN, HIGH);
+The resolver catches:
+- output assigned to an input-only pin
+- pin wired to integrated SPI flash
+- PWM on a pin the board cannot drive
+- ADC2 used while WiFi is declared
+
+**Adding a new board**: copy any `boards/*.yaml`, fill in real vendor data
+(not from memory — cite the datasheet), add a test in `test/compile.test.ts`.
+
+### 4.3 Known board profiles
+
+| Board ID | Framework | Zephyr target |
+|---|---|---|
+| `arduino_uno` | arduino | — |
+| `arduino_mega` | arduino | — |
+| `esp32` | arduino / espidf | `esp32_devkitc_wroom` |
+| `esp32_devkit_v4` | arduino / espidf | `esp32_devkitc_wroom` |
+| `esp32s3` | arduino / espidf | `esp32s3_devkitc` |
+| `esp32_s3_devkit` | arduino / espidf | `esp32s3_devkitc` |
+| `pico` | arduino | `rpi_pico` |
+| `rp2040_pico` | arduino | `rpi_pico` |
+
+**Planned (Zephyr Phase 2+)**: `nrf52840_dk`, `stm32f4_disco`, `mimxrt1060_evk`,
+`nucleo_f767zi`, `bl5340_dvk`.
+
+---
+
+## 5. Layer 3 — Codegen (`src/codegen/`)
+
+### 5.1 The `Codegen` class (`index.ts`)
+
+Platform-agnostic traversal of the IR. Owns "what to emit":
+- State machine sizing macros (`PULSEHSM_MAX_*`)
+- Event and state enums
+- `SystemContext`, `SystemParameters`, `SystemSensors` structs
+- `setupInterfaces()` — calls each resource's init lines
+- `setup()` / `loop()` or platform equivalent
+- Action stubs with `driver`-specific bodies for built-in drivers
+- Guard stubs
+- Task scheduling logic
+- Command dispatch table
+- Interrupt ISR registration
+- Diagnostic print calls
+
+Codegen calls through `PlatformBackend` for every platform-specific
+spelling. It never tests `if (backend.name === ...)`.
+
+### 5.2 The `PlatformBackend` interface (`backend.ts`)
+
+The seam between the platform-agnostic traversal and each target. Every
+backend implements all 16 methods:
+
+| Method | What it abstracts |
+|---|---|
+| `nowExpr()` | `millis()` · `esp_timer_get_time()/1000` · `k_uptime_get()` |
+| `timestampType()` | `unsigned long` · `int64_t` |
+| `digitalWriteExpr(pin, value)` | `digitalWrite(p,v)` · `gpio_set_level()` · `gpio_pin_set_dt()` |
+| `digitalReadExpr(pin)` | `digitalRead(p)` · `gpio_get_level()` · `gpio_pin_get_dt()` |
+| `analogReadExpr(pin)` | `analogRead(p)` · `adc1_get_raw()` · adc_read() |
+| `analogWriteExpr(pin, duty)` | `analogWrite(p,d)` · `ledc_set_duty()` · `pwm_set_dt()` |
+| `ledcWriteLines(pin, ch, duty, board)` | ESP32 LEDC API fork (core 2.x vs 3.x) |
+| `consoleStreamName(port)` | `Serial` · `UART_NUM_0` · `""` (printk) |
+| `printExpr(stream, value)` | `stream.print(v)` · `pulseIrPrint(v)` · `printk(…)` |
+| `printlnExpr(stream, value)` | … |
+| `streamAvailableExpr(stream)` | `stream.available()` · `uart_get_buffered_data_len()` |
+| `streamReadExpr(stream)` | `stream.read()` · `uart_read_bytes()` |
+| `platformIncludes(hasMachine, sizing)` | system headers, sizing macros |
+| `emitInterface(resource, symbol)` | resource-specific init, globals, defines |
+| `renderSetup(body)` | `void setup() {…}` · `static void _setup() {…}` |
+| `renderLoop(body)` | `void loop() {…}` · `int main() { _setup(); while(1){…} }` |
+
+### 5.3 Built-in action drivers
+
+The following `driver:` names produce fully generated bodies (no TODO):
+
+| Driver | What it generates |
+|---|---|
+| `gpio_control` | `digitalWrite()` / `gpio_set_level()` / `gpio_pin_set_dt()` |
+| `pwm_control` | `ledcWrite()` / `ledc_set_duty()` |
+| `adc_read` | `analogRead()` / `adc1_get_raw()` |
+| `uart_write` | `Serial.println()` / `printf()` |
+| `sleep_control` | `esp_deep_sleep_start()` / `esp_light_sleep_start()` (ESP32 only) |
+| `http_get` | `HTTPClient::GET()` (ESP32/ESP8266 Arduino core) |
+| `http_post` | `HTTPClient::POST()` (ESP32/ESP8266 Arduino core) |
+
+All other drivers produce a typed stub the user fills in.
+
+### 5.4 Interface backends
+
+Hardware resource init (`emitInterface`) is platform-specific and lives in a
+separate class:
+
+| Class | File | Used by |
+|---|---|---|
+| `InterfaceBackend` | `interfaces.ts` | Arduino |
+| `EspIdfInterfaceBackend` | `espidf_interfaces.ts` | ESP-IDF |
+| `ZephyrInterfaceBackend` | `zephyr_interfaces.ts` | Zephyr ← in progress |
+
+Each returns an `InterfaceEmission`:
+```typescript
+interface InterfaceEmission {
+  defines:   string[];   // #define SENSOR_BUS_SDA 21
+  globals:   string[];   // gpio_dt_spec, Wire objects, etc.
+  init:      string[];   // Wire.begin(), gpio_config(), etc.
+  libraries: ImpliedLibrary[];
+  todos:     string[];   // unresolvable bindings
+  loop?:     string[];   // ArduinoOTA.handle(), etc.
 }
 ```
 
----
+### 5.5 Supported interfaces (resource types)
 
-## 8. Testing & Validation
-
-### 8.1 Parser Test
-```bash
-npm run build
-node dist/test/parser.test.js
-```
-
-Tests that `boiler.yaml` parses correctly:
-- ✓ Events loaded
-- ✓ States indexed
-- ✓ Transitions validated
-- ✓ Hierarchical states work
-
-### 8.2 Codegen Test
-```bash
-npm run build
-node dist/test/codegen.test.js
-```
-
-Tests that code generation works:
-- ✓ State/event enums created
-- ✓ Transition table built
-- ✓ Action stubs generated
-- ✓ Arduino sketch is valid C++
+| Interface | Arduino | ESP-IDF | Zephyr |
+|---|---|---|---|
+| `gpio` | ✅ | ✅ | Phase 2 |
+| `pwm` | ✅ | ✅ | Phase 3 |
+| `adc` | ✅ | ✅ | Phase 3 |
+| `uart` | ✅ | ✅ | Phase 2 |
+| `i2c` | ✅ | ✅ | Phase 2 |
+| `spi` | ✅ | ✅ | Phase 3 |
+| `can` | ✅ stub | ✅ stub | Phase 4 |
+| `onewire` | ✅ | — | Phase 4 |
+| `wifi` | ✅ | ✅ stub | Phase 4 |
+| `ethernet` | ✅ stub | — | Phase 4 |
+| `ble` | ✅ stub | — | Phase 4 |
+| `mqtt` | ✅ stub | ✅ stub | Phase 4 |
+| `eeprom` | ✅ | — | Phase 4 |
+| `littlefs` | ✅ | — | Phase 4 |
+| `ota` | ✅ (ArduinoOTA) | — | Phase 4 (MCUboot) |
+| `custom` | ✅ (TODO) | ✅ (TODO) | Phase 4 |
 
 ---
 
-## 9. File Structure
+## 6. The Emit Layer (`src/emit/`)
+
+Parallel outputs that do not require a PlatformBackend:
+
+| Emitter | Output | Flag |
+|---|---|---|
+| `TopicEmitter` | `topics.json` — MQTT topic manifest | `--topics` |
+| `LibraryEmitter` | `libraries.json` — PlatformIO lib_deps | `--libraries` |
+| `DiagramEmitter` | Mermaid state diagram | `--diagram` |
+| `CmakeEmitter` | ESP-IDF CMakeLists.txt | `--cmake` |
+| `ZephyrProjectEmitter` | CMakeLists.txt + prj.conf + app.overlay | auto (Zephyr target) |
+
+---
+
+## 7. The Generated Project Structure
+
+### Arduino / ESP-IDF (`--outdir`)
+
+```
+out/
+├── project_name.ino / .cpp    ← regenerated, do not edit
+├── project_name_generated.h   ← regenerated, do not edit
+├── PulseHSM_config.h          ← runtime table sizes (keep beside PulseHSM.h)
+├── PulseHSM.h / .cpp          ← runtime, vendored
+└── src/
+    ├── actions.cpp             ← YOURS — written once, never overwritten
+    └── guards.cpp              ← YOURS — written once, never overwritten
+```
+
+### Zephyr (`--outdir`, planned Phase 1)
+
+```
+out/
+├── CMakeLists.txt             ← west build entry point (regenerated)
+├── prj.conf                   ← Kconfig, derived from model (regenerated)
+├── app.overlay                ← Devicetree aliases (regenerated)
+├── PulseHSM.h / .cpp          ← runtime, vendored
+├── PulseHSM_config.h          ← runtime table sizes
+└── src/
+    ├── main.cpp               ← regenerated — _setup() + int main()
+    ├── actions.cpp             ← YOURS
+    └── guards.cpp              ← YOURS
+```
+
+Build with:
+```bash
+west build -b native_sim        # simulation, no hardware needed
+west build -b esp32_devkitc_wroom  # real board
+./build/zephyr/zephyr.exe       # run native_sim binary
+```
+
+---
+
+## 8. Adding a New Backend
+
+1. Create `src/codegen/<name>.ts` — implement every method of `PlatformBackend`
+2. Create `src/codegen/<name>_interfaces.ts` — implement `emit(resource, symbol)`
+   returning `InterfaceEmission`
+3. Add a case to `resolveBackend()` in `src/cli.ts`
+4. Add the target name to the USAGE string in `src/cli.ts`
+5. Add mock harness headers to `test/harness/<name>/`
+6. Add fixture tests in `test/backends.test.ts`
+
+Referencing `EspIdfBackend` + `EspIdfInterfaceBackend` is the recommended
+pattern. Zephyr is the reference implementation in progress.
+
+---
+
+## 9. Adding a New Board
+
+1. Create `boards/<board_id>.yaml` following the schema:
+
+```yaml
+id: nrf52840_dk
+name: "Nordic nRF52840 DK"
+framework: zephyr            # arduino | espidf | micropython | zephyr | any
+zephyr_board: nrf52840dk_nrf52840   # west build -b <this>
+pins:
+  LED1: P0.13
+  LED2: P0.14
+  BTN1: P0.11
+  I2C_SDA: P0.26
+  I2C_SCL: P0.27
+capabilities:
+  adc: [P0.02, P0.03, P0.04, P0.05, P0.28, P0.29, P0.30, P0.31]
+  pwm_channels: 8
+  input_only: []
+  reserved: []
+citation: "https://docs.nordicsemi.com/bundle/nrf52840_dk_hw_user_guide"
+```
+
+2. Add it to the Known Boards table in `boards/README.md`
+3. Add a `--board <id>` test in `test/compile.test.ts`
+
+Board data **must come from vendor documentation** (cite it). A wrong profile
+is worse than no profile — it rejects valid designs and generates wrong code.
+
+---
+
+## 10. Testing
+
+### Test suites
+
+| Suite | File | What it covers |
+|---|---|---|
+| Compile tests | `test/compile.test.ts` | Generates C++ for all examples; compiles with `g++`; links real or stub PulseHSM |
+| Backend tests | `test/backends.test.ts` | Fixture YAML → generated output assertions (no compilation) |
+
+### Test harness (`test/harness/`)
+
+Platform stubs that let the host `g++` compile generated Arduino and ESP-IDF
+code without the actual frameworks installed:
+
+```
+test/harness/
+├── Arduino.h        ← digitalWrite, Serial, Wire, SPI, …
+├── ArduinoOTA.h     ← OTA stub
+├── HTTPClient.h     ← HTTP client stub
+├── PubSubClient.h   ← MQTT stub
+├── Adafruit_*.h     ← display library stubs
+└── zephyr/          ← Zephyr stubs (Phase 1)
+    ├── kernel.h     ← k_uptime_get, k_msleep, K_TIMER_DEFINE, …
+    ├── drivers/
+    │   ├── gpio.h   ← gpio_dt_spec, gpio_pin_set_dt, …
+    │   └── uart.h   ← uart_poll_in, uart_poll_out
+    └── net/         ← Phase 4
+```
+
+---
+
+## 11. File Structure (Current)
 
 ```
 pulse-ir/
 ├── src/
 │   ├── model/
-│   │   ├── types.ts         ← IR type definitions (enums, interfaces)
-│   │   └── index.ts
+│   │   └── index.ts          IR type definitions
 │   ├── parser/
-│   │   └── index.ts         ← YAML → IR
+│   │   ├── index.ts           YAML → IR + validation
+│   │   ├── board-resolver.ts  logical pin → physical GPIO
+│   │   ├── fs-resolver.ts     filesystem imports
+│   │   └── resolver.ts        SourceResolver interface
 │   ├── codegen/
-│   │   └── index.ts         ← IR → C++
-│   └── cli.ts               ← Command-line interface
+│   │   ├── backend.ts         PlatformBackend interface
+│   │   ├── index.ts           Codegen class (platform-agnostic traversal)
+│   │   ├── interfaces.ts      InterfaceBackend (Arduino)
+│   │   ├── arduino.ts         ArduinoBackend
+│   │   ├── espidf_interfaces.ts EspIdfInterfaceBackend
+│   │   ├── espidf.ts          EspIdfBackend
+│   │   ├── micropython.ts     MicroPythonCodegen (standalone)
+│   │   ├── zephyr_interfaces.ts ZephyrInterfaceBackend ← in progress
+│   │   └── zephyr.ts          ZephyrBackend           ← in progress
+│   ├── emit/
+│   │   ├── topics.ts          MQTT topic manifest
+│   │   ├── libraries.ts       library manifest
+│   │   ├── diagram.ts         Mermaid diagram
+│   │   ├── cmake.ts           ESP-IDF CMakeLists.txt
+│   │   └── zephyr_project.ts  Zephyr project files   ← in progress
+│   ├── analysis/
+│   │   └── validate.ts        semantic validation (post-parse)
+│   └── cli.ts                 CLI entry point
 ├── test/
-│   ├── parser.test.ts       ← Parser validation
-│   └── codegen.test.ts      ← Codegen validation
-├── examples/
-│   └── boiler.yaml          ← Full example system
-├── README.md                ← Quick start
-├── ARCHITECTURE.md          ← This file
-├── package.json
-└── tsconfig.json
+│   ├── backends.test.ts       fixture tests
+│   ├── compile.test.ts        compile + link tests
+│   └── harness/               platform stub headers
+├── boards/                    board profiles (YAML)
+├── examples/                  8 worked models
+├── deps/
+│   ├── PulseHSM.h
+│   └── PulseHSM.cpp
+└── web/                       browser editor
+    ├── index.html
+    ├── main.ts
+    └── app.js                 (committed bundle)
 ```
 
 ---
 
-## 10. Next Steps & Roadmap
+## 12. The Zephyr Backend Roadmap
 
-### Immediate (v0.2)
-- [ ] Orthogonal regions (parallel states)
-- [ ] State history support
-- [x] Guard expressions removed from the schema (see §3.2)
-- [ ] Component driver validation
+### Phase 1 — Skeleton (current work)
+Goal: `west build -b native_sim` compiles the generated project.
 
-### Short term (v1.0)
-- [ ] Dependency graph (what components depend on what)
-- [ ] Plugin system for drivers
-- [ ] PulseSim adapter (export to simulator)
-- [ ] PulseCore IDE serialization (IDE → YAML → IR)
+Files: `src/codegen/zephyr.ts`, `src/codegen/zephyr_interfaces.ts`,
+`src/emit/zephyr_project.ts`, `test/harness/zephyr/`
 
-### Medium term (v1.1)
-- [ ] Visual diagram generator (IR → Mermaid/PlantUML)
-- [ ] Test generation (generate test cases from HSM)
-- [ ] Multi-target codegen (Arduino, ESP-IDF, generic C)
-- [ ] Parameter validation and bounds checking
+### Phase 2 — GPIO, UART, I2C
+Goal: Real hardware on ESP32 / nRF52840 / STM32.
 
-### Long term (v2.0)
-- [ ] Cloud sync (push/pull YAML to cloud)
-- [ ] Version control integration
-- [ ] Collaborative editing
-- [ ] Analytics (which transitions are used, state timing, etc.)
+Key design: `gpio_dt_spec` + naming convention. The `emitInterface()` for gpio
+generates both `#define STATUS_LED_PIN 2` (numeric) and
+`static const struct gpio_dt_spec STATUS_LED_GPIO = GPIO_DT_SPEC_GET(...)`.
+`digitalWriteExpr(pin)` derives the variable by replacing the `_PIN` suffix
+with `_GPIO`.
 
----
+`prj.conf` is model-driven: `CONFIG_GPIO=y` when any GPIO resource is declared,
+`CONFIG_I2C=y` for i2c buses, etc.
 
-## 11. Key Design Philosophy
+`app.overlay` provides devicetree aliases for each declared hardware binding.
 
-**"The IR is the architecture, not the YAML"**
+### Phase 3 — Tasks → Zephyr threads
+Tasks (`every: N`) become `k_timer` + system workqueue entries rather than
+Arduino-style polling in the main loop.
 
-- YAML is a convenience format for humans
-- The real value is `PulseModel` (the types)
-- Multiple serializations (YAML, JSON, protobuf, etc.) can map to the same IR
-- Multiple tools (codegen, simulator, visualizer, IDE) all consume the same IR
-
-**"Stable core, extensible domains"**
-
-- Core HSM concepts (states, events, transitions) are stable
-- Domains (components, resources, actions) are extensible
-- Add new event sources, action types, resources without touching core types
-
-**"Validation is early, generation is dumb"**
-
-- Parser validates references, catches typos, enforces schema
-- Codegen assumes valid input, just generates code
-- This separation makes both simpler and more reliable
+### Phase 4 — WiFi, MQTT, HTTP, OTA
+Platform-specific networking stubs with targeted TODOs. Zephyr networking is
+board-specific; generated scaffolds point to the Zephyr documentation.
 
 ---
 
-## 12. Questions & Answers
+## 13. Key Design Decisions
 
-**Q: Why not use UML SCXML?**  
-A: Too heavy for embedded systems. Too many features we don't need. PulseIR is minimal but extensible.
+### No expression field
+The model has never had one and never will. A guard is a name; the condition
+lives in C where it is type-checked and steppable. The moment `above:` exists
+in a model, `below:`, `between:`, `and:` and `rate_of_change:` all have
+obvious justifications and the line is gone. See FUNCTION_CONTRACT.md §6.
 
-**Q: Why not visual design first?**  
-A: Text (YAML) is easier to version control, review, and generate from other tools. Visual tools serialize to YAML.
+### Codegen calls through PlatformBackend — never tests `backend.name`
+If you find yourself writing `if (backend.name === 'zephyr')` inside `Codegen`,
+that logic belongs in a new method on `PlatformBackend` instead.
 
-**Q: Can I use this without Arduino?**  
-A: Yes. The IR is target-agnostic. Codegen to C++, then adapt to your platform.
+### Nothing appears that you did not declare
+No `Serial.begin(115200)` without a declared `uart` bus. No PulseHSM include
+without a declared `machine:`. A blink that declares one LED produces a sketch
+with no Serial in it at all. A test asserts this against every shipped model.
 
-**Q: What about performance?**  
-A: Linear transition table lookup is O(n). For typical systems (~10-20 transitions), negligible. Can optimize to hash table later if needed.
+### Credentials are never baked in
+A binding key that looks like a secret (`password`, `token`, `key`) is emitted
+as an empty placeholder with a TODO, whatever the model says.
 
-**Q: How do I handle sensor polling?**  
-A: Generated loop has a TODO for sensor logic. User fills in:
-```cpp
-void loop() {
-  // Poll sensors into the struct guards and actions read
-  systemSensors.water_temp = tempSensor.read();
+### Board data must come from vendor documentation
+Each profile cites its source. A wrong profile is worse than no profile — it
+rejects valid designs and generates wrong code.
 
-  if (systemSensors.water_temp > systemParameters.setpoint) {
-    fsm.sendEvent(EVENT_TEMP_REACHED);
-  }
-
-  fsm.update();   // dispatches queued events; never call delay()
-}
-```
-
----
-
-## 13. References & Context
-
-**Project Context**:
-- Part of **PulseCore Engineering** ecosystem
-- Solves unified modeling problem for embedded systems + industrial automation
-- Educational focus: make embedded systems fun, not complex
-
-**Previous Decisions**:
-- Chosen PulseHSM as the C++ runtime (proved in production)
-- ISO C++ with zero heap allocation, ISR-safe
-- Extensible via plugins (not hard-coded driver list)
-
-**Related Tools** (planned integration):
-- **PulseCore IDE**: Visual FSM designer (will serialize to this IR)
-- **PulseSim**: Browser-based simulator (will consume this IR)
-- **PulseDash**: Industrial HMI (will visualize system state from this IR)
-- **PulseCore Monitor**: SMS-based monitoring (will work with deployed systems from this IR)
-
----
-
-## 14. How to Extend This Document
-
-Add new files as complexity grows:
-- `PARSER_DETAILS.md` — reference resolution, validation rules
-- `CODEGEN_TARGETS.md` — supporting multiple output languages (ESP-IDF, bare metal, etc.)
-- `SCHEMA_SPEC.md` — formal YAML schema specification
-- `EXAMPLES.md` — walkthroughs for different system types
-- `INTEGRATION.md` — how to wire up PulseCore IDE, PulseSim, etc.
-
----
-
-**Last Updated**: August 9, 2026  
-**By**: PulseCore Engineering Team  
-**Status**: MVP Complete, Ready for Integration
+### Parameters are read every pass
+`after: green_ms` re-reads the parameter each loop iteration, so retuning over
+MQTT takes effect immediately rather than at the next reboot.

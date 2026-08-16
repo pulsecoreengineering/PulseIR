@@ -9,16 +9,25 @@ complete project, and its generated sketch contains no PulseHSM at all: no
 include, no runtime vendored beside it, no sizing header. Nothing in the IR
 types assumes a runtime.
 
+## Backends
+
+| Target | Flag | Output | Entry point |
+|---|---|---|---|
+| Arduino (default) | `--target arduino` | `.ino` | `setup()` + `loop()` |
+| ESP-IDF | `--target espidf` | `.cpp` | `app_main()` (FreeRTOS) |
+| MicroPython | `--target micropython` | `.py` | `main()` (asyncio) |
+| Zephyr RTOS | `--target zephyr` | `.cpp` + `CMakeLists.txt` + `prj.conf` | `int main()` (Zephyr kernel) — *in progress* |
+
 ## Architecture
 
 ```
 YAML (PulseProject)
-  ↓ (parse)
-PulseModel (IR types)          ← runtime-neutral
+  ↓ (parse + board resolver)
+PulseModel (IR types)          ← runtime-neutral, platform-neutral
   ↓ (validate)
-  ↓ (Arduino backend)
+  ↓ (Codegen + PlatformBackend)
 C++ sketch  ── with a machine ──→ + PulseHSM
-            ── without one ─────→ plain Arduino, no runtime
+            ── without one ─────→ plain Arduino/ESP-IDF/Zephyr, no runtime
 ```
 
 ## Project Structure
@@ -599,7 +608,22 @@ Devices sharing a bus are not a conflict - that is what a bus is for.
 npm install
 npm run build
 npm run test
+
+# Arduino (default)
 npm run cli -- examples/boiler/pulse.yaml --output boiler.ino
+
+# ESP-IDF
+npm run cli -- examples/boiler/pulse.yaml --target espidf --outdir out/
+
+# MicroPython
+npm run cli -- examples/boiler/pulse.yaml --target micropython --output main.py
+
+# Zephyr (in progress)
+npm run cli -- examples/boiler/pulse.yaml --target zephyr --outdir out/
+# west build -b native_sim
+
+# Other outputs
 npm run cli -- examples/boiler/pulse.yaml --topics topics.json
 npm run cli -- examples/boiler/pulse.yaml --libraries libraries.json
+npm run cli -- examples/boiler/pulse.yaml --diagram fsm.md
 ```
