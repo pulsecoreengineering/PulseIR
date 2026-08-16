@@ -1,0 +1,54 @@
+# Fixture for safety: — pre-dispatch guard checks with response actions and
+# latching fault behaviour.
+#
+# Points exercised:
+#   over_temperature: latching critical fault — trips once, stays tripped even
+#     if the guard later returns false, drives to safe_shutdown, calls two actions.
+#   low_pressure: non-latching warning — fires every loop the guard is true,
+#     calls one action, no state transition.
+
+project:
+  name: safety_test
+  version: "1.0"
+
+target:
+  board: esp32
+
+hardware:
+  devices:
+    temperature:
+      type: analog_input
+      pin: GPIO34
+      class: sensor
+
+events:
+  START: { source: external }
+
+actions:
+  cut_power:    {}
+  close_valve:  {}
+  alert:        {}
+
+machine:
+  states:
+    idle:
+    running:
+    safe_shutdown:
+
+  transitions:
+    - from: idle
+      on: START
+      to: running
+
+safety:
+  over_temperature:
+    check: guard_over_safe_temp
+    description: Shut down if temperature sensor exceeds safe limit
+    severity: critical
+    response: [cut_power, close_valve]
+    to: safe_shutdown
+    latching: true
+  low_pressure:
+    check: guard_low_pressure
+    severity: warning
+    response: [alert]

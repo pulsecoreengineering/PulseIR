@@ -434,6 +434,39 @@ export interface Communication {
   subscribe?: CommunicationSubscribeItem[];
 }
 
+/** One named safety rule: a C guard that is checked every loop iteration. */
+export interface SafetyRule {
+  /** Rule name (from the YAML key). */
+  name: string;
+  /** C guard function returning true when the condition is unsafe. */
+  check: string;
+  /** Human-readable description, reproduced as a comment in the generated code. */
+  description?: string;
+  /** Severity for documentation; does not affect code generation. */
+  severity?: 'critical' | 'warning';
+  /** Actions to invoke when the check fires. Called with a null context. */
+  response?: string[];
+  /** Target state to transition to when the check fires. Requires a machine. */
+  to?: string;
+  /** Once triggered, keeps acting on every loop even if check returns false. */
+  latching?: boolean;
+}
+
+/**
+ * Pre-dispatch safety policy.
+ *
+ * `runSafetyChecks()` runs at the very top of `loop()`, before the HSM tick,
+ * so a critical fault preempts normal event dispatch regardless of which leaf
+ * state the machine is currently in.
+ *
+ * Conditions are named C guards — you write the comparison, the model owns
+ * the policy (severity, response actions, target state, latching behaviour).
+ * This keeps expression evaluation out of the YAML and the check testable.
+ */
+export interface Safety {
+  rules: SafetyRule[];
+}
+
 export interface PulseSystem {
   name: string;
   version?: string;
@@ -462,6 +495,8 @@ export interface PulseSystem {
   telemetry?: Telemetry;
   /** Explicit MQTT publish/subscribe contract with stable topic names. */
   communication?: Communication;
+  /** Pre-dispatch safety rules checked at the top of every loop() iteration. */
+  safety?: Safety;
 
   metadata?: Metadata;
 }

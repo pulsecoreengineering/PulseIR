@@ -186,6 +186,7 @@ export class Codegen {
       this.generateTelemetry(),
       this.generateStorageWiring(),
       this.generateReadSensors(),
+      this.generateSafetyChecks(),
       this.generateDiagnostics(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
@@ -286,6 +287,7 @@ ${this.backend.entryPointDeclarations()}${this.declInterfaceGlobals()}`,
       this.generateTelemetry(),
       this.generateStorageWiring(),
       this.generateReadSensors(),
+      this.generateSafetyChecks(),
       this.generateDiagnostics(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
@@ -1023,6 +1025,80 @@ ${cases.join('\n')}
   // =========================================================================
   // DIAGNOSTICS — watchdog, heartbeat LED, log level
   // =========================================================================
+
+  /**
+   * Generate the runSafetyChecks() function.
+   *
+   * Called at the very top of loop(), before the HSM tick, so a critical
+   * fault preempts normal dispatch regardless of the current leaf state.
+   * Latching rules trip once and stay active even when the guard goes false.
+   * Actions receive nullptr because there is no active event context.
+   */
+  private generateSafetyChecks(): string {
+    const safety = this.project.system.safety;
+    if (!safety) return '';
+
+    const blocks: string[] = [];
+
+    for (const rule of safety.rules) {
+      const lines: string[] = [];
+
+      // Comment header for the rule.
+      const parts = [rule.name];
+      if (rule.severity) parts.push(rule.severity);
+      if (rule.latching) parts.push('latching');
+      lines.push(`  // ${parts.join(', ')}`);
+      if (rule.description) lines.push(`  // ${rule.description}`);
+
+      // Latch variable (static — survives across calls, resets only on power cycle).
+      const latchVar = `_latch_${this.sanitize(rule.name)}`;
+      if (rule.latching) {
+        lines.push(`  static bool ${latchVar} = false;`);
+      }
+
+      // Condition expression.
+      const cond = rule.latching
+        ? `${latchVar} || ${rule.check}()`
+        : `${rule.check}()`;
+
+      const body: string[] = [];
+      if (rule.latching) body.push(`    ${latchVar} = true;`);
+
+      // Response actions (nullptr context — no active event).
+      for (const action of rule.response || []) {
+        body.push(`    ${this.sanitize(action)}(nullptr);`);
+      }
+
+      // State transition.
+      if (rule.to) {
+        const idx = this.resolveEntry(this.resolveRef(rule.to, 'target'));
+        const sym = this.states[idx].symbol;
+        body.push(`    fsm.transitionTo(${sym});`);
+      }
+
+      body.push('    return;');
+
+      lines.push(`  if (${cond}) {`);
+      lines.push(...body);
+      lines.push('  }');
+      blocks.push(lines.join('\n'));
+    }
+
+    const body = blocks.join('\n\n');
+
+    return `// ============================================================================
+// SAFETY CHECKS
+// ============================================================================
+//
+// runSafetyChecks() runs at the very top of loop(), before the HSM tick.
+// Guards are C functions you implement — the condition logic stays in code,
+// the response policy (severity, actions, target state, latching) lives here.
+// Actions are called with a null context (no active event during safety checks).
+
+static void runSafetyChecks() {
+${body}
+}`;
+  }
 
   private generateDiagnostics(): string {
     const diag = this.project.system.diagnostics;
@@ -2445,7 +2521,10 @@ ${blocks.join('\n\n')}`;
       ? '  syncContext();\n'
       : '';
 
-    const loopBody = `${sync}${body.join('\n')}`;
+    // Safety checks run first: a critical fault must act before anything else.
+    const safetyCall = this.project.system.safety ? '  runSafetyChecks();\n' : '';
+
+    const loopBody = `${safetyCall}${sync}${body.join('\n')}`;
 
     return `// ============================================================================
 // MAIN LOOP

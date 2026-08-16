@@ -29,6 +29,8 @@ import type {
   Communication,
   CommunicationPublishItem,
   CommunicationSubscribeItem,
+  Safety,
+  SafetyRule,
 } from '../model/index.js';
 import type { SourceResolver } from './resolver.js';
 import { findPinConflicts, describePinConflict } from '../analysis/pins.js';
@@ -538,6 +540,7 @@ export class Parser {
     const diagnostics    = this.parseDiagnostics(raw.diagnostics, parameters || []);
     const telemetry      = this.parseTelemetry(raw.telemetry, components || [], parameters || []);
     const communication  = this.parseCommunication(raw.communication, components || [], events, parameters || []);
+    const safety         = this.parseSafety(raw.safety, actionCatalogue, states);
 
     return {
       name: (raw.name as string) || ((raw.project as Record<string, unknown>)?.name as string) || 'unnamed',
@@ -554,6 +557,7 @@ export class Parser {
       diagnostics,
       telemetry,
       communication,
+      safety,
     };
   }
 
@@ -936,6 +940,105 @@ export class Parser {
       commands,
       reportUnknown: raw.report_unknown === undefined ? true : Boolean(raw.report_unknown),
     };
+  }
+
+  private parseSafety(
+    raw: unknown,
+    actionCatalogue: Map<string, Action>,
+    states: State[]
+  ): Safety | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (!isPlainObject(raw)) {
+      throw new ParseError('safety: must be a mapping of named rules (e.g. over_temperature: ...)');
+    }
+
+    const hasMachine = states.length > 0;
+    const rules: SafetyRule[] = [];
+
+    for (const [name, def] of Object.entries(raw as Record<string, unknown>)) {
+      if (!isPlainObject(def)) {
+        throw new ParseError(`safety.${name}: must be a mapping (check:, response:, to:, ...)`);
+      }
+      const d = def as Record<string, unknown>;
+
+      // check: required C guard function name
+      if (typeof d.check !== 'string' || !d.check) {
+        throw new ParseError(`safety.${name}: "check:" is required and must name a C guard function`);
+      }
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(d.check)) {
+        throw new ParseError(
+          `safety.${name}.check: "${d.check}" is not a valid C identifier`
+        );
+      }
+
+      // severity
+      let severity: 'critical' | 'warning' | undefined;
+      if (d.severity !== undefined) {
+        if (d.severity !== 'critical' && d.severity !== 'warning') {
+          throw new ParseError(
+            `safety.${name}.severity: must be "critical" or "warning", got "${d.severity}"`
+          );
+        }
+        severity = d.severity as 'critical' | 'warning';
+      }
+
+      // response: list of declared action names
+      let response: string[] | undefined;
+      if (d.response !== undefined) {
+        const rawList = this.asList(d.response, `safety.${name}.response`);
+        if (!rawList) throw new ParseError(`safety.${name}.response must be a list`);
+        response = rawList.map((item, i) => {
+          if (typeof item !== 'string') {
+            throw new ParseError(`safety.${name}.response[${i}] must be an action name`);
+          }
+          if (!actionCatalogue.has(item)) {
+            const avail = [...actionCatalogue.keys()].join(', ') || '(none declared)';
+            throw new ParseError(
+              `safety.${name}.response: "${item}" is not a declared action. Available: ${avail}`
+            );
+          }
+          return item;
+        });
+      }
+
+      // to: target state name
+      let to: string | undefined;
+      if (d.to !== undefined) {
+        to = String(d.to);
+        if (!hasMachine) {
+          throw new ParseError(
+            `safety.${name}.to: "${to}" requires a state machine (machine: with states)`
+          );
+        }
+        if (!this.stateNames.has(to)) {
+          const avail = [...this.stateNames].join(', ') || '(none)';
+          throw new ParseError(
+            `safety.${name}.to: "${to}" is not a declared state. Declared: ${avail}`
+          );
+        }
+      }
+
+      // Must have at least one effect
+      if (!response?.length && !to) {
+        throw new ParseError(
+          `safety.${name}: must have at least "response:" (actions) or "to:" (transition)`
+        );
+      }
+
+      const rule: SafetyRule = { name, check: d.check };
+      if (d.description !== undefined) rule.description = String(d.description);
+      if (severity !== undefined) rule.severity = severity;
+      if (response?.length) rule.response = response;
+      if (to !== undefined) rule.to = to;
+      if (d.latching === true || d.latching === 'true') rule.latching = true;
+      rules.push(rule);
+    }
+
+    if (rules.length === 0) {
+      throw new ParseError('safety: declared with no rules — add at least one named rule');
+    }
+
+    return { rules };
   }
 
   private parseDiagnostics(raw: unknown, parameters: Parameter[]): Diagnostics | undefined {

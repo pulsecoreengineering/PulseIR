@@ -711,6 +711,119 @@ test('communication: event can be subscribed regardless of its source field', ()
 });
 
 // ============================================================================
+// SAFETY
+// ============================================================================
+
+function withSafety(body: string): string {
+  return `
+project: {name: s, version: "1.0"}
+hardware:
+  devices:
+    temp: {class: sensor, type: analog_input, pin: GPIO34}
+events:
+  START: {source: external}
+actions:
+  cut_power:   {}
+  alert:       {}
+machine:
+  states:
+    idle:
+    running:
+    safe_shutdown:
+  transitions:
+    - {from: idle, on: START, to: running}
+${body}
+`;
+}
+
+test('accepts a full safety block with latching and non-latching rules', () => {
+  const project = expectAccept(withSafety(`safety:
+  over_temp:
+    check: guard_over_temp
+    severity: critical
+    response: [cut_power]
+    to: safe_shutdown
+    latching: true
+  low_pressure:
+    check: guard_low_pressure
+    severity: warning
+    response: [alert]`), 'full safety block');
+
+  const safety = project.system.safety;
+  if (!safety) throw new Error('safety not parsed');
+  if (safety.rules.length !== 2) throw new Error('expected 2 rules');
+  const r0 = safety.rules[0];
+  if (r0.name !== 'over_temp') throw new Error('rule name not preserved');
+  if (r0.check !== 'guard_over_temp') throw new Error('check not preserved');
+  if (!r0.latching) throw new Error('latching not preserved');
+  if (r0.to !== 'safe_shutdown') throw new Error('to not preserved');
+  if (!r0.response?.includes('cut_power')) throw new Error('response not preserved');
+});
+
+test('rejects safety rule with no check:', () => {
+  expectReject(
+    withSafety(`safety:\n  no_check:\n    response: [cut_power]`),
+    '"check:" is required',
+    'missing check'
+  );
+});
+
+test('rejects safety rule check with illegal C identifier', () => {
+  expectReject(
+    withSafety(`safety:\n  bad:\n    check: "123bad"\n    response: [cut_power]`),
+    'not a valid C identifier',
+    'bad check identifier'
+  );
+});
+
+test('rejects safety rule with an undeclared action in response', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    response: [unknown_action]`),
+    'not a declared action',
+    'unknown response action'
+  );
+});
+
+test('rejects safety rule with an unknown to: state', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    response: [cut_power]\n    to: does_not_exist`),
+    'not a declared state',
+    'unknown to state'
+  );
+});
+
+test('rejects safety rule with to: when there is no machine', () => {
+  expectReject(`
+project: {name: s, version: "1.0"}
+tasks:
+  blink: {every: 500, do: cut_power}
+actions:
+  cut_power: {}
+safety:
+  r:
+    check: guard_x
+    to: somewhere
+    response: [cut_power]
+`, 'requires a state machine', 'to without machine');
+});
+
+test('rejects safety rule with neither response nor to', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x`),
+    'must have at least',
+    'no effect rule'
+  );
+});
+
+test('rejects safety with an unknown severity', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    severity: fatal\n    response: [cut_power]`),
+    '"critical" or "warning"',
+    'unknown severity'
+  );
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} validation test(s) failed`);
