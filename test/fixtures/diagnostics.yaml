@@ -1,0 +1,47 @@
+# Fixture for diagnostics: — watchdog, heartbeat LED, log level.
+#
+# None of this is logic: it is pure configuration that the codegen wires
+# to platform APIs. The watchdog and heartbeat are both ESP32-gated so the
+# same sketch compiles on other cores without extra effort.
+
+project:
+  name: diagnostics_test
+  version: "1.0"
+
+target:
+  board: esp32
+
+events:
+  START: { source: external }
+  STOP:  { source: external }
+
+actions:
+  do_work: {}
+
+machine:
+  states:
+    idle:
+    working:
+    done:
+
+  transitions:
+    - from: idle
+      on: START
+      to: working
+
+    - from: working
+      on: STOP
+      to: done
+
+    # Periodic heartbeat from inside the working state.
+    - from: working
+      every: 1000
+      do: do_work
+
+diagnostics:
+  watchdog:
+    timeout_s: 5
+  heartbeat:
+    pin: 2
+    interval_ms: 1000
+  log_level: info

@@ -476,6 +476,136 @@ test('schema version: non-numeric value is rejected', () => {
 });
 
 // ============================================================================
+// EVERY: ON STATES
+//
+// A state with `every:` + `do:` is sugar for a periodic transition from that
+// state. The parser synthesises the transition before validation so all the
+// same rules apply.
+// ============================================================================
+
+function statePeriodic(transitions: string): string {
+  return `
+project: {name: sp, version: "1.0"}
+events:
+  GO: {source: external}
+machine:
+  states:
+    idle:
+    active:
+${transitions}
+  transitions:
+    - {from: idle, on: GO, to: active}
+actions:
+  ping: {}
+`;
+}
+
+test('accepts every: on a state as sugar for a periodic transition', () => {
+  const project = expectAccept(statePeriodic(`      every: 500
+      do: [ping]`), 'every on state');
+  const t = project.system.transitions.find(t => t.every !== undefined);
+  if (!t) throw new Error('synthetic transition not found');
+  if (t.source !== 'active') throw new Error(`wrong source: ${t.source}`);
+  if (t.every !== 500) throw new Error(`wrong interval: ${t.every}`);
+});
+
+test('rejects every: on a state when do: is absent', () => {
+  // Without actions, a periodic transition is a no-op — caught at parse time.
+  expectReject(
+    statePeriodic(`      every: 500`),
+    'at least one action',
+    'every: on state with no do'
+  );
+});
+
+// ============================================================================
+// DIAGNOSTICS
+// ============================================================================
+
+function withDiag(body: string): string {
+  return `
+project: {name: d, version: "1.0"}
+tasks:
+  blink: {every: 500, do: toggle}
+actions:
+  toggle: {}
+${body}
+`;
+}
+
+test('accepts diagnostics with watchdog and heartbeat', () => {
+  const project = expectAccept(withDiag(`diagnostics:
+  watchdog:
+    timeout_s: 10
+  heartbeat:
+    pin: 2
+    interval_ms: 500
+  log_level: verbose`), 'full diagnostics');
+
+  if (project.system.diagnostics?.watchdog?.timeout_s !== 10)
+    throw new Error('timeout_s not preserved');
+  if (project.system.diagnostics?.heartbeat?.pin !== 2)
+    throw new Error('heartbeat pin not preserved');
+  if (project.system.diagnostics?.log_level !== 'verbose')
+    throw new Error('log_level not preserved');
+});
+
+test('rejects an unknown log_level', () => {
+  expectReject(withDiag('diagnostics:\n  log_level: loud'), 'not recognised', 'bad log_level');
+});
+
+// ============================================================================
+// TELEMETRY
+// ============================================================================
+
+function withTelemetry(body: string): string {
+  return `
+project: {name: t, version: "1.0"}
+hardware:
+  buses:
+    net: {interface: mqtt, host: broker.local}
+  devices:
+    temperature: {class: sensor, type: analog_input, bus: net}
+    humidity: {class: sensor, type: analog_input, bus: net}
+tasks:
+  poll: {every: 500, do: read}
+actions:
+  read: {}
+${body}
+`;
+}
+
+test('accepts telemetry with a global interval and per-channel override', () => {
+  const project = expectAccept(withTelemetry(`telemetry:
+  interval_ms: 5000
+  channels:
+    temperature:
+    humidity:
+      interval_ms: 30000`), 'telemetry');
+
+  const tel = project.system.telemetry;
+  if (!tel) throw new Error('telemetry not parsed');
+  if (tel.channels.length !== 2) throw new Error(`expected 2 channels, got ${tel.channels.length}`);
+  if (tel.channels[1].interval_ms !== 30000) throw new Error('per-channel override not preserved');
+});
+
+test('rejects telemetry with a channel for an undeclared sensor', () => {
+  expectReject(
+    withTelemetry(`telemetry:\n  interval_ms: 5000\n  channels:\n    nonexistent:`),
+    'not a declared sensor',
+    'unknown sensor in telemetry'
+  );
+});
+
+test('rejects telemetry when a channel has no interval and there is no default', () => {
+  expectReject(
+    withTelemetry(`telemetry:\n  channels:\n    temperature:`),
+    'has no interval_ms',
+    'missing interval'
+  );
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} validation test(s) failed`);

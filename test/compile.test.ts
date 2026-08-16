@@ -1402,6 +1402,33 @@ int main() {
   assert(output.includes('Action: heartbeat'),      '"heartbeat" action never ran');
 });
 
+test('diagnostics: emits watchdog and heartbeat setup and loop calls', () => {
+  const sketch = generate(path.join(repoRoot, 'test/fixtures/diagnostics.yaml'));
+
+  // Setup must call setupDiagnostics().
+  assert(sketch.includes('setupDiagnostics()'), 'setupDiagnostics() not called from setup()');
+
+  // Loop must call runDiagnostics() early.
+  assert(sketch.includes('runDiagnostics()'), 'runDiagnostics() not called from loop()');
+
+  // Watchdog body must be gated on ARDUINO_ARCH_ESP32.
+  assert(sketch.includes('esp_task_wdt_init(5'), 'watchdog init not emitted');
+  assert(sketch.includes('esp_task_wdt_reset'), 'watchdog reset not emitted');
+
+  // Heartbeat must toggle the declared pin.
+  assert(sketch.includes('digitalWrite(2, !digitalRead(2))'), 'heartbeat toggle not emitted');
+  assert(sketch.includes('1000UL'), 'heartbeat interval not emitted');
+
+  // log_level is a doc-only hint, so we only check it appears somewhere.
+  assert(sketch.includes('info'), 'log_level comment not present');
+
+  // The every: on the working state must also synthesise a periodic transition.
+  assert(
+    sketch.includes('tick_working') || sketch.includes('dueAt_working_0'),
+    '"every:" on state not synthesised for working state'
+  );
+});
+
 // ============================================================================
 
 if (failures > 0) {
