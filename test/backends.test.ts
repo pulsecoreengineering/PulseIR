@@ -540,6 +540,30 @@ tasks:
   heartbeat: { every: 500, do: noop }
 `;
 
+// Same model but with explicit adc_read actions so the action stubs are generated.
+const CONVERSION_ACTION_YAML = `
+pulseir: "1"
+project:
+  name: lm35_action_test
+  version: "1.0"
+actions:
+  read_temp:     { driver: adc_read,  params: { device: temp } }
+  read_raw_soil: { driver: adc_read,  params: { device: raw_soil } }
+hardware:
+  devices:
+    temp:
+      type: analog_input
+      pin: GPIO34
+      unit: degC
+      conversion: "analogRead({pin}) * (3.3 / 4095.0) * 100.0"
+    raw_soil:
+      type: analog_input
+      pin: GPIO35
+tasks:
+  heartbeat:  { every: 500,  do: read_temp }
+  soil_check: { every: 1000, do: read_raw_soil }
+`;
+
 test('conversion: substitutes {pin} with the pin macro', () => {
   const code = new Codegen().generate(parse(CONVERSION_YAML));
   has(code, 'analogRead(TEMP_PIN) * (3.3 / 4095.0) * 100.0');
@@ -569,6 +593,17 @@ test('unit in sensor struct shows as a comment', () => {
 test('sensor without unit has no unit comment in struct', () => {
   const code = new Codegen().generate(parse(CONVERSION_YAML));
   has(code, 'float raw_soil;  // driver: adc_read\n');
+});
+
+test('conversion: adc_read action stub uses formula, not raw analogRead', () => {
+  const code = new Codegen().generate(parse(CONVERSION_ACTION_YAML));
+  // The action stub body must apply the same conversion as readSensors()
+  has(code, 'systemSensors.temp = (float)(analogRead(TEMP_PIN) * (3.3 / 4095.0) * 100.0);\n  (void)ctx;');
+});
+
+test('adc_read action stub without conversion uses plain analogRead', () => {
+  const code = new Codegen().generate(parse(CONVERSION_ACTION_YAML));
+  has(code, 'systemSensors.raw_soil = analogRead(RAW_SOIL_PIN);\n  (void)ctx;');
 });
 
 // ---------------------------------------------------------------------------

@@ -1715,9 +1715,15 @@ static void pollCommands() {
       case 'adc_read': {
         const deviceName = String(params.device ?? '');
         if (this.isSensorComponent(deviceName)) {
-          const pin   = `${this.sanitizeUpper(deviceName)}_PIN`;
-          const field = `systemSensors.${this.sanitize(deviceName)}`;
-          return `  ${field} = ${this.backend.analogReadExpr(pin)};\n  (void)ctx;`;
+          const pinMacro = `${this.sanitizeUpper(deviceName)}_PIN`;
+          const field    = `systemSensors.${this.sanitize(deviceName)}`;
+          const component = (this.project.system.components || []).find(c => c.name === deviceName);
+          const rawConversion = component?.config?.conversion;
+          if (typeof rawConversion === 'string' && rawConversion.trim()) {
+            const expr = rawConversion.trim().replace(/\{pin\}/g, pinMacro);
+            return `  ${field} = (float)(${expr});\n  (void)ctx;`;
+          }
+          return `  ${field} = ${this.backend.analogReadExpr(pinMacro)};\n  (void)ctx;`;
         }
         break;
       }
