@@ -397,6 +397,125 @@ test('MicroPython generateFiles: generated main.py contents match generate()', (
 });
 
 // ---------------------------------------------------------------------------
+// ENTRY AND EXIT ACTIONS
+// ---------------------------------------------------------------------------
+
+const ENTRY_EXIT_YAML = `
+pulseir: "1"
+project:
+  name: entry_exit
+  version: "1.0"
+events:
+  GO:   {source: external}
+  STOP: {source: external}
+actions:
+  turn_on:  {driver: gpio_control}
+  turn_off: {driver: gpio_control}
+machine:
+  states:
+    idle:
+      exit: turn_off
+    running:
+      entry: turn_on
+  transitions:
+    - {from: idle,    on: GO,   to: running}
+    - {from: running, on: STOP, to: idle}
+`;
+
+const TIMED_WITH_ENTRY_YAML = `
+pulseir: "1"
+project:
+  name: timed_entry
+  version: "1.0"
+events:
+  RESET: {source: external}
+actions:
+  start_motor: {driver: gpio_control}
+machine:
+  states:
+    warming:
+      entry: start_motor
+    ready:
+  transitions:
+    - {from: warming, after: 3000, to: ready}
+    - {from: ready, on: RESET, to: warming}
+`;
+
+test('entry action generates on_enter_<state> function', () => {
+  const code = new Codegen().generate(parse(ENTRY_EXIT_YAML));
+  has(code, 'static void on_enter_running()');
+  has(code, 'action_turn_on(&systemContext)');
+});
+
+test('exit action generates on_exit_<state> function', () => {
+  const code = new Codegen().generate(parse(ENTRY_EXIT_YAML));
+  has(code, 'static void on_exit_idle()');
+  has(code, 'action_turn_off(&systemContext)');
+});
+
+test('entry callback is passed to addState()', () => {
+  const code = new Codegen().generate(parse(ENTRY_EXIT_YAML));
+  has(code, 'on_enter_running');
+  // The addState registration should wire it in, not nullptr
+  const setupRegion = code.slice(code.indexOf('fsm.addState'));
+  has(setupRegion, 'on_enter_running');
+});
+
+test('exit callback is passed to addState()', () => {
+  const code = new Codegen().generate(parse(ENTRY_EXIT_YAML));
+  const setupRegion = code.slice(code.indexOf('fsm.addState'));
+  has(setupRegion, 'on_exit_idle');
+});
+
+test('state with no entry/exit uses nullptr for both slots', () => {
+  const code = new Codegen().generate(parse(ENTRY_EXIT_YAML));
+  // "running" has no exit, "idle" has no entry — each addState should still
+  // compile; we verify the callbacks are not invented for the wrong state.
+  hasNot(code, 'on_enter_idle');
+  hasNot(code, 'on_exit_running');
+});
+
+test('entry callback calls syncContext() first', () => {
+  const code = new Codegen().generate(parse(ENTRY_EXIT_YAML));
+  const fnStart = code.indexOf('static void on_enter_running()');
+  const fnEnd   = code.indexOf('}', fnStart);
+  const body    = code.slice(fnStart, fnEnd);
+  const syncPos  = body.indexOf('syncContext()');
+  const actionPos = body.indexOf('action_turn_on');
+  assert(syncPos !== -1,   'syncContext() not found in entry callback');
+  assert(actionPos !== -1, 'action not found in entry callback');
+  assert(syncPos < actionPos, 'syncContext() must precede the action call');
+});
+
+test('timed state with entry action: single combined on_enter function', () => {
+  const code = new Codegen().generate(parse(TIMED_WITH_ENTRY_YAML));
+  // Must have one on_enter that stamps the clock AND calls the action.
+  has(code, 'static void on_enter_warming()');
+  has(code, 'action_start_motor(&systemContext)');
+  has(code, 'enteredAt_warming');
+  // The old separate enter_<base> naming must not appear.
+  hasNot(code, 'static void enter_warming()');
+});
+
+test('timed state with entry action: clock stamp appears after actions', () => {
+  const code = new Codegen().generate(parse(TIMED_WITH_ENTRY_YAML));
+  const fnStart  = code.indexOf('static void on_enter_warming()');
+  const fnEnd    = code.indexOf('}', fnStart);
+  const body     = code.slice(fnStart, fnEnd);
+  const actionPos = body.indexOf('action_start_motor');
+  const stampPos  = body.indexOf('enteredAt_warming');
+  assert(actionPos !== -1, 'action not found');
+  assert(stampPos  !== -1, 'timer stamp not found');
+  assert(actionPos < stampPos, 'entry action must run before the timer stamp');
+});
+
+test('state without entry/exit: no spurious on_enter or on_exit generated', () => {
+  const code = new Codegen().generate(parse(BLINK_YAML));
+  hasNot(code, 'on_enter_');
+  hasNot(code, 'on_exit_');
+});
+
+// ---------------------------------------------------------------------------
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} backend test(s) failed`);

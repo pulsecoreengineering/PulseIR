@@ -493,11 +493,13 @@ export class Parser {
     const events = this.parseEventMap(raw.events);
     events.forEach(e => this.eventNames.add(e.name));
 
-    const states = this.parseStateMap(machine.states);
-    this.indexStateNames(states);
-
+    // Catalogue must be parsed before states so that entry:/exit: on states
+    // can be validated against it, the same way do: on transitions is.
     const actionCatalogue = this.parseActionCatalogue(raw.actions);
     actionCatalogue.forEach((_, name) => this.actionNames.add(name));
+
+    const states = this.parseStateMap(machine.states, actionCatalogue);
+    this.indexStateNames(states);
 
     // State-level `every: N  do: [...]` is sugar for a transition from that state.
     const shorthands = this.extractStatePeriodicShorthands(machine.states);
@@ -652,16 +654,24 @@ export class Parser {
     return result;
   }
 
-  private parseStateMap(raw: unknown): State[] {
+  private parseStateMap(raw: unknown, catalogue: Map<string, Action> = new Map()): State[] {
     return this.mapEntries(raw, 'states').map(([name, def]) => {
-      const children = this.parseStateMap(def.states);
+      const children = this.parseStateMap(def.states, catalogue);
       const declared = def.type as string | undefined;
+      const entry = this.resolveStateActions(def.entry, catalogue, name, 'entry');
+      const exit  = this.resolveStateActions(def.exit,  catalogue, name, 'exit');
 
       if (children.length === 0) {
         if (def.initial !== undefined) {
           throw new ParseError(`State "${name}" declares "initial" but has no nested states`);
         }
-        return { name, type: (declared || 'simple') as any, description: def.description as string | undefined };
+        return {
+          name,
+          type: (declared || 'simple') as any,
+          description: def.description as string | undefined,
+          ...(entry && { entry }),
+          ...(exit  && { exit }),
+        };
       }
 
       const initial = (def.initial as StateRef | undefined) ?? children[0].name;
@@ -678,7 +688,40 @@ export class Parser {
         description: def.description as string | undefined,
         initial,
         regions: [{ initial, states: children }],
+        ...(entry && { entry }),
+        ...(exit  && { exit }),
       };
+    });
+  }
+
+  /**
+   * Resolve an `entry:` or `exit:` list on a state.
+   *
+   * Accepts a single name or a list of names and validates each against the
+   * action catalogue (same rules as `do:` on transitions).
+   */
+  private resolveStateActions(
+    raw: unknown,
+    catalogue: Map<string, Action>,
+    stateName: string,
+    field: string,
+  ): Action[] | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    const names = Array.isArray(raw) ? raw : [raw];
+    const strict = catalogue.size > 0;
+    return names.map(item => {
+      if (typeof item !== 'string' || !item.trim()) {
+        throw new ParseError(`State "${stateName}" has a "${field}" entry that is not an action name`);
+      }
+      const declared = catalogue.get(item);
+      if (declared) return { ...declared };
+      if (strict) {
+        throw new ParseError(
+          `State "${stateName}" ${field} does "${item}", which is not in the actions catalogue. ` +
+          `Declared: ${[...catalogue.keys()].join(', ') || 'none'}.`
+        );
+      }
+      return { name: item, type: 'driver' as any, driver: item };
     });
   }
 
