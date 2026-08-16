@@ -28,7 +28,12 @@ hardware:
   devices:
     led:  { type: digital_output, pin: GPIO2 }
     fan:  { type: pwm_output, pin: GPIO27, channel: 0, frequency: 25000 }
-    temp: { type: analog_input, pin: GPIO34, unit: degC }
+    temp:
+      type: analog_input
+      pin: GPIO34
+      unit: degC
+      # LM35: 10 mV/°C, 3.3 V reference, 12-bit ADC
+      conversion: "analogRead({pin}) * (3.3 / 4095.0) * 100.0"
 
 parameters:
   report_ms: { type: int, default: 2000, range: [200, 60000], unit: ms }
