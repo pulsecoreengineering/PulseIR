@@ -801,13 +801,21 @@ function renderStateNode(path: string, flat: ReturnType<typeof flattenStates>): 
   const isInitial = flat.some(s => s.initialChildPath === path);
   const marker = isInitial ? '<span class="initial" title="initial child">▸</span>' : '';
 
+  const entryActions = (node.state.entry ?? []).map(a =>
+    `<span class="tag" title="entry action">↳ ${escapeHtml(a.name)}</span>`).join(' ');
+  const exitActions  = (node.state.exit  ?? []).map(a =>
+    `<span class="tag" title="exit action">↱ ${escapeHtml(a.name)}</span>`).join(' ');
+  const hooks = entryActions || exitActions
+    ? `<span class="state-hooks">${entryActions}${exitActions}</span>`
+    : '';
+
   if (node.isLeaf) {
-    return `<div class="state leaf">${marker}<span>${label}</span></div>`;
+    return `<div class="state leaf">${marker}<span>${label}</span>${hooks}</div>`;
   }
 
   return `<div class="state composite">
     <div class="state-name">${marker}<span>${label}</span>
-      <span class="tag">composite</span></div>
+      <span class="tag">composite</span>${hooks}</div>
     <div class="children">${children.map(c => renderStateNode(c.path, flat)).join('')}</div>
   </div>`;
 }
@@ -1575,6 +1583,16 @@ commands:
   devices:
     sensor: { type: analog_input, pin: GPIO34, unit: V }`
   },
+  { group: 'Device', label: 'Analog input  (with conversion formula)',
+    yaml:
+`hardware:
+  devices:
+    temp:
+      type: analog_input
+      pin: GPIO34
+      unit: degC
+      conversion: "analogRead({pin}) * (3.3 / 4095.0) * 100.0"`
+  },
 
   // ── Logic ────────────────────────────────────────────────────────────────
   { group: 'Logic', label: 'Parameter  (tunable value)',
@@ -1612,6 +1630,18 @@ machine:
   transitions:
     - { from: idle,   on: PRESS, to: active }
     - { from: active, on: PRESS, to: idle }`
+  },
+  { group: 'Logic', label: 'State with entry / exit actions',
+    yaml:
+`actions:
+  on_enter: { driver: my_driver }
+  on_exit:  { driver: my_driver }
+
+machine:
+  states:
+    active:
+      entry: on_enter
+      exit:  on_exit`
   },
 ];
 
