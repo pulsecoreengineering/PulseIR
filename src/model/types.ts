@@ -172,6 +172,11 @@ export interface State {
   initial?: StateRef;         // Initial child state
   regions?: Region[];         // For COMPOSITE/ORTHOGONAL
 
+  /** Actions to run once when the machine enters this state. */
+  entry?: Action[];
+  /** Actions to run once when the machine exits this state. */
+  exit?: Action[];
+
   metadata?: Metadata;
 }
 

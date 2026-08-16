@@ -864,6 +864,138 @@ test('rejects restore with an undeclared action', () => {
 });
 
 // ============================================================================
+// ENTRY / EXIT ACTIONS ON STATES
+// ============================================================================
+
+const ENTRY_EXIT_BASE = `
+pulseir: "1"
+project:
+  name: entry_exit_test
+  version: "1.0"
+events:
+  GO: {source: external}
+machine:
+  states:
+    idle:
+    running:
+  transitions:
+    - {from: idle, on: GO, to: running}
+`;
+
+const ENTRY_EXIT_WITH_CATALOGUE = `
+pulseir: "1"
+project:
+  name: entry_exit_test
+  version: "1.0"
+events:
+  GO: {source: external}
+actions:
+  turn_on:  {driver: gpio_control}
+  turn_off: {driver: gpio_control}
+  log_entry: {driver: logger}
+machine:
+  states:
+    idle:
+    running:
+      entry: turn_on
+      exit:  turn_off
+  transitions:
+    - {from: idle, on: GO, to: running}
+`;
+
+const entryModel = (stateBody: string) => `
+pulseir: "1"
+project:
+  name: entry_exit_test
+  version: "1.0"
+events:
+  GO: {source: external}
+machine:
+  states:
+    idle:
+${stateBody}
+  transitions:
+    - {from: idle, on: GO, to: running}
+`;
+
+test('accepts a state with a single entry action (no catalogue)', () => {
+  const project = expectAccept(
+    entryModel('    running:\n      entry: do_something'),
+    'entry: single name without catalogue'
+  );
+  const running = project!.system.states.find(s => s.name === 'running');
+  if (!running?.entry?.length) throw new Error('entry actions not parsed on state');
+  if (running.entry[0].name !== 'do_something') throw new Error('wrong entry action name');
+});
+
+test('accepts a state with a list of entry actions', () => {
+  const project = expectAccept(
+    entryModel('    running:\n      entry: [do_a, do_b]'),
+    'entry: list without catalogue'
+  );
+  const running = project!.system.states.find(s => s.name === 'running');
+  if (running?.entry?.length !== 2) throw new Error(`expected 2 entry actions, got ${running?.entry?.length}`);
+});
+
+test('accepts a state with exit actions', () => {
+  const project = expectAccept(
+    entryModel('    running:\n      exit: cleanup'),
+    'exit: single name without catalogue'
+  );
+  const running = project!.system.states.find(s => s.name === 'running');
+  if (!running?.exit?.length) throw new Error('exit actions not parsed on state');
+  if (running.exit[0].name !== 'cleanup') throw new Error('wrong exit action name');
+});
+
+test('accepts a state with both entry and exit actions (from catalogue)', () => {
+  const project = expectAccept(ENTRY_EXIT_WITH_CATALOGUE, 'entry + exit with catalogue');
+  const running = project!.system.states.find(s => s.name === 'running');
+  if (!running?.entry?.length) throw new Error('entry actions missing');
+  if (!running?.exit?.length) throw new Error('exit actions missing');
+  if (running.entry[0].name !== 'turn_on') throw new Error('wrong entry action');
+  if (running.exit[0].name !== 'turn_off') throw new Error('wrong exit action');
+});
+
+test('entry action is resolved from the catalogue (carries driver)', () => {
+  const project = expectAccept(ENTRY_EXIT_WITH_CATALOGUE, 'entry resolves from catalogue');
+  const running = project!.system.states.find(s => s.name === 'running');
+  if (running?.entry?.[0].driver !== 'gpio_control') {
+    throw new Error(`expected driver gpio_control, got ${running?.entry?.[0].driver}`);
+  }
+});
+
+test('rejects a state entry action not in the catalogue when catalogue is declared', () => {
+  expectReject(
+    ENTRY_EXIT_WITH_CATALOGUE.replace('entry: turn_on', 'entry: no_such_action'),
+    'no_such_action',
+    'unknown entry action with catalogue'
+  );
+});
+
+test('rejects a state exit action not in the catalogue when catalogue is declared', () => {
+  expectReject(
+    ENTRY_EXIT_WITH_CATALOGUE.replace('exit:  turn_off', 'exit: no_such_action'),
+    'no_such_action',
+    'unknown exit action with catalogue'
+  );
+});
+
+test('rejects a non-string entry action name', () => {
+  expectReject(
+    entryModel('    running:\n      entry: [42]'),
+    'not an action name',
+    'numeric entry name'
+  );
+});
+
+test('states without entry/exit have no entry/exit arrays', () => {
+  const project = expectAccept(ENTRY_EXIT_BASE, 'no entry/exit on plain state');
+  const idle = project!.system.states.find(s => s.name === 'idle');
+  if (idle?.entry !== undefined) throw new Error('idle.entry should be undefined');
+  if (idle?.exit !== undefined) throw new Error('idle.exit should be undefined');
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} validation test(s) failed`);

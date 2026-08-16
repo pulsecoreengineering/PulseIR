@@ -50,7 +50,7 @@ export const DEFAULT_KEYWORDS: readonly string[] = [
   // target:
   'board', 'verbose', 'drivers',
   // hardware / buses / devices - structure
-  'interface', 'type', 'class', 'bus', 'driver', 'params', 'unit',
+  'interface', 'type', 'class', 'bus', 'driver', 'params', 'unit', 'conversion',
   // pin / channel descriptors
   'pin', 'channel', 'sda', 'scl', 'miso', 'mosi', 'sck', 'cs',
   'address', 'mode', 'speed',

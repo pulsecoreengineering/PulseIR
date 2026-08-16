@@ -85,10 +85,21 @@ export class DiagramEmitter {
   }
 
   private emitState(state: State, lines: string[], indent: string): void {
+    const id = mid(state.name);
+
+    // Entry/exit annotations — emit as a note attached to the state.
+    const entryLines = (state.entry ?? []).map(a => `entry: ${a.name}`);
+    const exitLines  = (state.exit  ?? []).map(a => `exit: ${a.name}`);
+    const noteLines  = [...entryLines, ...exitLines];
+    if (noteLines.length > 0) {
+      lines.push(`${indent}note right of ${id}`);
+      for (const l of noteLines) lines.push(`${indent}  ${l}`);
+      lines.push(`${indent}end note`);
+    }
+
     if (!state.regions || state.regions.length === 0) return;
 
     // Composite state: declare a named block with its initial child.
-    const id  = mid(state.name);
     const sub = `${indent}    `;
     lines.push(`${indent}state ${id} {`);
     for (const region of state.regions) {

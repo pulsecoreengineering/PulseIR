@@ -180,6 +180,7 @@ export class Codegen {
       this.generateActionDeclarations(),
       this.generateEventHandlers(),
       this.generateTimeouts(),
+      this.generateEntryExitCallbacks(),
       this.generateTasks(),
       this.generateCommands(),
       this.generateMqttWiring(),
@@ -281,6 +282,7 @@ ${this.backend.entryPointDeclarations()}${this.declInterfaceGlobals()}`,
       this.defInterfaces().trimStart(),
       this.generateEventHandlers(),
       this.generateTimeouts(),
+      this.generateEntryExitCallbacks(),
       this.generateTasks(),
       this.generateCommands(),
       this.generateMqttWiring(),
@@ -752,7 +754,10 @@ SystemSensors systemSensors = {};`;
 
     const fields = sensors.length > 0
       ? sensors
-          .map(c => `  float ${this.sanitize(c.name)};  // driver: ${c.driver}`)
+          .map(c => {
+            const unitNote = c.config?.unit ? `, unit: ${c.config.unit}` : '';
+            return `  float ${this.sanitize(c.name)};  // driver: ${c.driver}${unitNote}`;
+          })
           .join('\n')
       : '  // TODO: Add your sensor readings here (e.g. float temperature;)';
 
@@ -1307,17 +1312,17 @@ ${body}
           : 'nullptr';
         const parent = flat.parent === -1 ? '-1' : this.states[flat.parent].symbol;
 
-        const timed = this.timedBySource.get(flat.index)?.length
-          ? this.timerNames(flat)
-          : null;
+        const hasTimed    = (this.timedBySource.get(flat.index)?.length ?? 0) > 0;
         const hasPeriodic = (this.periodicBySource.get(flat.index)?.length ?? 0) > 0;
-        const hasUpdate = timed || hasPeriodic;
+        const hasUpdate   = hasTimed || hasPeriodic;
+        const entryCb     = this.entryCallbackName(flat);
+        const exitCb      = this.exitCallbackName(flat);
 
         return `  ${flat.symbol} = fsm.addState(
       "${flat.path}",
       ${hasUpdate ? `${this.timerNames(flat).tick},   // update - "after" timers and "every" periodics` : 'nullptr,   // update'}
-      ${timed ? `${timed.mark},  // entry - starts the "after" clock` : 'nullptr,   // entry'}
-      nullptr,   // exit
+      ${entryCb ? `${entryCb},  // entry` : 'nullptr,   // entry'}
+      ${exitCb  ? `${exitCb},   // exit`  : 'nullptr,   // exit'}
       0,         // timeoutMs - unused; see generateTimeouts()
       -1,        // timeoutNext
       ${handler},  // onEvent
@@ -1880,11 +1885,24 @@ ${saveBody}
     if (sensors.length === 0) return '';
 
     const reads = sensors.map(c => {
-      const pin   = `${this.sanitizeUpper(c.name)}_PIN`;
-      const field = `systemSensors.${this.sanitize(c.name)}`;
+      const pinMacro = `${this.sanitizeUpper(c.name)}_PIN`;
+      const field    = `systemSensors.${this.sanitize(c.name)}`;
+
+      const rawConversion = c.config?.conversion;
+      if (typeof rawConversion === 'string' && rawConversion.trim()) {
+        // User-supplied conversion formula. {pin} expands to the pin macro so
+        // the expression stays board-agnostic:
+        //   conversion: "analogRead({pin}) * (3.3 / 4095.0) * 100.0"
+        // becomes:
+        //   systemSensors.temp = analogRead(TEMP_PIN) * (3.3 / 4095.0) * 100.0;
+        const expr = rawConversion.trim().replace(/\{pin\}/g, pinMacro);
+        const unit = c.config?.unit ? `  // ${c.config.unit}` : '';
+        return `  ${field} = (float)(${expr});${unit}`;
+      }
+
       return c.type === 'analog_input'
-        ? `  ${field} = ${this.backend.analogReadExpr(pin)};`
-        : `  ${field} = (float)${this.backend.digitalReadExpr(pin)};`;
+        ? `  ${field} = ${this.backend.analogReadExpr(pinMacro)};`
+        : `  ${field} = (float)${this.backend.digitalReadExpr(pinMacro)};`;
     });
 
     return `// Populate systemSensors before guards and actions read them.
@@ -2227,10 +2245,34 @@ static char _mqttPrefix[96];`,
     return `  //\n  // Available on ctx:\n${lines.join('\n')}\n`;
   }
 
-  /** The two C names a state with timed transitions needs. */
-  private timerNames(flat: FlatState): { since: string; mark: string; tick: string } {
+  /** C names a state with timed transitions needs. */
+  private timerNames(flat: FlatState): { since: string; tick: string } {
     const base = this.sanitize(flat.path);
-    return { since: `enteredAt_${base}`, mark: `enter_${base}`, tick: `tick_${base}` };
+    return { since: `enteredAt_${base}`, tick: `tick_${base}` };
+  }
+
+  /**
+   * The name of the entry callback to pass to addState(), or null when the
+   * state needs no entry hook at all.
+   *
+   * Non-null when the state declares entry: actions OR has after: transitions
+   * (which need a clock stamp on entry).
+   */
+  private entryCallbackName(flat: FlatState): string | null {
+    const hasTimed = (this.timedBySource.get(flat.index)?.length ?? 0) > 0;
+    const hasEntryActions = (flat.state?.entry?.length ?? 0) > 0;
+    if (!hasTimed && !hasEntryActions) return null;
+    return `on_enter_${this.sanitize(flat.path)}`;
+  }
+
+  /**
+   * The name of the exit callback to pass to addState(), or null when the
+   * state has no exit: actions.
+   */
+  private exitCallbackName(flat: FlatState): string | null {
+    return (flat.state?.exit?.length ?? 0) > 0
+      ? `on_exit_${this.sanitize(flat.path)}`
+      : null;
   }
 
   /**
@@ -2279,7 +2321,7 @@ static char _mqttPrefix[96];`,
       const timedOwned = this.timedBySource.get(flat.index) || [];
       const periodicOwned = this.periodicBySource.get(flat.index) || [];
 
-      const { since, mark, tick } = this.timerNames(flat);
+      const { since, tick } = this.timerNames(flat);
       const body: string[] = [];
 
       // "after:" clauses — one-shot timed transitions.
@@ -2360,18 +2402,26 @@ ${calls}
 
       const hasTimed = timedOwned.length > 0;
 
-      // Only emit the entry-timestamp global and mark() when "after:" is present.
+      // Only emit the entry-timestamp global when "after:" is present.
       const sinceGlobal = hasTimed ? `static ${tsType} ${since} = 0;\n` : '';
-      const markFn = hasTimed ? `static void ${mark}() {
-  ${since} = ${now};
-}
 
-` : '';
+      // Entry callback: stamps the clock (for "after:") and runs any entry:
+      // actions declared on the state.  Generated here for timed states;
+      // generateEntryExitCallbacks() covers states that only have entry actions.
+      const entryName = this.entryCallbackName(flat);
+      const entryActionCalls = (flat.state?.entry ?? [])
+        .map(a => `  action_${this.sanitize(a.name)}(&systemContext);`)
+        .join('\n');
+      const entryFnBody = [
+        entryActionCalls ? `  syncContext();\n${entryActionCalls}` : null,
+        hasTimed ? `  ${since} = ${now};` : null,
+      ].filter(Boolean).join('\n');
+      const entryFn = entryName ? `static void ${entryName}() {\n${entryFnBody}\n}\n\n` : '';
 
       blocks.push(`// Update tick for "${flat.path}".
 ${sinceGlobal}${periodicGlobals}
 
-${markFn}static void ${tick}() {
+${entryFn}static void ${tick}() {
   syncContext();
 
 ${body.join('\n\n')}
@@ -2390,6 +2440,57 @@ ${body.join('\n\n')}
 // that state. Uses deadline-advance-by-interval to prevent drift.
 //
 // Subtraction on unsigned long is correct across the millis() rollover.
+
+${blocks.join('\n\n')}`;
+  }
+
+  /**
+   * Generate entry and exit callbacks for states that declare `entry:` or
+   * `exit:` actions but have no timed/periodic transitions.
+   *
+   * Timed states have their entry callback merged into generateTimeouts() so
+   * the clock stamp and entry actions appear in a single function.  Exit
+   * callbacks are always generated here since PulseHSM has no exit equivalent
+   * of the timer tick.
+   */
+  private generateEntryExitCallbacks(): string {
+    if (!this.hasMachine) return '';
+
+    const blocks: string[] = [];
+
+    for (const flat of this.states) {
+      if (flat.state === null) continue;
+
+      const hasTimed = (this.timedBySource.get(flat.index)?.length ?? 0) > 0;
+      const entryActions = flat.state.entry ?? [];
+      const exitActions  = flat.state.exit  ?? [];
+
+      // Timed states handle their entry callback in generateTimeouts().
+      if (!hasTimed && entryActions.length > 0) {
+        const name  = this.entryCallbackName(flat)!;
+        const calls = entryActions
+          .map(a => `  action_${this.sanitize(a.name)}(&systemContext);`)
+          .join('\n');
+        blocks.push(`static void ${name}() {\n  syncContext();\n${calls}\n}`);
+      }
+
+      if (exitActions.length > 0) {
+        const name  = this.exitCallbackName(flat)!;
+        const calls = exitActions
+          .map(a => `  action_${this.sanitize(a.name)}(&systemContext);`)
+          .join('\n');
+        blocks.push(`static void ${name}() {\n  syncContext();\n${calls}\n}`);
+      }
+    }
+
+    if (blocks.length === 0) return '';
+
+    return `// ============================================================================
+// ENTRY AND EXIT ACTIONS
+// ============================================================================
+//
+// Called once when the machine enters or exits a state. syncContext() runs
+// first so the action stub sees consistent sensor readings.
 
 ${blocks.join('\n\n')}`;
   }

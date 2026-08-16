@@ -72,6 +72,7 @@ const CONSUMED_KEYS: Record<string, string[]> = {
   rs485: ['port'],
   mqtt: ['tls'],
   littlefs: ['format_on_fail'],
+  adc: ['unit', 'conversion'],
 };
 
 /** Binding keys each interface understands; anything else is documented only. */
