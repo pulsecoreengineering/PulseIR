@@ -1301,15 +1301,21 @@ test('Zephyr: sizing macros appear before the Zephyr kernel header', () => {
   assert(sizingPos < kernelPos, 'PULSEHSM_MAX_STATES must appear before <zephyr/kernel.h>');
 });
 
-test('Zephyr: GPIO write uses gpio_pin_set with DEVICE_DT_GET(DT_NODELABEL(gpio0))', () => {
+test('Zephyr: GPIO write uses gpio_pin_set_dt with gpio_dt_spec', () => {
   const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
-  has(code, 'gpio_pin_set(DEVICE_DT_GET(DT_NODELABEL(gpio0))');
-  has(code, '(gpio_pin_t)');
+  has(code, 'gpio_pin_set_dt(&LAMP_GREEN_GPIO,');
+  has(code, 'gpio_pin_set_dt(&LAMP_RED_GPIO,');
 });
 
-test('Zephyr: GPIO read uses gpio_pin_get with DEVICE_DT_GET(DT_NODELABEL(gpio0))', () => {
+test('Zephyr: GPIO read uses gpio_pin_get_dt with gpio_dt_spec', () => {
   const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
-  has(code, 'gpio_pin_get(DEVICE_DT_GET(DT_NODELABEL(gpio0))');
+  has(code, 'gpio_pin_get_dt(&LAMP_RED_GPIO)');
+});
+
+test('Zephyr: GPIO device declares gpio_dt_spec using DT_PATH(zephyr_user)', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  has(code, 'struct gpio_dt_spec LAMP_GREEN_GPIO = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), lamp_green_gpios)');
+  has(code, 'struct gpio_dt_spec LAMP_RED_GPIO = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), lamp_red_gpios)');
 });
 
 test('Zephyr: state machine model still uses while(1) + k_msleep', () => {
@@ -1340,10 +1346,15 @@ actions:
   noop: { driver: logger }
 `;
 
-test('Zephyr: GPIO bus resource generates gpio_pin_configure in setupInterfaces', () => {
+test('Zephyr: GPIO bus resource generates gpio_pin_configure_dt in setupInterfaces', () => {
   const code = new Codegen(new ZephyrBackend()).generate(parse(GPIO_IFACE_YAML));
-  has(code, 'gpio_pin_configure(DEVICE_DT_GET(DT_NODELABEL(gpio0))');
+  has(code, 'gpio_pin_configure_dt(&BTN_GPIO,');
   has(code, 'GPIO_INPUT');
+});
+
+test('Zephyr: GPIO bus resource declares gpio_dt_spec using DT_PATH(zephyr_user)', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(GPIO_IFACE_YAML));
+  has(code, 'struct gpio_dt_spec BTN_GPIO = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), btn_gpios)');
 });
 
 test('Zephyr: GPIO output mode uses GPIO_OUTPUT_INACTIVE flag', () => {
@@ -1437,6 +1448,41 @@ actions:
   const files = new ZephyrProjectEmitter().generate(project);
   hasNot(files.prjConf, 'CONFIG_GPIO=y');
   has(files.prjConf, 'CONFIG_SERIAL=y');
+});
+
+test('ZephyrProjectEmitter: overlay is generated for GPIO bus resources', () => {
+  const project = parse(GPIO_IFACE_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  assert(files.overlay !== undefined, 'overlay must be defined for GPIO hardware');
+  has(files.overlay!, 'zephyr,user');
+  has(files.overlay!, 'btn-gpios');
+  has(files.overlay!, '<&gpio0 2 GPIO_ACTIVE_HIGH>');
+});
+
+test('ZephyrProjectEmitter: overlay is generated for GPIO device components', () => {
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  assert(files.overlay !== undefined, 'overlay must be defined for digital_output devices');
+  has(files.overlay!, 'led-gpios');
+  has(files.overlay!, '<&gpio0 2 GPIO_ACTIVE_HIGH>');
+});
+
+test('ZephyrProjectEmitter: overlay is undefined for non-GPIO models', () => {
+  const noGpioYaml = `
+pulseir: "1"
+project:
+  name: no_gpio
+  version: "1.0"
+hardware:
+  buses:
+    serial: { interface: uart, port: 0, baud: 115200 }
+tasks:
+  poll: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`;
+  const files = new ZephyrProjectEmitter().generate(parse(noGpioYaml));
+  assert(files.overlay === undefined, 'overlay must be absent when no GPIO is declared');
 });
 
 // ---------------------------------------------------------------------------

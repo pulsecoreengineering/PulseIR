@@ -13,13 +13,15 @@
  * Phase 2 will add app.overlay generation for gpio_dt_spec + DT aliases.
  */
 
-import type { PulseProject } from '../model/index.js';
+import type { PulseProject, Resource, Component } from '../model/index.js';
 
 export interface ZephyrProjectFiles {
   /** Root CMakeLists.txt — handed directly to `west build`. */
   cmake: string;
   /** prj.conf — Kconfig selections for this model's hardware and language requirements. */
   prjConf: string;
+  /** app.overlay — devicetree overlay declaring gpio0 pin bindings for gpio_dt_spec. */
+  overlay?: string;
 }
 
 export class ZephyrProjectEmitter {
@@ -40,6 +42,7 @@ export class ZephyrProjectEmitter {
     return {
       cmake:   this.cmake(project.name, hasMachine),
       prjConf: this.prjConf(busIfaces, hasGpioDevices),
+      overlay: this.generateOverlay(resources, components),
     };
   }
 
@@ -132,5 +135,39 @@ export class ZephyrProjectEmitter {
 
     lines.push('');
     return lines.join('\n');
+  }
+
+  private generateOverlay(resources: Resource[], components: Component[]): string | undefined {
+    const entries: string[] = [];
+
+    for (const r of resources) {
+      if (String(r.interface) !== 'gpio') continue;
+      const pinStr = r.binding?.pin;
+      if (pinStr === undefined) continue;
+      const pinNum = Number(String(pinStr).replace(/^GPIO/i, ''));
+      if (isNaN(pinNum)) continue;
+      const prop = r.name.toLowerCase().replace(/_/g, '-') + '-gpios';
+      entries.push(`        ${prop} = <&gpio0 ${pinNum} GPIO_ACTIVE_HIGH>;`);
+    }
+
+    for (const c of components) {
+      const pinStr = c.config?.pin;
+      if (pinStr === undefined) continue;
+      const pinNum = Number(String(pinStr).replace(/^GPIO/i, ''));
+      if (isNaN(pinNum)) continue;
+      const prop = c.name.toLowerCase().replace(/_/g, '-') + '-gpios';
+      entries.push(`        ${prop} = <&gpio0 ${pinNum} GPIO_ACTIVE_HIGH>;`);
+    }
+
+    if (entries.length === 0) return undefined;
+
+    return [
+      '/ {',
+      '    zephyr,user {',
+      ...entries,
+      '    };',
+      '};',
+      '',
+    ].join('\n');
   }
 }

@@ -83,6 +83,7 @@ export class ZephyrBackend implements PlatformBackend {
   nowExpr(): string      { return 'k_uptime_get()'; }
   timestampType(): string { return 'int64_t'; }
   durationLiteral(ms: number): string { return `INT64_C(${ms})`; }
+  gpioPinVar(sym: string): string { return `${sym}_GPIO`; }
 
   // ── Console ──────────────────────────────────────────────────────────────────
 
@@ -116,15 +117,14 @@ export class ZephyrBackend implements PlatformBackend {
 
   // ── GPIO / ADC / PWM ────────────────────────────────────────────────────────
 
-  // Phase 1: raw gpio_pin_set via DEVICE_DT_GET(DT_NODELABEL(gpio0)).
-  // Phase 2 will use gpio_dt_spec: if pin ends in _PIN, derive _GPIO variable
-  // and call gpio_pin_set_dt(&SYMBOL_GPIO, value).
+  // Phase 2: gpio_dt_spec — pin is a SYMBOL_GPIO variable declared in globals.
+  // app.overlay provides the gpio0 node bindings; west build resolves them.
   digitalWriteExpr(pin: string, value: string): string {
-    return `gpio_pin_set(DEVICE_DT_GET(DT_NODELABEL(gpio0)), (gpio_pin_t)(${pin}), (int)(${value}))`;
+    return `gpio_pin_set_dt(&${pin}, (int)(${value}))`;
   }
 
   digitalReadExpr(pin: string): string {
-    return `gpio_pin_get(DEVICE_DT_GET(DT_NODELABEL(gpio0)), (gpio_pin_t)(${pin}))`;
+    return `gpio_pin_get_dt(&${pin})`;
   }
 
   analogReadExpr(pin: string): string {
@@ -157,8 +157,8 @@ export class ZephyrBackend implements PlatformBackend {
   interfacesNote(): string {
     return [
       '// Zephyr driver initialisations for the hardware declared in the model.',
-      '// Phase 1: GPIO uses DEVICE_DT_GET(DT_NODELABEL(gpio0)) — no app.overlay needed.',
-      '// Phase 2 will upgrade GPIO to gpio_dt_spec + app.overlay devicetree aliases.',
+      '// Phase 2: GPIO uses gpio_dt_spec + GPIO_DT_SPEC_GET — include the generated',
+      '// app.overlay in your west build (west build -b <board> -- -DOVERLAY_CONFIG=app.overlay).',
     ].join('\n');
   }
 

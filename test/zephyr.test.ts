@@ -188,7 +188,7 @@ test('pump_tank: composite timers compile without errors', () => {
 
 // ── GPIO bus interface ────────────────────────────────────────────────────────
 
-test('gpio bus interface: gpio_pin_configure call compiles with correct types', () => {
+test('gpio bus interface: gpio_pin_configure_dt call compiles with correct types', () => {
   const code = generateInline(`
 pulseir: "1"
 project:
@@ -204,8 +204,10 @@ actions:
   noop: { driver: logger }
 `);
   compile('gpio_bus', code);
-  assert(code.includes('gpio_pin_configure(DEVICE_DT_GET(DT_NODELABEL(gpio0))'),
-    'gpio bus must emit gpio_pin_configure');
+  assert(code.includes('gpio_pin_configure_dt(&BTN_GPIO,'),
+    'gpio bus must emit gpio_pin_configure_dt with dt_spec ref');
+  assert(code.includes('GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), btn_gpios)'),
+    'gpio bus must declare gpio_dt_spec with DT_PATH(zephyr_user)');
 });
 
 // ── Multi-bus model ──────────────────────────────────────────────────────────
@@ -249,14 +251,18 @@ test('timers fixture: composite timers compile without errors', () => {
 
 // ── Key API assertions ────────────────────────────────────────────────────────
 
-test('generated GPIO write uses correct Zephyr API signature', () => {
-  // gpio_pin_set(const struct device*, gpio_pin_t, int) — if the cast is
-  // wrong the compiler will say so.  This test proves the cast survives -Werror.
+test('generated GPIO write uses correct Zephyr Phase 2 API signature', () => {
+  // gpio_pin_set_dt(const struct gpio_dt_spec*, int) — the _dt variant avoids
+  // raw DEVICE_DT_GET and (gpio_pin_t) casts, which Phase 2 removes.
   const code = generateFrom(path.join(repoRoot, 'examples/boiler/pulse.yaml'));
   compile('gpio_api_check', code);
   assert(
-    code.includes('gpio_pin_set(DEVICE_DT_GET(DT_NODELABEL(gpio0)), (gpio_pin_t)'),
-    'GPIO write must use gpio_pin_set with gpio_pin_t cast'
+    code.includes('gpio_pin_set_dt(&'),
+    'GPIO write must use gpio_pin_set_dt with a gpio_dt_spec reference'
+  );
+  assert(
+    code.includes('GPIO_DT_SPEC_GET(DT_PATH(zephyr_user),'),
+    'GPIO spec must be declared with GPIO_DT_SPEC_GET'
   );
 });
 

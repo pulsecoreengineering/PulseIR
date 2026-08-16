@@ -44,6 +44,7 @@ export class ArduinoBackend implements PlatformBackend {
   nowExpr(): string { return 'millis()'; }
   timestampType(): string { return 'unsigned long'; }
   durationLiteral(ms: number): string { return `${ms}UL`; }
+  gpioPinVar(sym: string): string { return `${sym}_PIN`; }
 
   consoleStreamName(port: number): string {
     return port === 0 ? 'Serial' : `Serial${port}`;

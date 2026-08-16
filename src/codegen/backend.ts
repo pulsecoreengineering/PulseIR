@@ -48,6 +48,13 @@ export interface PlatformBackend {
    */
   durationLiteral(ms: number): string;
 
+  /**
+   * Variable/macro name for a GPIO pin, given the sanitized-upper device symbol.
+   * Arduino/ESP-IDF: `${sym}_PIN` (numeric `#define`).
+   * Zephyr Phase 2:  `${sym}_GPIO` (`gpio_dt_spec` struct name).
+   */
+  gpioPinVar(sym: string): string;
+
   // ── Console ───────────────────────────────────────────────────────────────
 
   /** The C identifier for the UART stream on a given port number. */

@@ -2024,7 +2024,7 @@ static void pollCommands() {
           // Toggle: read the current state and invert it.
           return targets
             .map(t => {
-              const pin = `${this.sanitizeUpper(String(t))}_PIN`;
+              const pin = this.backend.gpioPinVar(this.sanitizeUpper(String(t)));
               return `  ${this.backend.digitalWriteExpr(pin, `!${this.backend.digitalReadExpr(pin)}`)};`;
             })
             .join('\n') + '\n  (void)ctx;';
@@ -2041,7 +2041,7 @@ static void pollCommands() {
         if (valueExpr === null) break;
 
         return targets
-          .map(t => `  ${this.backend.digitalWriteExpr(`${this.sanitizeUpper(String(t))}_PIN`, valueExpr)};`)
+          .map(t => `  ${this.backend.digitalWriteExpr(this.backend.gpioPinVar(this.sanitizeUpper(String(t))), valueExpr)};`)
           .join('\n') + '\n  (void)ctx;';
       }
 
@@ -2064,7 +2064,7 @@ static void pollCommands() {
       case 'gpio_read': {
         const deviceName = String(params.device ?? '');
         if (this.isSensorComponent(deviceName)) {
-          const pin   = `${this.sanitizeUpper(deviceName)}_PIN`;
+          const pin   = this.backend.gpioPinVar(this.sanitizeUpper(deviceName));
           const field = `systemSensors.${this.sanitize(deviceName)}`;
           return `  ${field} = (float)${this.backend.digitalReadExpr(pin)};\n  (void)ctx;`;
         }
@@ -2422,7 +2422,7 @@ ${saveBody}
 
       return c.type === 'analog_input'
         ? `  ${field} = ${this.backend.analogReadExpr(pinMacro)};`
-        : `  ${field} = (float)${this.backend.digitalReadExpr(pinMacro)};`;
+        : `  ${field} = (float)${this.backend.digitalReadExpr(this.backend.gpioPinVar(this.sanitizeUpper(c.name)))};`;
     });
 
     return `// Populate systemSensors before guards and actions read them.

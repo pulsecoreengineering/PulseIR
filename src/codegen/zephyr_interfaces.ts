@@ -41,22 +41,29 @@ export class ZephyrInterfaceBackend {
     const has = (key: string): boolean => binding[key] !== undefined;
     const ref = (key: string): string => `${symbol}_${key.toUpperCase()}`;
 
+    let gpioSpecEmitted = false;
+
     switch (kind) {
       case 'gpio': {
         if (!has('pin')) {
-          out.todos.push(`${resource.name}: add a "pin" binding for gpio_pin_configure()`);
+          out.todos.push(`${resource.name}: add a "pin" binding for gpio_pin_configure_dt()`);
           break;
         }
         const rawMode = String(binding.mode ?? 'output').toUpperCase();
-        const dir = rawMode === 'INPUT'         ? 'GPIO_INPUT'
-                  : rawMode === 'INPUT_PULLUP'  ? '(GPIO_INPUT | GPIO_PULL_UP)'
+        const dir = rawMode === 'INPUT'          ? 'GPIO_INPUT'
+                  : rawMode === 'INPUT_PULLUP'   ? '(GPIO_INPUT | GPIO_PULL_UP)'
                   : rawMode === 'INPUT_PULLDOWN' ? '(GPIO_INPUT | GPIO_PULL_DOWN)'
                   : 'GPIO_OUTPUT_INACTIVE';
-        // Phase 1: raw device-pointer pattern — no app.overlay required.
-        // Phase 2 will generate gpio_dt_spec + DT aliases here.
-        out.init.push(
-          `gpio_pin_configure(DEVICE_DT_GET(DT_NODELABEL(gpio0)), (gpio_pin_t)(${ref('pin')}), ${dir});`,
+        // Phase 2: gpio_dt_spec — app.overlay declares the gpio0 node properties.
+        const specName = `${symbol}_GPIO`;
+        const propName = `${symbol.toLowerCase()}_gpios`;
+        out.globals.push(
+          `static const struct gpio_dt_spec ${specName} = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), ${propName});`,
         );
+        out.init.push(
+          `gpio_pin_configure_dt(&${specName}, ${dir});`,
+        );
+        gpioSpecEmitted = true;
         break;
       }
 
@@ -194,6 +201,16 @@ export class ZephyrInterfaceBackend {
           `${resource.name}: custom interface — add your Zephyr driver initialisation`
         );
         break;
+    }
+
+    // Any device with a pin may be targeted by gpio_control, even if its primary
+    // interface is PWM or ADC. Declare a gpio_dt_spec so those actions compile.
+    if (has('pin') && !gpioSpecEmitted) {
+      const specName = `${symbol}_GPIO`;
+      const propName = `${symbol.toLowerCase()}_gpios`;
+      out.globals.push(
+        `static const struct gpio_dt_spec ${specName} = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), ${propName});`,
+      );
     }
 
     out.init = out.init.filter(Boolean);

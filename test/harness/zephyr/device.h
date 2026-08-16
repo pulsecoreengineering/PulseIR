@@ -29,6 +29,7 @@ extern const struct device _zephyr_stub_device;
 /* DT node token — collapsed to 0; DEVICE_DT_GET ignores it in this stub. */
 #define DT_NODELABEL(label)  0
 #define DT_ALIAS(alias)      0
+#define DT_PATH(...)         0
 #define DEVICE_DT_GET(node)  (&_zephyr_stub_device)
 
 #ifdef __cplusplus
