@@ -67,7 +67,7 @@ const REGISTRY = (name: string, include: string, reason: string): ImpliedLibrary
  * Defining them would produce meaningless macros like `#define X_MODE pwm`.
  */
 const CONSUMED_KEYS: Record<string, string[]> = {
-  gpio: ['mode'],
+  gpio: ['mode', 'interrupt', 'raises'],
   uart: ['port'],
   rs485: ['port'],
   mqtt: ['tls'],

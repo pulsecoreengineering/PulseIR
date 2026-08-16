@@ -93,10 +93,16 @@ const BUILTIN_DEVICE_TYPES: Record<string, { class: string; driver: string }> = 
   digital_input:  { class: 'sensor',   driver: 'gpio_read' },
   pwm_output:     { class: 'actuator', driver: 'pwm_control' },
   analog_input:   { class: 'sensor',   driver: 'adc_read' },
-  // Common parts, listed so `type: ds18b20` needs no `class:`.
+  // Bus-attached sensors — `type: ds18b20` needs no explicit `class:`.
   ds18b20:        { class: 'sensor',   driver: 'ds18b20' },
   dht22:          { class: 'sensor',   driver: 'dht22' },
+  dht11:          { class: 'sensor',   driver: 'dht11' },
   bme280:         { class: 'sensor',   driver: 'bme280' },
+  // Display and peripheral devices.
+  lcd_i2c:        { class: 'actuator', driver: 'lcd_print' },
+  oled_i2c:       { class: 'actuator', driver: 'oled_print' },
+  ds3231:         { class: 'service',  driver: 'rtc_read' },
+  ds1307:         { class: 'service',  driver: 'rtc_read' },
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
