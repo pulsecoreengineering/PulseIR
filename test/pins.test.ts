@@ -249,6 +249,220 @@ test('the shipped examples allocate pins cleanly', () => {
 });
 
 // ============================================================================
+// Board profile checks (ESP32)
+// ============================================================================
+
+console.log('\n📋 Testing ESP32 board profile checks...\n');
+
+// Shared header that declares target: esp32 — must be included in every profile
+// test fixture so the parser loads the ESP32 profile.
+const ESP32_HEAD = `project: {name: test, version: "1.0"}
+target: {board: esp32}
+events: {GO: {source: external}}
+machine: {states: {idle: {}}, transitions: []}
+`;
+
+function expectProfileError(yaml: string, needle: string, label: string): void {
+  let raised: Error | undefined;
+  try {
+    parse(yaml);
+  } catch (error) {
+    raised = error as Error;
+  }
+  if (!raised) throw new Error(`${label}: expected a profile error, but parsing succeeded`);
+  if (!(raised instanceof ParseError)) throw new Error(`${label}: unexpected error type: ${raised.name}`);
+  if (!raised.message.includes(needle)) {
+    throw new Error(`${label}: expected "${needle}" in message, got:\n${raised.message}`);
+  }
+}
+
+function expectProfileWarning(yaml: string, needle: string, label: string): void {
+  const parser = new Parser();
+  parser.parse(yaml);
+  const found = parser.warnings.some(w => w.includes(needle));
+  if (!found) {
+    throw new Error(`${label}: expected warning containing "${needle}", got:\n${parser.warnings.join('\n')}`);
+  }
+}
+
+function expectNoProfileDiagnostic(yaml: string, label: string): void {
+  let raised: Error | undefined;
+  try {
+    const parser = new Parser();
+    const project = parser.parse(yaml);
+    // Confirm no profile-related warnings either (collision warnings share the
+    // parse path, so any warning from the profile check would show up here).
+    const profileWarnings = parser.warnings.filter(
+      w => w.includes('input-only') || w.includes('SPI flash') || w.includes('ADC2'),
+    );
+    if (profileWarnings.length > 0) {
+      throw new Error(`unexpected profile warnings: ${profileWarnings.join('; ')}`);
+    }
+    void project;
+  } catch (error) {
+    raised = error as Error;
+  }
+  if (raised) throw new Error(`${label}: expected no diagnostic, got: ${raised.message}`);
+}
+
+// --- Flash-reserved (GPIO6–11) ---
+
+test('flash-reserved pin on a device is rejected', () => {
+  // GPIO7 is SD0 (SPI flash data line) on ESP32 — cannot be used by the app.
+  expectProfileError(`${ESP32_HEAD}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO7}
+`, 'integrated SPI flash', 'GPIO7 flash pin on device');
+});
+
+test('flash-reserved pin in a bus binding is rejected', () => {
+  expectProfileError(`${ESP32_HEAD}
+hardware:
+  buses:
+    serial: {interface: uart, rx: GPIO16, tx: GPIO6}
+`, 'integrated SPI flash', 'GPIO6 flash pin on bus tx');
+});
+
+// --- Input-only (GPIO34, 35, 36, 39) ---
+
+test('output device on an input-only pin is rejected', () => {
+  // GPIO34 has no output driver on ESP32 — wiring a digital_output to it is wrong.
+  expectProfileError(`${ESP32_HEAD}
+hardware:
+  devices:
+    status_led: {type: digital_output, pin: GPIO34}
+`, 'input-only', 'digital_output on GPIO34');
+});
+
+test('pwm_output on an input-only pin is rejected', () => {
+  expectProfileError(`${ESP32_HEAD}
+hardware:
+  devices:
+    motor: {type: pwm_output, pin: GPIO35, channel: 0, frequency: 1000, resolution: 8}
+`, 'input-only', 'pwm_output on GPIO35');
+});
+
+test('input device on an input-only pin is accepted', () => {
+  // GPIO34 and GPIO35 are intentionally input-only — use them for ADC or digital input.
+  // motor_controller.yaml already uses GPIO34 for analog_input and GPIO35 for digital_input.
+  expectNoProfileDiagnostic(`${ESP32_HEAD}
+hardware:
+  devices:
+    current_sense: {type: analog_input, pin: GPIO34, unit: A}
+    estop:         {type: digital_input, pin: GPIO35}
+`, 'input devices on input-only pins');
+});
+
+test('I2C SDA on an input-only pin is rejected', () => {
+  // SDA must drive the bus (open-drain output) — input-only GPIO cannot do this.
+  expectProfileError(`${ESP32_HEAD}
+hardware:
+  buses:
+    sensor_bus: {interface: i2c, sda: GPIO39, scl: GPIO22}
+`, 'input-only', 'I2C sda on GPIO39');
+});
+
+test('SPI MISO on an input-only pin is accepted', () => {
+  // MISO is master-in/slave-out — the ESP32 only receives on this pin.
+  expectNoProfileDiagnostic(`${ESP32_HEAD}
+hardware:
+  buses:
+    spi_bus: {interface: spi, sck: GPIO18, miso: GPIO36, mosi: GPIO23}
+`, 'SPI miso on input-only GPIO36');
+});
+
+test('UART TX on an input-only pin is rejected', () => {
+  expectProfileError(`${ESP32_HEAD}
+hardware:
+  buses:
+    gps: {interface: uart, rx: GPIO16, tx: GPIO39}
+`, 'input-only', 'UART tx on GPIO39');
+});
+
+test('OneWire bus on an input-only pin is rejected', () => {
+  // OneWire is bidirectional — needs output capability.
+  expectProfileError(`${ESP32_HEAD}
+hardware:
+  buses:
+    one_wire: {interface: onewire, pin: GPIO36}
+`, 'input-only', 'onewire bus on GPIO36');
+});
+
+// --- ADC2 + Wi-Fi ---
+
+test('analog_input on ADC2 pin with Wi-Fi declared is a warning', () => {
+  // GPIO25 is ADC2_CH8 — ADC2 is borrowed by the Wi-Fi driver at runtime.
+  expectProfileWarning(`${ESP32_HEAD}
+hardware:
+  buses:
+    wlan: {interface: wifi}
+  devices:
+    pressure: {type: analog_input, pin: GPIO25}
+`, 'ADC2', 'analog_input on ADC2 GPIO25 with WiFi');
+});
+
+test('analog_input on ADC2 pin without Wi-Fi is accepted', () => {
+  // Without a wifi resource the ADC2 conflict cannot arise.
+  expectNoProfileDiagnostic(`${ESP32_HEAD}
+hardware:
+  devices:
+    pressure: {type: analog_input, pin: GPIO25}
+`, 'ADC2 pin without WiFi');
+});
+
+test('digital_output on an ADC2 pin with Wi-Fi is accepted', () => {
+  // The ADC2/Wi-Fi restriction only affects analog reads, not digital I/O.
+  // GPIO26 is ADC2_CH9 but sensor_gateway.yaml uses it as a digital_output.
+  expectNoProfileDiagnostic(`${ESP32_HEAD}
+hardware:
+  buses:
+    wlan: {interface: wifi}
+  devices:
+    relay: {type: digital_output, pin: GPIO26}
+`, 'digital_output on ADC2 pin with WiFi is fine');
+});
+
+test('analog_input on an ADC1 pin with Wi-Fi is accepted', () => {
+  // GPIO32 is ADC1_CH4 — ADC1 is unaffected by Wi-Fi.
+  expectNoProfileDiagnostic(`${ESP32_HEAD}
+hardware:
+  buses:
+    wlan: {interface: wifi}
+  devices:
+    temperature: {type: analog_input, pin: GPIO32}
+`, 'ADC1 pin with WiFi is fine');
+});
+
+// --- Profile scope ---
+
+test('profile checks are skipped when no board is declared', () => {
+  // Without target.board the profile is never loaded, so invalid GPIO numbers
+  // are not caught — but input-only violations pass silently too.
+  expectNoProfileDiagnostic(`
+project: {name: test, version: "1.0"}
+events: {GO: {source: external}}
+machine: {states: {idle: {}}, transitions: []}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO34}
+`, 'no board — profile not loaded');
+});
+
+test('profile checks are skipped for an unrecognised board', () => {
+  // "esp32s3" is NOT in the profile registry yet.
+  expectNoProfileDiagnostic(`
+project: {name: test, version: "1.0"}
+target: {board: esp32s3}
+events: {GO: {source: external}}
+machine: {states: {idle: {}}, transitions: []}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO34}
+`, 'unknown board — no profile match');
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} pin test(s) failed`);

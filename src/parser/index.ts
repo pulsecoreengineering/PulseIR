@@ -34,6 +34,7 @@ import type {
 } from '../model/index.js';
 import type { SourceResolver } from './resolver.js';
 import { findPinConflicts, describePinConflict } from '../analysis/pins.js';
+import { loadProfile, checkBoardProfile } from '../analysis/board_profiles.js';
 import { parseTemplate, templateRefs, TemplateError } from '../analysis/template.js';
 
 export interface ParseOptions {
@@ -419,6 +420,21 @@ export class Parser {
 
     if (fatal.length > 0) {
       throw new ParseError(fatal.map(describePinConflict).join('\n\n'));
+    }
+
+    // Board-profile checks: input-only pins, flash-reserved pins, ADC2+Wi-Fi.
+    // Only runs when a known profile exists for the declared board.
+    if (project.target?.board) {
+      const profile = loadProfile(project.target.board);
+      if (profile) {
+        const violations = checkBoardProfile(project, profile);
+        const errors   = violations.filter(v => v.severity === 'error');
+        const warnings = violations.filter(v => v.severity === 'warning');
+        for (const w of warnings) this.warnings.push(w.message);
+        if (errors.length > 0) {
+          throw new ParseError(errors.map(v => v.message).join('\n\n'));
+        }
+      }
     }
 
     return project;
