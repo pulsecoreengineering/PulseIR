@@ -179,6 +179,7 @@ export class Codegen {
       this.generateTimeouts(),
       this.generateTasks(),
       this.generateCommands(),
+      this.generateMqttWiring(),
       this.generateReadSensors(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
@@ -275,6 +276,7 @@ ${this.backend.entryPointDeclarations()}${this.declInterfaceGlobals()}`,
       this.generateTimeouts(),
       this.generateTasks(),
       this.generateCommands(),
+      this.generateMqttWiring(),
       this.generateReadSensors(),
       this.generateSetupFunction(),
       this.generateLoopFunction(),
@@ -1539,6 +1541,205 @@ ${reads.join('\n')}
 }`;
   }
 
+  // =========================================================================
+  // MQTT WIRING
+  // =========================================================================
+
+  /** Return the declared mqtt resource, or undefined. */
+  private mqttResource(): Resource | undefined {
+    return (this.project.system.resources || []).find(r => String(r.interface) === 'mqtt');
+  }
+
+  /**
+   * Sanitize a name for use as an MQTT topic segment.
+   * Mirrors the TopicEmitter.segment() logic: keep alphanumerics and ._-,
+   * replace everything else with underscore.
+   */
+  private topicSegment(name: string): string {
+    return name.trim().replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^_+|_+$/g, '');
+  }
+
+  /**
+   * Derive the PubSubClient variable name from the mqtt resource name.
+   * Mirrors the lower() helper in interfaces.ts:
+   *   "mqtt"      → "mqtt"
+   *   "broker"    → "broker"
+   *   "mqtt_bus"  → "mqttBus"
+   */
+  private mqttClientVar(resource: Resource): string {
+    const upper = this.sanitizeUpper(resource.name);
+    return upper.toLowerCase().replace(/_([a-z])/g, (_: string, c: string) => c.toUpperCase());
+  }
+
+  /**
+   * Generate the MQTT subscription/publication wiring:
+   *   - onMqttMessage()  — callback updating parameters or raising events
+   *   - connectMqtt()    — connect once + subscribe
+   *   - publishMqtt()    — publish sensor readings and current state
+   *
+   * Emitted only when an mqtt resource is declared AND there is something to
+   * subscribe to or publish (parameters, MQTT-sourced events, or sensors).
+   * The loop() generator injects the reconnect/loop/publish calls.
+   */
+  private generateMqttWiring(): string {
+    const mqtt = this.mqttResource();
+    if (!mqtt) return '';
+
+    const parameters  = this.project.system.parameters || [];
+    const mqttEvents  = (this.project.system.events || []).filter(
+      e => String(e.source) === 'mqtt'
+    );
+    const sensors = (this.project.system.components || []).filter(
+      c => String(c.class) === 'sensor'
+    );
+
+    const hasSubscriptions = parameters.length > 0 || mqttEvents.length > 0;
+    const hasPublications  = sensors.length > 0 || this.hasMachine;
+
+    if (!hasSubscriptions && !hasPublications) return '';
+
+    const client = this.mqttClientVar(mqtt);
+    const binding = mqtt.binding || {};
+
+    // The topic namespace — the project name by default, overridable in the model.
+    const ns = this.topicSegment(
+      typeof binding.prefix === 'string' ? String(binding.prefix) : this.project.name
+    );
+
+    // ── onMqttMessage ──────────────────────────────────────────────────────
+
+    const setpointCases = parameters.map(p => {
+      const seg = this.topicSegment(p.name);
+      const field = `systemParameters.${this.sanitize(p.name)}`;
+      let conv: string;
+      switch (p.type) {
+        case 'float':  conv = `${field} = atof(buf);`;                                 break;
+        case 'bool':   conv = `${field} = buf[0] == '1' || strcmp(buf, "true") == 0;`; break;
+        default:       conv = `${field} = (int)atol(buf);`;                             break;
+      }
+      return `  if (strcmp(suffix, "/setpoint/${seg}") == 0) { ${conv} return; }`;
+    });
+
+    const eventCases = mqttEvents.map(e => {
+      const seg   = this.topicSegment(e.name);
+      const evSym = `EVENT_${this.sanitizeUpper(e.name)}`;
+      const dispatch = this.hasMachine
+        ? `fsm.sendEvent(${evSym})`
+        : `/* no machine — ${e.name} cannot be dispatched */`;
+      return `  if (strcmp(suffix, "/event/${seg}") == 0) { ${dispatch}; return; }`;
+    });
+
+    const callbackBody = [
+      '  char buf[128];',
+      '  if (length >= sizeof(buf)) length = sizeof(buf) - 1;',
+      '  memcpy(buf, payload, length);',
+      '  buf[length] = \'\\0\';',
+      '',
+      '  const size_t prefixLen = strlen(_mqttPrefix);',
+      '  if (strncmp(topic, _mqttPrefix, prefixLen) != 0) return;',
+      '  const char* suffix = topic + prefixLen;',
+      '',
+      ...(setpointCases.length > 0 ? ['  // Setpoints → update parameters.', ...setpointCases, ''] : []),
+      ...(eventCases.length > 0    ? ['  // Events → dispatch to state machine.', ...eventCases] : []),
+    ].join('\n');
+
+    // ── connectMqtt ────────────────────────────────────────────────────────
+
+    const subscribeLines = [
+      ...parameters.map(p => {
+        const seg = this.topicSegment(p.name);
+        return `  snprintf(_t, sizeof(_t), "%s/setpoint/${seg}", _mqttPrefix);\n  ${client}.subscribe(_t);`;
+      }),
+      ...mqttEvents.map(e => {
+        const seg = this.topicSegment(e.name);
+        return `  snprintf(_t, sizeof(_t), "%s/event/${seg}", _mqttPrefix);\n  ${client}.subscribe(_t);`;
+      }),
+    ];
+
+    // client_id binding overrides MQTT_DEVICE_ID for the broker connection.
+    const clientIdExpr = typeof binding.client_id === 'string'
+      ? this.sanitizeUpper(mqtt.name) + '_CLIENT_ID'
+      : 'MQTT_DEVICE_ID';
+
+    const connectBody = [
+      `  if (${client}.connected()) return;`,
+      `  snprintf(_mqttPrefix, sizeof(_mqttPrefix), "${ns}/" MQTT_DEVICE_ID);`,
+      `  if (!${client}.connect(${clientIdExpr})) return;`,
+      '',
+      `  ${client}.setCallback(onMqttMessage);`,
+      '',
+      ...(subscribeLines.length > 0 ? ['  char _t[128];', ...subscribeLines] : []),
+    ].join('\n');
+
+    // ── publishMqtt ────────────────────────────────────────────────────────
+
+    const publishLines: string[] = [];
+    if (sensors.length > 0) {
+      publishLines.push('  // Sensor readings.');
+      for (const s of sensors) {
+        const seg   = this.topicSegment(s.name);
+        const field = `systemSensors.${this.sanitize(s.name)}`;
+        publishLines.push(
+          `  snprintf(_t, sizeof(_t), "%s/${seg}", _mqttPrefix);`,
+          `  snprintf(_v, sizeof(_v), "%.4g", ${field});`,
+          `  ${client}.publish(_t, _v);`,
+        );
+      }
+    }
+    if (this.hasMachine) {
+      publishLines.push('  // Current leaf state.');
+      publishLines.push(`  snprintf(_t, sizeof(_t), "%s/state", _mqttPrefix);`);
+      publishLines.push(`  ${client}.publish(_t, fsm.getCurrentName());`);
+    }
+
+    const publishBody = [
+      `  if (!${client}.connected()) return;`,
+      '  char _t[128];',
+      ...(sensors.length > 0 ? ['  char _v[32];'] : []),
+      '',
+      ...publishLines,
+    ].join('\n');
+
+    // ── assemble ───────────────────────────────────────────────────────────
+
+    const callbackSection = hasSubscriptions
+      ? `static void onMqttMessage(char* topic, uint8_t* payload, unsigned int length) {\n${callbackBody}\n}`
+      : '';
+
+    const connectSection  = hasSubscriptions
+      ? `static void connectMqtt() {\n${connectBody}\n}`
+      : `static void connectMqtt() {\n  if (${client}.connected()) return;\n  snprintf(_mqttPrefix, sizeof(_mqttPrefix), "${ns}/" MQTT_DEVICE_ID);\n  ${client}.connect(MQTT_DEVICE_ID);\n}`;
+
+    const publishSection  = hasPublications
+      ? `static void publishMqtt() {\n${publishBody}\n}`
+      : '';
+
+    const parts = [
+      `// ============================================================================
+// MQTT WIRING
+// ============================================================================
+//
+// The device identifies itself via MQTT_DEVICE_ID. Pass as a build flag:
+//   Arduino: -DMQTT_DEVICE_ID=\\"unit-001\\"    (in build_flags or compiler flags)
+//   IDF:     CONFIG_MQTT_DEVICE_ID in sdkconfig
+#include <string.h>   // memcpy, strlen, strcmp, strncmp
+#include <stdio.h>    // snprintf
+#include <stdlib.h>   // atof, atol
+
+#ifndef MQTT_DEVICE_ID
+#define MQTT_DEVICE_ID "device"
+#endif
+
+// Runtime topic prefix: "${ns}/<device_id>"
+static char _mqttPrefix[96];`,
+      callbackSection,
+      connectSection,
+      publishSection,
+    ].filter(Boolean);
+
+    return parts.join('\n\n');
+  }
+
   /**
    * A `log:` template as print calls.
    *
@@ -1784,6 +1985,40 @@ ${blocks.join('\n\n')}`;
 
   private generateLoopFunction(): string {
     const body: string[] = [];
+
+    // MQTT reconnect + message pump (must come before everything that may
+    // dispatch events, so an incoming MQTT message can be acted on this tick).
+    const mqttRes = this.mqttResource();
+    if (mqttRes) {
+      const client = this.mqttClientVar(mqttRes);
+      const sensors = (this.project.system.components || []).filter(
+        c => String(c.class) === 'sensor'
+      );
+      const hasPublications = sensors.length > 0 || this.hasMachine;
+      body.push(
+        `  // Maintain MQTT connection and pump incoming messages.`,
+        `  {`,
+        `    static unsigned long _mqttReconnectAt = 0;`,
+        `    if (!${client}.connected() && ${this.backend.nowExpr()} - _mqttReconnectAt >= 5000UL) {`,
+        `      _mqttReconnectAt = ${this.backend.nowExpr()};`,
+        `      connectMqtt();`,
+        `    }`,
+        `    ${client}.loop();`,
+        `  }`,
+      );
+      if (hasPublications) {
+        body.push(
+          `  // Publish sensor readings and state periodically.`,
+          `  {`,
+          `    static unsigned long _mqttPublishAt = 0;`,
+          `    if (${this.backend.nowExpr()} - _mqttPublishAt >= 5000UL) {`,
+          `      _mqttPublishAt = ${this.backend.nowExpr()};`,
+          `      publishMqtt();`,
+          `    }`,
+          `  }`,
+        );
+      }
+    }
 
     // Sensor reads come first: guards and actions in the same pass see fresh values.
     const hasPinSensors = (this.project.system.components || []).some(
