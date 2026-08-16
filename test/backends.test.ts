@@ -516,6 +516,62 @@ test('state without entry/exit: no spurious on_enter or on_exit generated', () =
 });
 
 // ---------------------------------------------------------------------------
+// SENSOR CONVERSION EXPRESSIONS
+// ---------------------------------------------------------------------------
+
+const CONVERSION_YAML = `
+pulseir: "1"
+project:
+  name: lm35_test
+  version: "1.0"
+actions:
+  noop: {driver: logger}
+hardware:
+  devices:
+    temp:
+      type: analog_input
+      pin: GPIO34
+      unit: degC
+      conversion: "analogRead({pin}) * (3.3 / 4095.0) * 100.0"
+    raw_soil:
+      type: analog_input
+      pin: GPIO35
+tasks:
+  heartbeat: { every: 500, do: noop }
+`;
+
+test('conversion: substitutes {pin} with the pin macro', () => {
+  const code = new Codegen().generate(parse(CONVERSION_YAML));
+  has(code, 'analogRead(TEMP_PIN) * (3.3 / 4095.0) * 100.0');
+  hasNot(code, 'analogRead({pin})');
+});
+
+test('conversion: wraps expression in (float)(...) cast', () => {
+  const code = new Codegen().generate(parse(CONVERSION_YAML));
+  has(code, 'systemSensors.temp = (float)(analogRead(TEMP_PIN) * (3.3 / 4095.0) * 100.0)');
+});
+
+test('conversion: appends unit as a comment on the read line', () => {
+  const code = new Codegen().generate(parse(CONVERSION_YAML));
+  has(code, '// degC');
+});
+
+test('sensor without conversion: still uses analogRead(PIN) directly', () => {
+  const code = new Codegen().generate(parse(CONVERSION_YAML));
+  has(code, 'systemSensors.raw_soil = analogRead(RAW_SOIL_PIN)');
+});
+
+test('unit in sensor struct shows as a comment', () => {
+  const code = new Codegen().generate(parse(CONVERSION_YAML));
+  has(code, 'float temp;  // driver: adc_read, unit: degC');
+});
+
+test('sensor without unit has no unit comment in struct', () => {
+  const code = new Codegen().generate(parse(CONVERSION_YAML));
+  has(code, 'float raw_soil;  // driver: adc_read\n');
+});
+
+// ---------------------------------------------------------------------------
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} backend test(s) failed`);

@@ -754,7 +754,10 @@ SystemSensors systemSensors = {};`;
 
     const fields = sensors.length > 0
       ? sensors
-          .map(c => `  float ${this.sanitize(c.name)};  // driver: ${c.driver}`)
+          .map(c => {
+            const unitNote = c.config?.unit ? `, unit: ${c.config.unit}` : '';
+            return `  float ${this.sanitize(c.name)};  // driver: ${c.driver}${unitNote}`;
+          })
           .join('\n')
       : '  // TODO: Add your sensor readings here (e.g. float temperature;)';
 
@@ -1882,11 +1885,24 @@ ${saveBody}
     if (sensors.length === 0) return '';
 
     const reads = sensors.map(c => {
-      const pin   = `${this.sanitizeUpper(c.name)}_PIN`;
-      const field = `systemSensors.${this.sanitize(c.name)}`;
+      const pinMacro = `${this.sanitizeUpper(c.name)}_PIN`;
+      const field    = `systemSensors.${this.sanitize(c.name)}`;
+
+      const rawConversion = c.config?.conversion;
+      if (typeof rawConversion === 'string' && rawConversion.trim()) {
+        // User-supplied conversion formula. {pin} expands to the pin macro so
+        // the expression stays board-agnostic:
+        //   conversion: "analogRead({pin}) * (3.3 / 4095.0) * 100.0"
+        // becomes:
+        //   systemSensors.temp = analogRead(TEMP_PIN) * (3.3 / 4095.0) * 100.0;
+        const expr = rawConversion.trim().replace(/\{pin\}/g, pinMacro);
+        const unit = c.config?.unit ? `  // ${c.config.unit}` : '';
+        return `  ${field} = (float)(${expr});${unit}`;
+      }
+
       return c.type === 'analog_input'
-        ? `  ${field} = ${this.backend.analogReadExpr(pin)};`
-        : `  ${field} = (float)${this.backend.digitalReadExpr(pin)};`;
+        ? `  ${field} = ${this.backend.analogReadExpr(pinMacro)};`
+        : `  ${field} = (float)${this.backend.digitalReadExpr(pinMacro)};`;
     });
 
     return `// Populate systemSensors before guards and actions read them.
