@@ -19,6 +19,17 @@
 #define OUTPUT 1
 #define INPUT_PULLUP 2
 
+// ISR attribute — empty on host; ESP32 core places ISRs in IRAM.
+#ifndef IRAM_ATTR
+#define IRAM_ATTR
+#endif
+
+// Interrupt mode constants.
+#define RISING  1
+#define FALLING 2
+#define CHANGE  3
+#define LOW_LEVEL 4  // LOW is already defined as 0 above
+
 // A virtual clock, so a test can say "twenty seconds pass" without waiting.
 // Wall-clock time would make every timed transition a race, and CPU time makes
 // the result depend on how fast the machine running the tests happens to be.
@@ -34,6 +45,8 @@ inline void digitalWrite(int, int) {}
 inline int digitalRead(int) { return 0; }
 inline void analogWrite(int, int) {}
 inline int analogRead(int) { return 0; }
+inline int digitalPinToInterrupt(int pin) { return pin; }
+inline void attachInterrupt(int, void(*)(), int) {}
 
 class SerialShim {
 public:

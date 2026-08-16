@@ -1596,6 +1596,142 @@ commands:
       unit: degC
       conversion: "analogRead({pin}) * (3.3 / 4095.0) * 100.0"`
   },
+  { group: 'Device', label: 'DS18B20  (1-Wire temperature)',
+    yaml:
+`# Requires: DallasTemperature + OneWire — install via Arduino Library Manager
+hardware:
+  buses:
+    probe_bus: { interface: onewire, pin: GPIO4 }
+  devices:
+    water_temp:
+      type: ds18b20
+      bus: probe_bus
+      unit: degC
+
+actions:
+  read_temp: { driver: ds18b20, params: { device: water_temp } }
+
+tasks:
+  sensor_poll: { every: 2000, do: read_temp }`
+  },
+  { group: 'Device', label: 'DHT22  (temperature + humidity)',
+    yaml:
+`# Requires: DHT sensor library by Adafruit — install via Arduino Library Manager
+hardware:
+  devices:
+    air_temp:
+      type: dht22
+      pin: GPIO4
+      measure: temperature   # or: humidity
+      unit: degC
+
+actions:
+  read_dht: { driver: dht22, params: { device: air_temp } }
+
+tasks:
+  sensor_poll: { every: 2000, do: read_dht }`
+  },
+  { group: 'Device', label: 'BME280  (temp / humidity / pressure)',
+    yaml:
+`# Requires: Adafruit BME280 Library + Adafruit Unified Sensor — Library Manager
+hardware:
+  buses:
+    sensor_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    air_temp:
+      type: bme280
+      bus: sensor_bus
+      address: 0x76
+      measure: temperature   # temperature | humidity | pressure
+      unit: degC
+
+actions:
+  read_bme: { driver: bme280, params: { device: air_temp } }
+
+tasks:
+  sensor_poll: { every: 2000, do: read_bme }`
+  },
+  { group: 'Device', label: 'Digital input with interrupt (ISR)',
+    yaml:
+`# Interrupt-driven input: generates an ISR + attachInterrupt() call.
+# Add "raises: EVENT_NAME" to fire a state-machine event from the ISR.
+hardware:
+  devices:
+    button:
+      type: digital_input
+      pin: GPIO0
+      interrupt: FALLING   # RISING | FALLING | CHANGE
+      raises: BUTTON_PRESSED
+
+events:
+  BUTTON_PRESSED: { source: external }
+
+machine:
+  states:
+    idle:
+    active:
+  transitions:
+    - { from: idle,   on: BUTTON_PRESSED, to: active }
+    - { from: active, on: BUTTON_PRESSED, to: idle }`
+  },
+  { group: 'Device', label: 'LCD I2C  (character display)',
+    yaml:
+`# Requires: LiquidCrystal_I2C by Frank de Brabander — Arduino Library Manager
+hardware:
+  buses:
+    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    display:
+      type: lcd_i2c
+      bus: i2c_bus
+      address: 0x27   # scan with I2C scanner if unsure
+      cols: 16
+      rows: 2
+
+actions:
+  show_status: { driver: lcd_print, params: { device: display, row: 0, col: 0 } }
+  clear_screen: { driver: lcd_clear, params: { device: display } }
+
+tasks:
+  update_display: { every: 1000, do: [clear_screen, show_status] }`
+  },
+  { group: 'Device', label: 'OLED I2C  (SSD1306 display)',
+    yaml:
+`# Requires: Adafruit SSD1306 + Adafruit GFX Library — Arduino Library Manager
+hardware:
+  buses:
+    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    screen:
+      type: oled_i2c
+      bus: i2c_bus
+      address: 0x3C   # 0x3C most boards; 0x3D if SA0 is HIGH
+      width: 128
+      height: 64
+
+actions:
+  draw_status: { driver: oled_print, params: { device: screen, x: 0, y: 0, size: 1 } }
+
+tasks:
+  refresh: { every: 500, do: draw_status }`
+  },
+  { group: 'Device', label: 'DS3231 RTC  (real-time clock)',
+    yaml:
+`# Requires: RTClib by Adafruit — install via Arduino Library Manager
+hardware:
+  buses:
+    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    clock:
+      type: ds3231
+      bus: i2c_bus
+
+actions:
+  read_time: { driver: rtc_read, params: { device: clock } }
+
+tasks:
+  tick: { every: 1000, do: read_time }`
+  },
 
   // ── Logic ────────────────────────────────────────────────────────────────
   { group: 'Logic', label: 'Parameter  (tunable value)',

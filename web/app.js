@@ -3227,10 +3227,16 @@ ${lines.join("\n")}${hint}`;
     digital_input: { class: "sensor", driver: "gpio_read" },
     pwm_output: { class: "actuator", driver: "pwm_control" },
     analog_input: { class: "sensor", driver: "adc_read" },
-    // Common parts, listed so `type: ds18b20` needs no `class:`.
+    // Bus-attached sensors — `type: ds18b20` needs no explicit `class:`.
     ds18b20: { class: "sensor", driver: "ds18b20" },
     dht22: { class: "sensor", driver: "dht22" },
-    bme280: { class: "sensor", driver: "bme280" }
+    dht11: { class: "sensor", driver: "dht11" },
+    bme280: { class: "sensor", driver: "bme280" },
+    // Display and peripheral devices.
+    lcd_i2c: { class: "actuator", driver: "lcd_print" },
+    oled_i2c: { class: "actuator", driver: "oled_print" },
+    ds3231: { class: "service", driver: "rtc_read" },
+    ds1307: { class: "service", driver: "rtc_read" }
   };
   function isPlainObject(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -3495,11 +3501,13 @@ ${lines.join("\n")}${hint}`;
       const hardware = raw.hardware ?? {};
       const events = this.parseEventMap(raw.events);
       events.forEach((e) => this.eventNames.add(e.name));
-      const states = this.parseStateMap(machine.states);
-      this.indexStateNames(states);
       const actionCatalogue = this.parseActionCatalogue(raw.actions);
       actionCatalogue.forEach((_, name) => this.actionNames.add(name));
-      const transitions = this.parseTransitionList(machine.transitions, actionCatalogue);
+      const states = this.parseStateMap(machine.states, actionCatalogue);
+      this.indexStateNames(states);
+      const shorthands = this.extractStatePeriodicShorthands(machine.states);
+      const explicitList = this.asList(machine.transitions, "machine.transitions") ?? [];
+      const transitions = this.parseTransitionList([...shorthands, ...explicitList], actionCatalogue);
       const tasks = this.parseTaskMap(raw.tasks, actionCatalogue);
       const commands = this.parseCommands(raw.commands, actionCatalogue);
       const resources = this.parseBusMap(hardware.buses);
@@ -3514,6 +3522,7 @@ ${lines.join("\n")}${hint}`;
       this.assertLibraryRefs(resources, libraries);
       this.assertBusRefs(components, resources);
       this.assertTimedTransitions(transitions, parameters || []);
+      this.assertPeriodicTransitions(transitions, parameters || []);
       this.assertTaskIntervals(tasks, parameters || []);
       this.assertLogRefs(tasks, commands, parameters || [], components || []);
       this.assertUsable(states, tasks, commands);
@@ -3523,6 +3532,10 @@ ${lines.join("\n")}${hint}`;
           throw new ParseError(`"${device.name}" is declared as both a bus and a device. Names are shared between them, so pick one.`);
         }
       }
+      const diagnostics = this.parseDiagnostics(raw.diagnostics, parameters || []);
+      const telemetry = this.parseTelemetry(raw.telemetry, components || [], parameters || []);
+      const communication = this.parseCommunication(raw.communication, components || [], events, parameters || []);
+      const safety = this.parseSafety(raw.safety, actionCatalogue, states);
       return {
         name: raw.name || raw.project?.name || "unnamed",
         description: machine.description,
@@ -3534,7 +3547,11 @@ ${lines.join("\n")}${hint}`;
         components,
         resources,
         parameters,
-        libraries
+        libraries,
+        diagnostics,
+        telemetry,
+        communication,
+        safety
       };
     }
     /** Accept `{ name: {...} }` and turn it into `[{ name, ... }]`. */
@@ -3592,7 +3609,8 @@ ${lines.join("\n")}${hint}`;
           min: range ? range[0] : def.min,
           max: range ? range[1] : def.max,
           unit: def.unit,
-          description: def.description
+          description: def.description,
+          persist: def.persist === true ? true : void 0
         };
       });
     }
@@ -3601,15 +3619,41 @@ ${lines.join("\n")}${hint}`;
      * `states:` under it. The type is inferred from that; declaring it is
      * optional and only useful for future kinds.
      */
-    parseStateMap(raw) {
+    /**
+     * Walk the raw state map and collect any state that carries `every:` + `do:`
+     * directly — these are shorthands for `{ from: <path>, every: N, do: [...] }`.
+     * Recurses into composite states using their full hierarchical path as `from`.
+     */
+    extractStatePeriodicShorthands(raw, prefix = "") {
+      const result = [];
+      for (const [name, def] of this.mapEntries(raw, "states")) {
+        const path = prefix ? `${prefix}/${name}` : name;
+        if (def.every !== void 0) {
+          result.push({ from: path, every: def.every, do: def.do });
+        }
+        if (def.states) {
+          result.push(...this.extractStatePeriodicShorthands(def.states, path));
+        }
+      }
+      return result;
+    }
+    parseStateMap(raw, catalogue = /* @__PURE__ */ new Map()) {
       return this.mapEntries(raw, "states").map(([name, def]) => {
-        const children = this.parseStateMap(def.states);
+        const children = this.parseStateMap(def.states, catalogue);
         const declared = def.type;
+        const entry = this.resolveStateActions(def.entry, catalogue, name, "entry");
+        const exit = this.resolveStateActions(def.exit, catalogue, name, "exit");
         if (children.length === 0) {
           if (def.initial !== void 0) {
             throw new ParseError(`State "${name}" declares "initial" but has no nested states`);
           }
-          return { name, type: declared || "simple", description: def.description };
+          return {
+            name,
+            type: declared || "simple",
+            description: def.description,
+            ...entry && { entry },
+            ...exit && { exit }
+          };
         }
         const initial = def.initial ?? children[0].name;
         if (!children.some((c) => c.name === initial)) {
@@ -3620,8 +3664,34 @@ ${lines.join("\n")}${hint}`;
           type: declared || "composite",
           description: def.description,
           initial,
-          regions: [{ initial, states: children }]
+          regions: [{ initial, states: children }],
+          ...entry && { entry },
+          ...exit && { exit }
         };
+      });
+    }
+    /**
+     * Resolve an `entry:` or `exit:` list on a state.
+     *
+     * Accepts a single name or a list of names and validates each against the
+     * action catalogue (same rules as `do:` on transitions).
+     */
+    resolveStateActions(raw, catalogue, stateName, field) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      const names = Array.isArray(raw) ? raw : [raw];
+      const strict = catalogue.size > 0;
+      return names.map((item2) => {
+        if (typeof item2 !== "string" || !item2.trim()) {
+          throw new ParseError(`State "${stateName}" has a "${field}" entry that is not an action name`);
+        }
+        const declared = catalogue.get(item2);
+        if (declared)
+          return { ...declared };
+        if (strict) {
+          throw new ParseError(`State "${stateName}" ${field} does "${item2}", which is not in the actions catalogue. Declared: ${[...catalogue.keys()].join(", ") || "none"}.`);
+        }
+        return { name: item2, type: "driver", driver: item2 };
       });
     }
     /** Catalogue of named actions, so a transition's `do:` can carry params. */
@@ -3646,11 +3716,38 @@ ${lines.join("\n")}${hint}`;
         const on = entry.on;
         const to = entry.to;
         const after = this.parseAfter(entry.after, index);
-        if (on !== void 0 && after !== void 0) {
-          throw new ParseError(`Transition ${index + 1} has both "on" and "after". A transition fires either when an event arrives or when a duration elapses, not both.`);
+        const every = entry.every !== void 0 ? this.parseEvery(entry.every, index) : void 0;
+        const triggerCount = (on !== void 0 ? 1 : 0) + (after !== void 0 ? 1 : 0) + (every !== void 0 ? 1 : 0);
+        if (triggerCount > 1) {
+          throw new ParseError(`Transition ${index + 1} has more than one trigger ("on", "after", "every"). A transition fires on exactly one: an event, a one-shot duration, or a repeating interval.`);
         }
-        if (on === void 0 && after === void 0) {
-          throw new ParseError(`Transition ${index + 1} has neither "on" nor "after", so nothing would ever make it fire. Use "on: SOME_EVENT" or "after: 5000".`);
+        if (triggerCount === 0) {
+          throw new ParseError(`Transition ${index + 1} has neither "on", "after", nor "every", so nothing would ever make it fire. Use "on: SOME_EVENT", "after: 5000", or "every: 1000".`);
+        }
+        if (every !== void 0) {
+          if (to !== void 0) {
+            throw new ParseError(`Transition ${index + 1} has both "every" and "to". A periodic transition runs actions in place without leaving the state, so "to" has no meaning here.`);
+          }
+          if (typeof from !== "string" || !from.trim()) {
+            throw new ParseError(`Transition ${index + 1} is missing "from"`);
+          }
+          if (from === "*") {
+            throw new ParseError(`Transition ${index + 1} uses "every" from "*". A periodic interval is measured per-state, so "from" must name a real state.`);
+          }
+          if (!this.hasState(from)) {
+            throw new ParseError(`Transition "from" state "${from}" ${this.describeBadRef(from)}`);
+          }
+          const actions = this.resolveActions(entry.do, catalogue, index);
+          if (!actions?.length) {
+            throw new ParseError(`Transition ${index + 1} uses "every" but has no "do" actions. A periodic transition needs at least one action to run.`);
+          }
+          return {
+            source: from,
+            every,
+            guard: entry.guard !== void 0 && entry.guard !== null ? this.parseGuard(entry.guard) : void 0,
+            actions,
+            description: entry.description
+          };
         }
         const trigger = on !== void 0 ? [["from", from], ["on", on], ["to", to]] : [["from", from], ["to", to]];
         for (const [key, value] of trigger) {
@@ -3687,6 +3784,21 @@ For a repeating cycle, alternate between two states.`);
           description: entry.description
         };
       });
+    }
+    /**
+     * `every: 1000` or `every: poll_ms`.
+     * Same validation as `after:` but used for periodic in-state transitions.
+     */
+    parseEvery(raw, index) {
+      if (typeof raw === "number") {
+        if (!Number.isInteger(raw) || raw <= 0) {
+          throw new ParseError(`Transition ${index + 1} has every: ${raw}. It must be a positive whole number of milliseconds, or the name of an int parameter.`);
+        }
+        return raw;
+      }
+      if (typeof raw === "string" && raw.trim())
+        return raw.trim();
+      throw new ParseError(`Transition ${index + 1} has an "every" of type ${typeof raw}. Use a number of milliseconds, or the name of an int parameter.`);
     }
     /**
      * `tasks:` - work that repeats on an interval.
@@ -3765,6 +3877,306 @@ For a repeating cycle, alternate between two states.`);
         commands,
         reportUnknown: raw.report_unknown === void 0 ? true : Boolean(raw.report_unknown)
       };
+    }
+    parseSafety(raw, actionCatalogue, states) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      if (!isPlainObject(raw)) {
+        throw new ParseError("safety: must be a mapping of named rules (e.g. over_temperature: ...)");
+      }
+      const hasMachine = states.length > 0;
+      const rules = [];
+      for (const [name, def] of Object.entries(raw)) {
+        if (!isPlainObject(def)) {
+          throw new ParseError(`safety.${name}: must be a mapping (check:, response:, to:, ...)`);
+        }
+        const d = def;
+        if (typeof d.check !== "string" || !d.check) {
+          throw new ParseError(`safety.${name}: "check:" is required and must name a C guard function`);
+        }
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(d.check)) {
+          throw new ParseError(`safety.${name}.check: "${d.check}" is not a valid C identifier`);
+        }
+        let severity;
+        if (d.severity !== void 0) {
+          if (d.severity !== "critical" && d.severity !== "warning") {
+            throw new ParseError(`safety.${name}.severity: must be "critical" or "warning", got "${d.severity}"`);
+          }
+          severity = d.severity;
+        }
+        let response;
+        if (d.response !== void 0) {
+          const rawList = this.asList(d.response, `safety.${name}.response`);
+          if (!rawList)
+            throw new ParseError(`safety.${name}.response must be a list`);
+          response = rawList.map((item2, i) => {
+            if (typeof item2 !== "string") {
+              throw new ParseError(`safety.${name}.response[${i}] must be an action name`);
+            }
+            if (!actionCatalogue.has(item2)) {
+              const avail = [...actionCatalogue.keys()].join(", ") || "(none declared)";
+              throw new ParseError(`safety.${name}.response: "${item2}" is not a declared action. Available: ${avail}`);
+            }
+            return item2;
+          });
+        }
+        let to;
+        if (d.to !== void 0) {
+          to = String(d.to);
+          if (!hasMachine) {
+            throw new ParseError(`safety.${name}.to: "${to}" requires a state machine (machine: with states)`);
+          }
+          if (!this.stateNames.has(to)) {
+            const avail = [...this.stateNames].join(", ") || "(none)";
+            throw new ParseError(`safety.${name}.to: "${to}" is not a declared state. Declared: ${avail}`);
+          }
+        }
+        if (!response?.length && !to) {
+          throw new ParseError(`safety.${name}: must have at least "response:" (actions) or "to:" (transition)`);
+        }
+        const rule = { name, check: d.check };
+        if (d.description !== void 0)
+          rule.description = String(d.description);
+        if (severity !== void 0)
+          rule.severity = severity;
+        if (response?.length)
+          rule.response = response;
+        if (to !== void 0)
+          rule.to = to;
+        const isLatching = d.latching === true || d.latching === "true";
+        if (isLatching)
+          rule.latching = true;
+        if (d.reset_when !== void 0) {
+          if (!isLatching) {
+            throw new ParseError(`safety.${name}.reset_when: only valid when "latching: true"`);
+          }
+          const rw = String(d.reset_when);
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(rw)) {
+            throw new ParseError(`safety.${name}.reset_when: "${rw}" is not a valid C identifier`);
+          }
+          rule.reset_when = rw;
+        }
+        if (d.restore !== void 0) {
+          if (!isLatching) {
+            throw new ParseError(`safety.${name}.restore: only valid when "latching: true"`);
+          }
+          if (rule.reset_when === void 0) {
+            throw new ParseError(`safety.${name}.restore: requires "reset_when:" \u2014 restore actions only fire when the latch clears`);
+          }
+          const rawRestore = this.asList(d.restore, `safety.${name}.restore`);
+          if (!rawRestore)
+            throw new ParseError(`safety.${name}.restore must be a list`);
+          const restore2 = rawRestore.map((item2, i) => {
+            if (typeof item2 !== "string") {
+              throw new ParseError(`safety.${name}.restore[${i}] must be an action name`);
+            }
+            if (!actionCatalogue.has(item2)) {
+              const avail = [...actionCatalogue.keys()].join(", ") || "(none declared)";
+              throw new ParseError(`safety.${name}.restore: "${item2}" is not a declared action. Available: ${avail}`);
+            }
+            return item2;
+          });
+          if (restore2.length)
+            rule.restore = restore2;
+        }
+        rules.push(rule);
+      }
+      if (rules.length === 0) {
+        throw new ParseError("safety: declared with no rules \u2014 add at least one named rule");
+      }
+      return { rules };
+    }
+    parseDiagnostics(raw, parameters) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      if (!isPlainObject(raw)) {
+        throw new ParseError("diagnostics: must be a mapping (watchdog:, heartbeat:, log_level:)");
+      }
+      const result = {};
+      if (raw.watchdog !== void 0) {
+        const w = isPlainObject(raw.watchdog) ? raw.watchdog : {};
+        const timeout_s = w.timeout_s !== void 0 ? Number(w.timeout_s) : 5;
+        if (!Number.isFinite(timeout_s) || timeout_s <= 0) {
+          throw new ParseError("diagnostics.watchdog.timeout_s must be a positive number of seconds");
+        }
+        result.watchdog = { timeout_s };
+      }
+      if (raw.heartbeat !== void 0) {
+        const h = isPlainObject(raw.heartbeat) ? raw.heartbeat : {};
+        const interval_ms = h.interval_ms !== void 0 ? this.parseInterval(h.interval_ms, "diagnostics.heartbeat.interval_ms") : 1e3;
+        result.heartbeat = { pin: h.pin, interval_ms };
+      }
+      if (raw.log_level !== void 0) {
+        const level = String(raw.log_level);
+        const valid = ["verbose", "info", "warning", "error", "none"];
+        if (!valid.includes(level)) {
+          throw new ParseError(`diagnostics.log_level "${level}" is not recognised. Use one of: ${valid.join(", ")}`);
+        }
+        result.log_level = level;
+      }
+      this.assertDiagnosticsIntervals(result, parameters);
+      return Object.keys(result).length > 0 ? result : void 0;
+    }
+    parseTelemetry(raw, components, parameters) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      if (!isPlainObject(raw)) {
+        throw new ParseError("telemetry: must be a mapping (interval_ms:, channels:)");
+      }
+      const interval_ms = raw.interval_ms !== void 0 ? this.parseInterval(raw.interval_ms, "telemetry.interval_ms") : void 0;
+      const topic_prefix = raw.topic_prefix !== void 0 ? String(raw.topic_prefix) : void 0;
+      const rawChannels = raw.channels;
+      if (rawChannels === void 0 || rawChannels === null) {
+        throw new ParseError('telemetry: declares no "channels"');
+      }
+      if (!isPlainObject(rawChannels)) {
+        throw new ParseError("telemetry.channels must be a mapping of sensor name to channel options:\n  channels:\n    temperature:\n    humidity:\n      interval_ms: 10000");
+      }
+      const sensorNames = new Set(components.filter((c) => String(c.class) === "sensor").map((c) => c.name));
+      const channels = Object.entries(rawChannels).map(([sensor, def]) => {
+        if (!sensorNames.has(sensor)) {
+          const available = [...sensorNames].join(", ") || "(none declared)";
+          throw new ParseError(`telemetry channel "${sensor}" is not a declared sensor. Available: ${available}`);
+        }
+        const ch = { sensor };
+        if (def !== null && isPlainObject(def)) {
+          const d = def;
+          if (d.interval_ms !== void 0) {
+            ch.interval_ms = this.parseInterval(d.interval_ms, `telemetry.channels.${sensor}.interval_ms`);
+          }
+          if (d.topic !== void 0) {
+            ch.topic = String(d.topic);
+          }
+        }
+        if (ch.interval_ms === void 0 && interval_ms === void 0) {
+          throw new ParseError(`telemetry channel "${sensor}" has no interval_ms and telemetry.interval_ms is not set. Every channel needs an interval \u2014 set a default at the top level or one per channel.`);
+        }
+        return ch;
+      });
+      if (channels.length === 0) {
+        throw new ParseError("telemetry.channels is empty \u2014 add at least one sensor channel");
+      }
+      this.assertTelemetryIntervals({ interval_ms, topic_prefix, channels }, parameters);
+      return { interval_ms, topic_prefix, channels };
+    }
+    parseCommunication(raw, components, events, parameters) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      if (!isPlainObject(raw)) {
+        throw new ParseError("communication: must be a mapping (publish:, subscribe:)");
+      }
+      const sensorNames = new Set(components.filter((c) => String(c.class) === "sensor").map((c) => c.name));
+      const paramNames = new Set(parameters.map((p) => p.name));
+      const eventNames = new Set(events.map((e) => e.name));
+      const validTopicSeg = (topic, where) => {
+        if (!/^[A-Za-z0-9_.-]+$/.test(topic)) {
+          throw new ParseError(`${where} topic "${topic}" contains characters not allowed in an MQTT segment (use only A-Z a-z 0-9 _ . -)`);
+        }
+      };
+      let publish;
+      if (raw.publish !== void 0) {
+        const rawList = this.asList(raw.publish, "communication.publish");
+        if (!rawList)
+          throw new ParseError("communication.publish must be a list");
+        publish = rawList.map((item2, i) => {
+          if (!isPlainObject(item2)) {
+            throw new ParseError(`communication.publish[${i}] must be a mapping with "sensor:"`);
+          }
+          const d = item2;
+          if (typeof d.sensor !== "string" || !d.sensor) {
+            throw new ParseError(`communication.publish[${i}] must have a "sensor:" field`);
+          }
+          if (!sensorNames.has(d.sensor)) {
+            const avail = [...sensorNames].join(", ") || "(none declared)";
+            throw new ParseError(`communication.publish sensor "${d.sensor}" is not a declared sensor component. Available: ${avail}`);
+          }
+          const out = { sensor: d.sensor };
+          if (d.topic !== void 0) {
+            const t = String(d.topic);
+            validTopicSeg(t, `communication.publish[${i}]`);
+            out.topic = t;
+          }
+          return out;
+        });
+      }
+      let subscribe;
+      if (raw.subscribe !== void 0) {
+        const rawList = this.asList(raw.subscribe, "communication.subscribe");
+        if (!rawList)
+          throw new ParseError("communication.subscribe must be a list");
+        subscribe = rawList.map((item2, i) => {
+          if (!isPlainObject(item2)) {
+            throw new ParseError(`communication.subscribe[${i}] must be a mapping with "parameter:" or "event:"`);
+          }
+          const d = item2;
+          const param = d.parameter !== void 0 ? String(d.parameter) : void 0;
+          const event = d.event !== void 0 ? String(d.event) : void 0;
+          if (!param && !event) {
+            throw new ParseError(`communication.subscribe[${i}] must have "parameter:" or "event:"`);
+          }
+          if (param && event) {
+            throw new ParseError(`communication.subscribe[${i}] cannot have both "parameter:" and "event:" \u2014 split into two items`);
+          }
+          if (param !== void 0 && !paramNames.has(param)) {
+            const avail = [...paramNames].join(", ") || "(none declared)";
+            throw new ParseError(`communication.subscribe parameter "${param}" is not a declared parameter. Available: ${avail}`);
+          }
+          if (event !== void 0 && !eventNames.has(event)) {
+            const avail = [...eventNames].join(", ") || "(none declared)";
+            throw new ParseError(`communication.subscribe event "${event}" is not a declared event. Available: ${avail}`);
+          }
+          const out = {};
+          if (param !== void 0)
+            out.parameter = param;
+          if (event !== void 0)
+            out.event = event;
+          if (d.topic !== void 0) {
+            const t = String(d.topic);
+            validTopicSeg(t, `communication.subscribe[${i}]`);
+            out.topic = t;
+          }
+          return out;
+        });
+      }
+      if (!publish?.length && !subscribe?.length) {
+        this.warnings.push("communication: declared with no publish: or subscribe: \u2014 has no effect");
+        return void 0;
+      }
+      return {
+        ...publish?.length ? { publish } : {},
+        ...subscribe?.length ? { subscribe } : {}
+      };
+    }
+    /** Validate that heartbeat interval references a declared int parameter. */
+    assertDiagnosticsIntervals(diag, parameters) {
+      const iv = diag.heartbeat?.interval_ms;
+      if (typeof iv !== "string")
+        return;
+      const param = parameters.find((p) => p.name === iv);
+      if (!param) {
+        throw new ParseError(`diagnostics.heartbeat.interval_ms "${iv}" is not a declared parameter`);
+      }
+      if (param.type !== "int") {
+        throw new ParseError(`diagnostics.heartbeat.interval_ms "${iv}" must be an int parameter (got ${param.type})`);
+      }
+    }
+    /** Validate that telemetry intervals reference declared int parameters. */
+    assertTelemetryIntervals(tel, parameters) {
+      const check = (iv, where) => {
+        if (typeof iv !== "string")
+          return;
+        const param = parameters.find((p) => p.name === iv);
+        if (!param) {
+          throw new ParseError(`${where} "${iv}" is not a declared parameter`);
+        }
+        if (param.type !== "int") {
+          throw new ParseError(`${where} "${iv}" must be an int parameter (got ${param.type})`);
+        }
+      };
+      check(tel.interval_ms, "telemetry.interval_ms");
+      for (const ch of tel.channels) {
+        check(ch.interval_ms, `telemetry.channels.${ch.sensor}.interval_ms`);
+      }
     }
     /** `log: "temp={temp}C"` - checked for shape here, for names later. */
     parseLog(raw, where) {
@@ -4176,7 +4588,8 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         min: p.min,
         max: p.max,
         unit: p.unit,
-        description: p.description
+        description: p.description,
+        persist: p.persist === true ? true : void 0
       }));
     }
     // =========================================================================
@@ -4235,6 +4648,22 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         check(task.log, `Task "${task.name}"`);
       for (const command of commands?.commands || []) {
         check(command.log, `Command "${command.match}"`);
+      }
+    }
+    /** An `every:` transition naming a parameter must name a real int parameter. */
+    assertPeriodicTransitions(transitions, parameters) {
+      const byName = new Map(parameters.map((p) => [p.name, p]));
+      for (const t of transitions) {
+        if (typeof t.every !== "string")
+          continue;
+        const parameter = byName.get(t.every);
+        if (!parameter) {
+          const known = [...byName.keys()];
+          throw new ParseError(`A periodic transition from "${t.source}" runs every "${t.every}", which is not a declared parameter. ` + (known.length ? `Known parameters: ${known.join(", ")}.` : "No parameters are declared."));
+        }
+        if (parameter.type !== "int") {
+          throw new ParseError(`A periodic transition from "${t.source}" runs every "${t.every}", which is declared as ${parameter.type}. An interval in milliseconds must be an int.`);
+        }
       }
     }
     /** A task interval naming a parameter must name a real int one. */
@@ -4359,11 +4788,12 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
   var BUILTIN = (name, include, reason) => ({ name, include, source: "builtin", reason });
   var REGISTRY = (name, include, reason) => ({ name, include, source: "registry", reason });
   var CONSUMED_KEYS = {
-    gpio: ["mode"],
+    gpio: ["mode", "interrupt", "raises"],
     uart: ["port"],
     rs485: ["port"],
     mqtt: ["tls"],
-    littlefs: ["format_on_fail"]
+    littlefs: ["format_on_fail"],
+    adc: ["unit", "conversion"]
   };
   var KNOWN_KEYS = {
     gpio: ["pin", "pins", "mode"],
@@ -4742,6 +5172,76 @@ ${body}
     pwm_output: { interface: "pwm" },
     analog_input: { interface: "adc" }
   };
+  var BUS_SENSOR_DEFS = {
+    ds18b20: {
+      library: "DallasTemperature",
+      include: "DallasTemperature.h",
+      objectClass: "DallasTemperature",
+      reason: "DS18B20 1-Wire temperature sensor",
+      mountedOn: "onewire_ref"
+    },
+    dht22: {
+      library: "DHT sensor library",
+      include: "DHT.h",
+      objectClass: "DHT",
+      reason: "DHT11/DHT22 temperature + humidity",
+      mountedOn: "pin",
+      typeArg: "DHT22"
+    },
+    dht11: {
+      library: "DHT sensor library",
+      include: "DHT.h",
+      objectClass: "DHT",
+      reason: "DHT11/DHT22 temperature + humidity",
+      mountedOn: "pin",
+      typeArg: "DHT11"
+    },
+    bme280: {
+      library: "Adafruit BME280 Library",
+      include: "Adafruit_BME280.h",
+      objectClass: "Adafruit_BME280",
+      reason: "BME280 temperature / humidity / pressure",
+      mountedOn: "i2c"
+    },
+    lcd_i2c: {
+      library: "LiquidCrystal_I2C",
+      include: "LiquidCrystal_I2C.h",
+      objectClass: "LiquidCrystal_I2C",
+      reason: "I2C character LCD display",
+      mountedOn: "i2c",
+      ctorConfigKeys: ["address", "cols", "rows"],
+      beginMethod: "init",
+      postInit: ["backlight()"],
+      hintAddress: "0x27"
+    },
+    oled_i2c: {
+      library: "Adafruit SSD1306",
+      include: "Adafruit_SSD1306.h",
+      objectClass: "Adafruit_SSD1306",
+      reason: "I2C OLED display (SSD1306)",
+      mountedOn: "i2c",
+      ctorConfigKeys: ["width", "height"],
+      ctorLiterals: ["&Wire", "-1"],
+      beginPrefix: "SSD1306_SWITCHCAPVCC",
+      hintAddress: "0x3C"
+    },
+    ds3231: {
+      library: "RTClib",
+      include: "RTClib.h",
+      objectClass: "RTC_DS3231",
+      reason: "DS3231 real-time clock",
+      mountedOn: "i2c",
+      noAddress: true
+    },
+    ds1307: {
+      library: "RTClib",
+      include: "RTClib.h",
+      objectClass: "RTC_DS1307",
+      reason: "DS1307 real-time clock",
+      mountedOn: "i2c",
+      noAddress: true
+    }
+  };
   var Codegen = class {
     /**
      * True when the model declares a state machine.
@@ -4764,6 +5264,7 @@ ${body}
       this.actionNames = /* @__PURE__ */ new Set();
       this.transitionsBySource = /* @__PURE__ */ new Map();
       this.timedBySource = /* @__PURE__ */ new Map();
+      this.periodicBySource = /* @__PURE__ */ new Map();
       this.emissions = /* @__PURE__ */ new Map();
       this.libraries = /* @__PURE__ */ new Map();
       this.backend = backend;
@@ -4793,9 +5294,15 @@ ${body}
         this.generateActionDeclarations(),
         this.generateEventHandlers(),
         this.generateTimeouts(),
+        this.generateEntryExitCallbacks(),
         this.generateTasks(),
         this.generateCommands(),
+        this.generateMqttWiring(),
+        this.generateTelemetry(),
+        this.generateStorageWiring(),
         this.generateReadSensors(),
+        this.generateSafetyChecks(),
+        this.generateDiagnostics(),
         this.generateSetupFunction(),
         this.generateLoopFunction(),
         this.generateGuardImplementations(),
@@ -4883,9 +5390,15 @@ ${this.backend.entryPointDeclarations()}${this.declInterfaceGlobals()}`,
         this.defInterfaces().trimStart(),
         this.generateEventHandlers(),
         this.generateTimeouts(),
+        this.generateEntryExitCallbacks(),
         this.generateTasks(),
         this.generateCommands(),
+        this.generateMqttWiring(),
+        this.generateTelemetry(),
+        this.generateStorageWiring(),
         this.generateReadSensors(),
+        this.generateSafetyChecks(),
+        this.generateDiagnostics(),
         this.generateSetupFunction(),
         this.generateLoopFunction()
       ].join("\n\n") + "\n";
@@ -4932,6 +5445,7 @@ ${this.generateActionImplementations()}
       this.actionNames = /* @__PURE__ */ new Set();
       this.transitionsBySource = /* @__PURE__ */ new Map();
       this.timedBySource = /* @__PURE__ */ new Map();
+      this.periodicBySource = /* @__PURE__ */ new Map();
       this.emissions = /* @__PURE__ */ new Map();
       this.libraries = /* @__PURE__ */ new Map();
     }
@@ -4958,9 +5472,133 @@ ${this.generateActionImplementations()}
           description: device.description
         }, this.sanitizeUpper(device.name)));
       }
+      this.indexBusSensors();
+      this.indexInterrupts();
       for (const library of this.backend.declaredLibraries(this.project.system.libraries)) {
         this.libraries.set(library.name, library);
       }
+    }
+    /**
+     * Generate library includes, object declarations, and begin() calls for
+     * sensor device types defined in BUS_SENSOR_DEFS.
+     *
+     * PulseIR's contract: emit the glue (include + object + init); leave the
+     * wire-protocol implementation to the user's installed library. A
+     * "// Requires:" comment tells the user which package to install.
+     */
+    indexBusSensors() {
+      for (const device of this.project.system.components || []) {
+        const def = BUS_SENSOR_DEFS[device.type || ""];
+        if (!def)
+          continue;
+        const config = device.config || {};
+        const sym = this.sanitizeUpper(device.name);
+        const objVar = this.sanitize(device.name);
+        const emission = {
+          defines: [],
+          globals: [],
+          init: [],
+          libraries: [{ name: def.library, include: def.include, source: "registry", reason: def.reason }],
+          todos: []
+        };
+        if (def.mountedOn === "onewire_ref") {
+          const busVar = device.bus ? this.busObjVar(device.bus) : "oneWireBus";
+          emission.globals.push(`// Requires: ${def.library} \u2014 install via Arduino Library Manager`, `${def.objectClass} ${objVar}(&${busVar});`);
+          emission.init.push(`${objVar}.begin();`);
+          if (!device.bus) {
+            emission.todos.push(`${device.name}: declare a OneWire bus and reference it with "bus:"`);
+          }
+        } else if (def.mountedOn === "pin") {
+          const pinRaw = String(config.pin ?? "");
+          const gpioMat = /^(?:GPIO|IO)[_-]?(\d+)$/i.exec(pinRaw);
+          const pinLit = gpioMat ? `${gpioMat[1]}  // ${pinRaw}` : pinRaw || "/* pin */";
+          const pinMacro = `${sym}_PIN`;
+          emission.defines.push(`#define ${pinMacro} ${pinLit}`);
+          emission.globals.push(`// Requires: ${def.library} \u2014 install via Arduino Library Manager`, `${def.objectClass} ${objVar}(${pinMacro}${def.typeArg ? `, ${def.typeArg}` : ""});`);
+          emission.init.push(`${objVar}.begin();`);
+          if (!config.pin) {
+            emission.todos.push(`${device.name}: add "pin: GPIO<N>" to specify the data pin`);
+          }
+        } else if (def.mountedOn === "i2c") {
+          const addrNum = config.address !== void 0 ? Number(config.address) : void 0;
+          const addrHex = addrNum !== void 0 ? `0x${addrNum.toString(16).toUpperCase()}` : void 0;
+          const ctorParts = [];
+          for (const key of def.ctorConfigKeys ?? []) {
+            if (key === "address") {
+              ctorParts.push(addrHex ?? (def.hintAddress ?? "0x27") + "  /* TODO: verify address */");
+            } else {
+              const val = config[key];
+              ctorParts.push(val !== void 0 ? String(val) : `/* ${key} */`);
+            }
+          }
+          for (const lit of def.ctorLiterals ?? []) {
+            ctorParts.push(lit);
+          }
+          emission.globals.push(`// Requires: ${def.library} \u2014 install via Arduino Library Manager`, `${def.objectClass} ${objVar}${ctorParts.length ? `(${ctorParts.join(", ")})` : ""};`);
+          const beginMethod = def.beginMethod ?? "begin";
+          const addressInCtor = (def.ctorConfigKeys ?? []).includes("address");
+          let initArgs;
+          if (def.noAddress) {
+            initArgs = "";
+          } else if (addressInCtor) {
+            initArgs = "";
+          } else {
+            const addr = addrHex ?? (def.hintAddress ?? "0x76");
+            const parts = def.beginPrefix ? [def.beginPrefix, addr] : [addr];
+            initArgs = parts.join(", ");
+          }
+          emission.init.push(`${objVar}.${beginMethod}(${initArgs});`);
+          for (const call of def.postInit ?? []) {
+            emission.init.push(`${objVar}.${call};`);
+          }
+          if (addrNum === void 0 && !def.noAddress) {
+            const hint = def.hintAddress ?? "0x76";
+            const detail = (def.ctorConfigKeys ?? []).includes("address") ? `in the ctor \u2014 default is ${hint}` : `passed to ${beginMethod}() \u2014 default is ${hint}`;
+            emission.todos.push(`${device.name}: verify the I2C address (${detail})`);
+          }
+        }
+        this.addEmission(device.name, emission);
+      }
+    }
+    /**
+     * Append ISR stubs and attachInterrupt() calls to emissions for digital_input
+     * devices that declare an "interrupt:" config field.
+     *
+     * PulseIR generates the glue — the ISR function and the attachInterrupt call —
+     * and optionally dispatches to the state machine when "raises:" names an event.
+     * The function is marked IRAM_ATTR so it runs from IRAM on ESP32; on other
+     * platforms IRAM_ATTR is defined as an empty macro in the harness.
+     */
+    indexInterrupts() {
+      for (const device of this.project.system.components || []) {
+        if (device.type !== "digital_input")
+          continue;
+        const config = device.config || {};
+        if (!config.interrupt)
+          continue;
+        const existing = this.emissions.get(device.name);
+        if (!existing)
+          continue;
+        const mode = String(config.interrupt).toUpperCase();
+        const sym = this.sanitizeUpper(device.name);
+        const pin = `${sym}_PIN`;
+        const isrName = `isr_${this.sanitize(device.name)}`;
+        let isrBody;
+        const raises = config.raises;
+        if (raises && this.hasMachine) {
+          isrBody = `  fsm.sendEvent(EVENT_${this.sanitizeUpper(raises)});`;
+        } else if (raises) {
+          isrBody = `  // TODO: dispatch EVENT_${this.sanitizeUpper(raises)} when the machine is running`;
+        } else {
+          isrBody = `  // TODO: handle interrupt for ${device.name} (add "raises: EVENT_NAME" to wire it)`;
+        }
+        existing.globals.push("", `// ISR for ${device.name} \u2014 fires on ${mode} edge`, `#ifndef IRAM_ATTR`, `#define IRAM_ATTR  // non-ESP32: no IRAM section needed`, `#endif`, `void IRAM_ATTR ${isrName}() {`, isrBody, `}`);
+        existing.init.push(`attachInterrupt(digitalPinToInterrupt(${pin}), ${isrName}, ${mode});`);
+      }
+    }
+    /** Convert a bus resource name to the camelCase variable the interface backend generates. */
+    busObjVar(busName) {
+      return this.sanitizeUpper(busName).toLowerCase().replace(/_([a-z])/g, (_, c) => c.toUpperCase());
     }
     addEmission(name, emission) {
       this.emissions.set(name, emission);
@@ -5093,7 +5731,12 @@ ${this.defInterfaces()}`;
         interface: DEVICE_INTERFACE[d.type].interface,
         description: d.description
       }));
-      return [...buses, ...devices];
+      const busSensors = (this.project.system.components || []).filter((d) => BUS_SENSOR_DEFS[d.type || ""]).map((d) => ({
+        name: d.name,
+        interface: d.type,
+        description: d.description
+      }));
+      return [...buses, ...devices, ...busSensors];
     }
     declInterfaces() {
       const resources = this.initialisedResources();
@@ -5276,7 +5919,10 @@ SystemSensors systemSensors = {};`;
     }
     declSensorStruct() {
       const sensors = (this.project.system.components || []).filter((c) => String(c.class) === "sensor");
-      const fields = sensors.length > 0 ? sensors.map((c) => `  float ${this.sanitize(c.name)};  // driver: ${c.driver}`).join("\n") : "  // TODO: Add your sensor readings here (e.g. float temperature;)";
+      const fields = sensors.length > 0 ? sensors.map((c) => {
+        const unitNote = c.config?.unit ? `, unit: ${c.config.unit}` : "";
+        return `  float ${this.sanitize(c.name)};  // driver: ${c.driver}${unitNote}`;
+      }).join("\n") : "  // TODO: Add your sensor readings here (e.g. float temperature;)";
       return `// ============================================================================
 // SYSTEM SENSORS
 // ============================================================================
@@ -5296,16 +5942,21 @@ ${fields}
 SystemContext systemContext;`;
     }
     declContextStruct() {
+      const hasCommands = !!this.project.system.commands;
+      const cmdMacro = hasCommands ? "\n/** Maximum tokens in a command line (command + arguments). */\n#define PULSE_CMD_MAX_ARGS 8\n" : "";
+      const cmdFields = hasCommands ? `
+  int    argc;                         // Token count (0 outside a command handler)
+  char*  argv[PULSE_CMD_MAX_ARGS];     // argv[0] = command name, argv[1..] = arguments` : "";
       return `// ============================================================================
 // SYSTEM CONTEXT (see FUNCTION_CONTRACT.md)
 // ============================================================================
-
+${cmdMacro}
 struct SystemContext {
   int currentState;                    // Current state index (compare with S_*)
   int previousState;                   // Previous state index (-1 before first transition)
   int32_t eventData;                   // Payload of the event being dispatched
   const SystemParameters* parameters;  // Read-only system parameters
-  const SystemSensors* sensors;        // Current sensor readings
+  const SystemSensors* sensors;        // Current sensor readings${cmdFields}
 };`;
     }
     // =========================================================================
@@ -5480,6 +6131,166 @@ ${cases.join("\n")}
       return `onEvent_${this.sanitize(flat.path)}`;
     }
     // =========================================================================
+    // DIAGNOSTICS — watchdog, heartbeat LED, log level
+    // =========================================================================
+    /**
+     * Generate the runSafetyChecks() function.
+     *
+     * Called at the very top of loop(), before the HSM tick, so a critical
+     * fault preempts normal dispatch regardless of the current leaf state.
+     * Latching rules trip once and stay active even when the guard goes false.
+     * Actions receive nullptr because there is no active event context.
+     */
+    generateSafetyChecks() {
+      const safety = this.project.system.safety;
+      if (!safety)
+        return "";
+      const blocks = [];
+      for (const rule of safety.rules) {
+        const lines = [];
+        const parts = [rule.name];
+        if (rule.severity)
+          parts.push(rule.severity);
+        if (rule.latching)
+          parts.push("latching");
+        lines.push(`  // ${parts.join(", ")}`);
+        if (rule.description)
+          lines.push(`  // ${rule.description}`);
+        const latchVar = `_latch_${this.sanitize(rule.name)}`;
+        if (rule.latching) {
+          lines.push(`  static bool ${latchVar} = false;`);
+        }
+        if (rule.latching && rule.reset_when) {
+          lines.push(`  if (${latchVar} && ${rule.reset_when}()) {`);
+          lines.push(`    ${latchVar} = false;`);
+          for (const action of rule.restore || []) {
+            lines.push(`    ${this.sanitize(action)}(nullptr);`);
+          }
+          lines.push("  }");
+        }
+        const cond = rule.latching ? `${latchVar} || ${rule.check}()` : `${rule.check}()`;
+        const body2 = [];
+        if (rule.latching)
+          body2.push(`    ${latchVar} = true;`);
+        for (const action of rule.response || []) {
+          body2.push(`    ${this.sanitize(action)}(nullptr);`);
+        }
+        if (rule.to) {
+          const idx = this.resolveEntry(this.resolveRef(rule.to, "target"));
+          const sym = this.states[idx].symbol;
+          body2.push(`    fsm.transitionTo(${sym});`);
+        }
+        body2.push("    return;");
+        lines.push(`  if (${cond}) {`);
+        lines.push(...body2);
+        lines.push("  }");
+        blocks.push(lines.join("\n"));
+      }
+      const body = blocks.join("\n\n");
+      return `// ============================================================================
+// SAFETY CHECKS
+// ============================================================================
+//
+// runSafetyChecks() runs at the very top of loop(), before the HSM tick.
+// Guards are C functions you implement \u2014 the condition logic stays in code,
+// the response policy (severity, actions, target state, latching) lives here.
+// Actions are called with a null context (no active event during safety checks).
+
+static void runSafetyChecks() {
+${body}
+}`;
+    }
+    generateDiagnostics() {
+      const diag = this.project.system.diagnostics;
+      if (!diag)
+        return "";
+      const setupLines = [];
+      const loopLines = [];
+      const includeLines = [];
+      if (diag.watchdog) {
+        const timeout = diag.watchdog.timeout_s ?? 5;
+        includeLines.push("#ifdef ARDUINO_ARCH_ESP32", "#include <esp_task_wdt.h>", "#endif");
+        setupLines.push("  // Hardware watchdog \u2014 panics if the loop stalls.", "#ifdef ARDUINO_ARCH_ESP32", `  esp_task_wdt_init(${timeout}, true);`, "  esp_task_wdt_add(NULL);", "#endif");
+        loopLines.push("  // Feed the hardware watchdog.", "#ifdef ARDUINO_ARCH_ESP32", "  esp_task_wdt_reset();", "#endif");
+      }
+      if (diag.heartbeat) {
+        const pin = diag.heartbeat.pin ?? 2;
+        const pinExpr = typeof pin === "number" ? String(pin) : `HEARTBEAT_PIN`;
+        const ivRaw = diag.heartbeat.interval_ms ?? 1e3;
+        const ivExpr = typeof ivRaw === "number" ? `${ivRaw}UL` : `(unsigned long)systemParameters.${this.sanitize(String(ivRaw))}`;
+        if (typeof pin !== "number") {
+          setupLines.unshift(`  // Heartbeat pin \u2014 override HEARTBEAT_PIN if needed.`);
+          includeLines.push(`#ifndef HEARTBEAT_PIN
+#define HEARTBEAT_PIN ${pin}
+#endif`);
+        }
+        setupLines.push(`  // Heartbeat LED on pin ${pinExpr}.`, `  pinMode(${pinExpr}, OUTPUT);`);
+        loopLines.push(`  // Toggle heartbeat LED every ${typeof ivRaw === "number" ? `${ivRaw}ms` : ivRaw + " ms"}.`, "  {", "    static unsigned long _heartAt = 0;", `    const unsigned long _iv = ${ivExpr};`, `    if (${this.backend.nowExpr()} - _heartAt >= _iv) {`, "      _heartAt += _iv;", `      if (${this.backend.nowExpr()} - _heartAt >= _iv) _heartAt = ${this.backend.nowExpr()};`, `      digitalWrite(${pinExpr}, !digitalRead(${pinExpr}));`, "    }", "  }");
+      }
+      if (setupLines.length === 0 && loopLines.length === 0)
+        return "";
+      const lines = [
+        "// ============================================================================",
+        "// DIAGNOSTICS",
+        "// ============================================================================",
+        ...diag.log_level ? [`//
+// log_level: ${diag.log_level}`] : []
+      ];
+      if (includeLines.length > 0) {
+        lines.push("", ...includeLines);
+      }
+      if (setupLines.length > 0) {
+        lines.push("", `static void setupDiagnostics() {
+${setupLines.join("\n")}
+}`);
+      }
+      if (loopLines.length > 0) {
+        lines.push("", `static void runDiagnostics() {
+${loopLines.join("\n")}
+}`);
+      }
+      return lines.join("\n");
+    }
+    // =========================================================================
+    // TELEMETRY — per-channel MQTT publishing with individual intervals
+    // =========================================================================
+    generateTelemetry() {
+      const tel = this.project.system.telemetry;
+      if (!tel)
+        return "";
+      const mqtt = this.mqttResource();
+      if (!mqtt) {
+        return "// telemetry: declared but no MQTT bus found";
+      }
+      const client = this.mqttClientVar(mqtt);
+      const channelBlocks = [];
+      for (const ch of tel.channels) {
+        const ivRaw = ch.interval_ms ?? tel.interval_ms;
+        const ivExpr = typeof ivRaw === "number" ? `${ivRaw}UL` : `(unsigned long)systemParameters.${this.sanitize(String(ivRaw))}`;
+        const field = `systemSensors.${this.sanitize(ch.sensor)}`;
+        const topicPart = ch.topic ? `"${ch.topic}"` : `"%s/${this.topicSegment(ch.sensor)}", _mqttPrefix`;
+        const publishCall = ch.topic ? `snprintf(_t, sizeof(_t), ${topicPart});` : `snprintf(_t, sizeof(_t), "${this.topicSegment(ch.sensor)}", _mqttPrefix);`;
+        channelBlocks.push(`  // ${ch.sensor}${typeof ivRaw === "number" ? ` \u2014 every ${ivRaw}ms` : ` \u2014 every \${${ivRaw}}ms`}`, "  {", "    static unsigned long _due = 0;", `    const unsigned long _iv = ${ivExpr};`, `    if (${this.backend.nowExpr()} - _due >= _iv) {`, "      _due += _iv;", `      if (${this.backend.nowExpr()} - _due >= _iv) _due = ${this.backend.nowExpr()};`, ch.topic ? `      snprintf(_t, sizeof(_t), "${ch.topic}");` : `      snprintf(_t, sizeof(_t), "%s/${this.topicSegment(ch.sensor)}", _mqttPrefix);`, `      snprintf(_v, sizeof(_v), "%.4g", (double)${field});`, `      ${client}.publish(_t, _v);`, "    }", "  }");
+      }
+      const body = [
+        `  if (!${client}.connected()) return;`,
+        "  char _t[128];",
+        "  char _v[32];",
+        "",
+        ...channelBlocks
+      ].join("\n");
+      return `// ============================================================================
+// TELEMETRY
+// ============================================================================
+//
+// Per-channel MQTT publishing. Each sensor has its own deadline so a fast
+// reading and a slow diagnostic can coexist without either blocking the other.
+
+static void runTelemetry() {
+${body}
+}`;
+    }
+    // =========================================================================
     // SETUP
     // =========================================================================
     generateSetupFunction() {
@@ -5496,12 +6307,16 @@ ${cases.join("\n")}
       const registrations = this.states.map((flat) => {
         const handler = this.transitionsBySource.get(flat.index)?.length ? this.handlerName(flat) : "nullptr";
         const parent = flat.parent === -1 ? "-1" : this.states[flat.parent].symbol;
-        const timed = this.timedBySource.get(flat.index)?.length ? this.timerNames(flat) : null;
+        const hasTimed = (this.timedBySource.get(flat.index)?.length ?? 0) > 0;
+        const hasPeriodic = (this.periodicBySource.get(flat.index)?.length ?? 0) > 0;
+        const hasUpdate = hasTimed || hasPeriodic;
+        const entryCb = this.entryCallbackName(flat);
+        const exitCb = this.exitCallbackName(flat);
         return `  ${flat.symbol} = fsm.addState(
       "${flat.path}",
-      ${timed ? `${timed.tick},   // update - checks the "after" timers` : "nullptr,   // update"}
-      ${timed ? `${timed.mark},  // entry - starts the "after" clock` : "nullptr,   // entry"}
-      nullptr,   // exit
+      ${hasUpdate ? `${this.timerNames(flat).tick},   // update - "after" timers and "every" periodics` : "nullptr,   // update"}
+      ${entryCb ? `${entryCb},  // entry` : "nullptr,   // entry"}
+      ${exitCb ? `${exitCb},   // exit` : "nullptr,   // exit"}
       0,         // timeoutMs - unused; see generateTimeouts()
       -1,        // timeoutNext
       ${handler},  // onEvent
@@ -5522,10 +6337,12 @@ ${this.hasConsole && this.isVerbose ? `
   ${this.backend.printExpr(stream, '"Initial state: "')};
   ${this.backend.printlnExpr(stream, "fsm.getCurrentName()")};
 ` : ""}`;
+      const loadCall = this.persistedParameters().length > 0 ? "\n  // Restore persisted parameters from NVS.\n  loadParameters();\n" : "";
+      const diagSetup = this.project.system.diagnostics ? "\n  setupDiagnostics();\n" : "";
       const setupBody = `  // Buses and peripherals declared as resources. Nothing else is opened: a
   // peripheral the model did not declare has no business appearing here.
   setupInterfaces();
-
+${diagSetup}${loadCall}
   // Wire up the context handed to every action
   systemContext.parameters = &systemParameters;
   systemContext.sensors = &systemSensors;
@@ -5640,7 +6457,7 @@ ${blocks.join("\n\n")}`;
         const calls = (command.actions || []).map((a) => `    action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
         const raise = command.event ? `    fsm.sendEvent(EVENT_${this.sanitizeUpper(command.event)});` : "";
         const reply = command.log ? this.logLines(command.log, "    ") : "";
-        return `  if (strcmp(line, ${JSON.stringify(command.match)}) == 0) {${command.description ? `
+        return `  if (strcmp(cmd, ${JSON.stringify(command.match)}) == 0) {${command.description ? `
     // ${command.description}` : ""}
 ${[calls, raise, reply].filter(Boolean).join("\n")}
     return;
@@ -5648,7 +6465,7 @@ ${[calls, raise, reply].filter(Boolean).join("\n")}
       });
       const unknown = set2.reportUnknown === false ? "" : `
   ${this.backend.printExpr(stream, '"Unknown command: "')};
-  ${this.backend.printlnExpr(stream, "line")};`;
+  ${this.backend.printlnExpr(stream, "cmd")};`;
       return `// ============================================================================
 // COMMANDS
 // ============================================================================
@@ -5668,7 +6485,7 @@ static char commandLine[COMMAND_BUFFER];
 static uint8_t commandLength = 0;
 static bool commandOverflow = false;
 
-static void dispatchCommand(const char* line) {
+static void dispatchCommand(const char* cmd) {
 ${cases.join("\n")}${unknown}
 }
 
@@ -5685,11 +6502,21 @@ static void pollCommands() {
     if (next == '\\n' || next == '\\r') {
       if (commandOverflow) {
         ${this.backend.printlnExpr(stream, '"Command too long; ignored."')};
-several_reset
+        commandLength = 0;
+        commandOverflow = false;
       } else if (commandLength > 0) {
         commandLine[commandLength] = '\\0';
-        dispatchCommand(commandLine);
-several_reset
+        systemContext.argc = 0;
+        char* tok = strtok(commandLine, " \\t");
+        while (tok && systemContext.argc < PULSE_CMD_MAX_ARGS) {
+          systemContext.argv[systemContext.argc++] = tok;
+          tok = strtok(nullptr, " \\t");
+        }
+        if (systemContext.argc > 0) {
+          dispatchCommand(systemContext.argv[0]);
+        }
+        commandLength = 0;
+        commandOverflow = false;
       }
       continue;
     }
@@ -5701,7 +6528,7 @@ several_reset
     }
     commandLine[commandLength++] = (char)next;
   }
-}`.replace(/several_reset/g, "        commandLength = 0;\n        commandOverflow = false;");
+}`;
     }
     /**
      * Where a declared param value can be found in C.
@@ -5799,9 +6626,16 @@ several_reset
         case "adc_read": {
           const deviceName = String(params.device ?? "");
           if (this.isSensorComponent(deviceName)) {
-            const pin = `${this.sanitizeUpper(deviceName)}_PIN`;
+            const pinMacro = `${this.sanitizeUpper(deviceName)}_PIN`;
             const field = `systemSensors.${this.sanitize(deviceName)}`;
-            return `  ${field} = ${this.backend.analogReadExpr(pin)};
+            const component = (this.project.system.components || []).find((c) => c.name === deviceName);
+            const rawConversion = component?.config?.conversion;
+            if (typeof rawConversion === "string" && rawConversion.trim()) {
+              const expr = rawConversion.trim().replace(/\{pin\}/g, pinMacro);
+              return `  ${field} = (float)(${expr});
+  (void)ctx;`;
+            }
+            return `  ${field} = ${this.backend.analogReadExpr(pinMacro)};
   (void)ctx;`;
           }
           break;
@@ -5815,6 +6649,111 @@ several_reset
   (void)ctx;`;
           }
           break;
+        }
+        case "ds18b20": {
+          const deviceName = String(params.device ?? "");
+          if (this.isSensorComponent(deviceName)) {
+            const objVar = this.sanitize(deviceName);
+            const field = `systemSensors.${objVar}`;
+            return `  ${objVar}.requestTemperatures();
+  ${field} = ${objVar}.getTempCByIndex(0);
+  (void)ctx;`;
+          }
+          break;
+        }
+        case "dht22":
+        case "dht11": {
+          const deviceName = String(params.device ?? "");
+          const component = (this.project.system.components || []).find((c) => c.name === deviceName);
+          if (component && this.isSensorComponent(deviceName)) {
+            const objVar = this.sanitize(deviceName);
+            const field = `systemSensors.${objVar}`;
+            const measure = String(component.config?.measure ?? "temperature");
+            const readCall = measure === "humidity" ? `${objVar}.readHumidity()` : `${objVar}.readTemperature()`;
+            return `  ${field} = ${readCall};
+  if (isnan(${field})) { /* read failed */ }
+  (void)ctx;`;
+          }
+          break;
+        }
+        case "bme280": {
+          const deviceName = String(params.device ?? "");
+          const component = (this.project.system.components || []).find((c) => c.name === deviceName);
+          if (component && this.isSensorComponent(deviceName)) {
+            const objVar = this.sanitize(deviceName);
+            const field = `systemSensors.${objVar}`;
+            const measure = String(component.config?.measure ?? "temperature");
+            let readCall;
+            switch (measure) {
+              case "humidity":
+                readCall = `${objVar}.readHumidity()`;
+                break;
+              case "pressure":
+                readCall = `${objVar}.readPressure() / 100.0F`;
+                break;
+              default:
+                readCall = `${objVar}.readTemperature()`;
+                break;
+            }
+            return `  ${field} = ${readCall};
+  (void)ctx;`;
+          }
+          break;
+        }
+        case "lcd_print": {
+          const deviceName = String(params.device ?? "");
+          const device = (this.project.system.components || []).find((c) => c.name === deviceName);
+          if (!device)
+            break;
+          const objVar = this.sanitize(deviceName);
+          const col = params.col ?? 0;
+          const row = params.row ?? 0;
+          return [
+            `  ${objVar}.setCursor(${col}, ${row});`,
+            `  // ${objVar}.print("your text");        // literal string`,
+            `  // ${objVar}.print(systemSensors.value); // sensor reading`,
+            `  (void)ctx;`
+          ].join("\n");
+        }
+        case "lcd_clear": {
+          const deviceName = String(params.device ?? "");
+          const device = (this.project.system.components || []).find((c) => c.name === deviceName);
+          if (!device)
+            break;
+          return `  ${this.sanitize(deviceName)}.clear();
+  (void)ctx;`;
+        }
+        case "oled_print": {
+          const deviceName = String(params.device ?? "");
+          const device = (this.project.system.components || []).find((c) => c.name === deviceName);
+          if (!device)
+            break;
+          const objVar = this.sanitize(deviceName);
+          const x = params.x ?? 0;
+          const y = params.y ?? 0;
+          const size = params.size ?? 1;
+          return [
+            `  ${objVar}.clearDisplay();`,
+            `  ${objVar}.setTextSize(${size});`,
+            `  ${objVar}.setTextColor(SSD1306_WHITE);`,
+            `  ${objVar}.setCursor(${x}, ${y});`,
+            `  // ${objVar}.print("your text");        // literal string`,
+            `  // ${objVar}.print(systemSensors.value); // sensor reading`,
+            `  ${objVar}.display();`,
+            `  (void)ctx;`
+          ].join("\n");
+        }
+        case "rtc_read": {
+          const deviceName = String(params.device ?? "");
+          const device = (this.project.system.components || []).find((c) => c.name === deviceName);
+          if (!device)
+            break;
+          const objVar = this.sanitize(deviceName);
+          return [
+            `  // DateTime now = ${objVar}.now();`,
+            `  // systemSensors.timestamp = (float)now.unixtime();  // Unix seconds`,
+            `  (void)ctx;`
+          ].join("\n");
         }
         case "pwm_control": {
           const deviceName = String(params.device ?? "");
@@ -5856,6 +6795,87 @@ several_reset
       return (this.project.system.components || []).some((c) => c.name === name && String(c.class) === "sensor");
     }
     // =========================================================================
+    // STORAGE WIRING (persist: true parameters)
+    // =========================================================================
+    /** Parameters the model has marked persist:true. */
+    persistedParameters() {
+      return (this.project.system.parameters || []).filter((p) => p.persist === true);
+    }
+    /**
+     * Generate loadParameters() / saveParameters() using the Arduino Preferences
+     * library (ESP32-native, wraps NVS).  On non-ESP32 targets the functions are
+     * still emitted but wrapped in #ifdef ARDUINO_ARCH_ESP32, so the sketch
+     * compiles everywhere while the persistence calls are simply no-ops on AVR
+     * or RP2040 boards — the user can swap in EEPROM.h calls there.
+     *
+     * NVS key names are limited to 15 characters; keys are truncated with a
+     * comment so the user can see the mapping.
+     */
+    generateStorageWiring() {
+      const persisted = this.persistedParameters();
+      if (persisted.length === 0)
+        return "";
+      const ns = this.topicSegment(this.project.name).slice(0, 15);
+      const prefsGet = (p) => {
+        const field = `systemParameters.${this.sanitize(p.name)}`;
+        const key = this.sanitize(p.name).slice(0, 15);
+        const dflt = this.cLiteral(p);
+        switch (p.type) {
+          case "float":
+            return `  ${field} = _prefs.getFloat("${key}", ${dflt});`;
+          case "bool":
+            return `  ${field} = _prefs.getBool("${key}", ${dflt});`;
+          default:
+            return `  ${field} = _prefs.getInt("${key}", ${dflt});`;
+        }
+      };
+      const prefsPut = (p) => {
+        const field = `systemParameters.${this.sanitize(p.name)}`;
+        const key = this.sanitize(p.name).slice(0, 15);
+        switch (p.type) {
+          case "float":
+            return `  _prefs.putFloat("${key}", ${field});`;
+          case "bool":
+            return `  _prefs.putBool("${key}", ${field});`;
+          default:
+            return `  _prefs.putInt("${key}", ${field});`;
+        }
+      };
+      const loadBody = persisted.map(prefsGet).join("\n");
+      const saveBody = persisted.map(prefsPut).join("\n");
+      return `// ============================================================================
+// STORAGE WIRING (persist: true parameters)
+// ============================================================================
+//
+// Parameters marked persist:true are loaded from NVS at boot and saved
+// whenever they change. Call saveParameters() after any write to these fields
+// (the MQTT setpoint handler does this automatically when both are present).
+//
+// Requires the Preferences library \u2014 included with the ESP32 Arduino core.
+// Non-ESP32 targets compile but skip NVS calls; replace with EEPROM.h if needed.
+
+#ifdef ARDUINO_ARCH_ESP32
+#include <Preferences.h>
+static Preferences _prefs;
+#endif
+
+static void loadParameters() {
+#ifdef ARDUINO_ARCH_ESP32
+  _prefs.begin("${ns}", true);  // read-only
+${loadBody}
+  _prefs.end();
+#endif
+}
+
+static void saveParameters() {
+#ifdef ARDUINO_ARCH_ESP32
+  _prefs.begin("${ns}", false);  // read-write
+${saveBody}
+  _prefs.end();
+#endif
+}`;
+    }
+    // =========================================================================
     // SENSOR READS
     // =========================================================================
     /**
@@ -5873,15 +6893,205 @@ several_reset
       if (sensors.length === 0)
         return "";
       const reads = sensors.map((c) => {
-        const pin = `${this.sanitizeUpper(c.name)}_PIN`;
+        const pinMacro = `${this.sanitizeUpper(c.name)}_PIN`;
         const field = `systemSensors.${this.sanitize(c.name)}`;
-        return c.type === "analog_input" ? `  ${field} = ${this.backend.analogReadExpr(pin)};` : `  ${field} = (float)${this.backend.digitalReadExpr(pin)};`;
+        const rawConversion = c.config?.conversion;
+        if (typeof rawConversion === "string" && rawConversion.trim()) {
+          const expr = rawConversion.trim().replace(/\{pin\}/g, pinMacro);
+          const unit = c.config?.unit ? `  // ${c.config.unit}` : "";
+          return `  ${field} = (float)(${expr});${unit}`;
+        }
+        return c.type === "analog_input" ? `  ${field} = ${this.backend.analogReadExpr(pinMacro)};` : `  ${field} = (float)${this.backend.digitalReadExpr(pinMacro)};`;
       });
       return `// Populate systemSensors before guards and actions read them.
 // Called at the top of every loop() pass.
 static void readSensors() {
 ${reads.join("\n")}
 }`;
+    }
+    // =========================================================================
+    // MQTT WIRING
+    // =========================================================================
+    /** Return the declared mqtt resource, or undefined. */
+    mqttResource() {
+      return (this.project.system.resources || []).find((r) => String(r.interface) === "mqtt");
+    }
+    /**
+     * Sanitize a name for use as an MQTT topic segment.
+     * Mirrors the TopicEmitter.segment() logic: keep alphanumerics and ._-,
+     * replace everything else with underscore.
+     */
+    topicSegment(name) {
+      return name.trim().replace(/[^A-Za-z0-9_.-]/g, "_").replace(/^_+|_+$/g, "");
+    }
+    /**
+     * Derive the PubSubClient variable name from the mqtt resource name.
+     * Mirrors the lower() helper in interfaces.ts:
+     *   "mqtt"      → "mqtt"
+     *   "broker"    → "broker"
+     *   "mqtt_bus"  → "mqttBus"
+     */
+    mqttClientVar(resource) {
+      const upper = this.sanitizeUpper(resource.name);
+      return upper.toLowerCase().replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    }
+    /**
+     * Generate the MQTT subscription/publication wiring:
+     *   - onMqttMessage()  — callback updating parameters or raising events
+     *   - connectMqtt()    — connect once + subscribe
+     *   - publishMqtt()    — publish sensor readings and current state
+     *
+     * Emitted only when an mqtt resource is declared AND there is something to
+     * subscribe to or publish (parameters, MQTT-sourced events, or sensors).
+     * The loop() generator injects the reconnect/loop/publish calls.
+     */
+    generateMqttWiring() {
+      const mqtt = this.mqttResource();
+      if (!mqtt)
+        return "";
+      const allComponents = this.project.system.components || [];
+      const allParameters = this.project.system.parameters || [];
+      const allEvents = this.project.system.events || [];
+      const comm = this.project.system.communication;
+      let sensorWires;
+      let paramWires;
+      let eventWires;
+      if (comm) {
+        sensorWires = (comm.publish || []).map((item2) => ({
+          name: item2.sensor,
+          seg: this.topicSegment(item2.topic ?? item2.sensor)
+        }));
+        const subItems = comm.subscribe || [];
+        paramWires = subItems.filter((item2) => item2.parameter !== void 0).map((item2) => {
+          const parameter = allParameters.find((p) => p.name === item2.parameter);
+          return { parameter, seg: this.topicSegment(item2.topic ?? item2.parameter) };
+        });
+        eventWires = subItems.filter((item2) => item2.event !== void 0).map((item2) => {
+          const event = allEvents.find((e) => e.name === item2.event);
+          return { event, seg: this.topicSegment(item2.topic ?? item2.event) };
+        });
+      } else {
+        sensorWires = allComponents.filter((c) => String(c.class) === "sensor").map((c) => ({ name: c.name, seg: this.topicSegment(c.name) }));
+        paramWires = allParameters.map((p) => ({ parameter: p, seg: this.topicSegment(p.name) }));
+        eventWires = allEvents.filter((e) => String(e.source) === "mqtt").map((e) => ({ event: e, seg: this.topicSegment(e.name) }));
+      }
+      const hasSubscriptions = paramWires.length > 0 || eventWires.length > 0;
+      const telemetryDeclared = !!this.project.system.telemetry;
+      const hasPublications = !telemetryDeclared && sensorWires.length > 0 || this.hasMachine;
+      if (!hasSubscriptions && !hasPublications)
+        return "";
+      const client = this.mqttClientVar(mqtt);
+      const binding = mqtt.binding || {};
+      const ns = this.topicSegment(typeof binding.prefix === "string" ? String(binding.prefix) : this.project.name);
+      const hasPersistAndMqtt = paramWires.some((w) => w.parameter.persist) && hasSubscriptions;
+      const setpointCases = paramWires.map(({ parameter: p, seg }) => {
+        const field = `systemParameters.${this.sanitize(p.name)}`;
+        let conv;
+        switch (p.type) {
+          case "float":
+            conv = `${field} = atof(buf);`;
+            break;
+          case "bool":
+            conv = `${field} = buf[0] == '1' || strcmp(buf, "true") == 0;`;
+            break;
+          default:
+            conv = `${field} = (int)atol(buf);`;
+            break;
+        }
+        const save = hasPersistAndMqtt ? " saveParameters();" : "";
+        return `  if (strcmp(suffix, "/setpoint/${seg}") == 0) { ${conv}${save} return; }`;
+      });
+      const eventCases = eventWires.map(({ event: e, seg }) => {
+        const evSym = `EVENT_${this.sanitizeUpper(e.name)}`;
+        const dispatch = this.hasMachine ? `fsm.sendEvent(${evSym})` : `/* no machine \u2014 ${e.name} cannot be dispatched */`;
+        return `  if (strcmp(suffix, "/event/${seg}") == 0) { ${dispatch}; return; }`;
+      });
+      const callbackBody = [
+        "  char buf[128];",
+        "  if (length >= sizeof(buf)) length = sizeof(buf) - 1;",
+        "  memcpy(buf, payload, length);",
+        "  buf[length] = '\\0';",
+        "",
+        "  const size_t prefixLen = strlen(_mqttPrefix);",
+        "  if (strncmp(topic, _mqttPrefix, prefixLen) != 0) return;",
+        "  const char* suffix = topic + prefixLen;",
+        "",
+        ...setpointCases.length > 0 ? ["  // Setpoints \u2192 update parameters.", ...setpointCases, ""] : [],
+        ...eventCases.length > 0 ? ["  // Events \u2192 dispatch to state machine.", ...eventCases] : []
+      ].join("\n");
+      const subscribeLines = [
+        ...paramWires.map(({ seg }) => `  snprintf(_t, sizeof(_t), "%s/setpoint/${seg}", _mqttPrefix);
+  ${client}.subscribe(_t);`),
+        ...eventWires.map(({ seg }) => `  snprintf(_t, sizeof(_t), "%s/event/${seg}", _mqttPrefix);
+  ${client}.subscribe(_t);`)
+      ];
+      const clientIdExpr = typeof binding.client_id === "string" ? this.sanitizeUpper(mqtt.name) + "_CLIENT_ID" : "MQTT_DEVICE_ID";
+      const connectBody = [
+        `  if (${client}.connected()) return;`,
+        `  snprintf(_mqttPrefix, sizeof(_mqttPrefix), "${ns}/" MQTT_DEVICE_ID);`,
+        `  if (!${client}.connect(${clientIdExpr})) return;`,
+        "",
+        `  ${client}.setCallback(onMqttMessage);`,
+        "",
+        ...subscribeLines.length > 0 ? ["  char _t[128];", ...subscribeLines] : []
+      ].join("\n");
+      const publishLines = [];
+      const effectiveSensorWires = telemetryDeclared ? [] : sensorWires;
+      if (effectiveSensorWires.length > 0) {
+        publishLines.push("  // Sensor readings.");
+        for (const { name, seg } of effectiveSensorWires) {
+          const field = `systemSensors.${this.sanitize(name)}`;
+          publishLines.push(`  snprintf(_t, sizeof(_t), "%s/${seg}", _mqttPrefix);`, `  snprintf(_v, sizeof(_v), "%.4g", ${field});`, `  ${client}.publish(_t, _v);`);
+        }
+      }
+      if (this.hasMachine) {
+        publishLines.push("  // Current leaf state.");
+        publishLines.push(`  snprintf(_t, sizeof(_t), "%s/state", _mqttPrefix);`);
+        publishLines.push(`  ${client}.publish(_t, fsm.getCurrentName());`);
+      }
+      const publishBody = [
+        `  if (!${client}.connected()) return;`,
+        "  char _t[128];",
+        ...effectiveSensorWires.length > 0 ? ["  char _v[32];"] : [],
+        "",
+        ...publishLines
+      ].join("\n");
+      const callbackSection = hasSubscriptions ? `static void onMqttMessage(char* topic, uint8_t* payload, unsigned int length) {
+${callbackBody}
+}` : "";
+      const connectSection = hasSubscriptions ? `static void connectMqtt() {
+${connectBody}
+}` : `static void connectMqtt() {
+  if (${client}.connected()) return;
+  snprintf(_mqttPrefix, sizeof(_mqttPrefix), "${ns}/" MQTT_DEVICE_ID);
+  ${client}.connect(MQTT_DEVICE_ID);
+}`;
+      const publishSection = hasPublications ? `static void publishMqtt() {
+${publishBody}
+}` : "";
+      const parts = [
+        `// ============================================================================
+// MQTT WIRING
+// ============================================================================
+//
+// The device identifies itself via MQTT_DEVICE_ID. Pass as a build flag:
+//   Arduino: -DMQTT_DEVICE_ID=\\"unit-001\\"    (in build_flags or compiler flags)
+//   IDF:     CONFIG_MQTT_DEVICE_ID in sdkconfig
+#include <string.h>   // memcpy, strlen, strcmp, strncmp
+#include <stdio.h>    // snprintf
+#include <stdlib.h>   // atof, atol
+
+#ifndef MQTT_DEVICE_ID
+#define MQTT_DEVICE_ID "device"
+#endif
+
+// Runtime topic prefix: "${ns}/<device_id>"
+static char _mqttPrefix[96];`,
+        callbackSection,
+        connectSection,
+        publishSection
+      ].filter(Boolean);
+      return parts.join("\n\n");
     }
     /**
      * A `log:` template as print calls.
@@ -5956,6 +7166,9 @@ ${reads.join("\n")}
         lines.push("  //   ctx->currentState, ctx->previousState   (compare with S_*)");
         lines.push("  //   ctx->eventData   (payload of the event being dispatched)");
       }
+      if (this.project.system.commands) {
+        lines.push("  //   ctx->argc, ctx->argv[]   (command tokens; argv[0] is the command name)");
+      }
       if (lines.length === 0)
         return "";
       return `  //
@@ -5963,10 +7176,31 @@ ${reads.join("\n")}
 ${lines.join("\n")}
 `;
     }
-    /** The two C names a state with timed transitions needs. */
+    /** C names a state with timed transitions needs. */
     timerNames(flat) {
       const base = this.sanitize(flat.path);
-      return { since: `enteredAt_${base}`, mark: `enter_${base}`, tick: `tick_${base}` };
+      return { since: `enteredAt_${base}`, tick: `tick_${base}` };
+    }
+    /**
+     * The name of the entry callback to pass to addState(), or null when the
+     * state needs no entry hook at all.
+     *
+     * Non-null when the state declares entry: actions OR has after: transitions
+     * (which need a clock stamp on entry).
+     */
+    entryCallbackName(flat) {
+      const hasTimed = (this.timedBySource.get(flat.index)?.length ?? 0) > 0;
+      const hasEntryActions = (flat.state?.entry?.length ?? 0) > 0;
+      if (!hasTimed && !hasEntryActions)
+        return null;
+      return `on_enter_${this.sanitize(flat.path)}`;
+    }
+    /**
+     * The name of the exit callback to pass to addState(), or null when the
+     * state has no exit: actions.
+     */
+    exitCallbackName(flat) {
+      return (flat.state?.exit?.length ?? 0) > 0 ? `on_exit_${this.sanitize(flat.path)}` : null;
     }
     /**
      * `after:` on a transition - it fires when a duration elapses instead of when
@@ -5995,59 +7229,153 @@ ${lines.join("\n")}
      * clock, which is exactly the semantics a composite timeout needs.
      */
     generateTimeouts() {
-      if (this.timedBySource.size === 0)
+      if (this.timedBySource.size === 0 && this.periodicBySource.size === 0)
         return "";
       const tsType = this.backend.timestampType();
       const now = this.backend.nowExpr();
       const transitions = this.project.system.transitions;
       const blocks = [];
+      const allSources = /* @__PURE__ */ new Set([
+        ...this.timedBySource.keys(),
+        ...this.periodicBySource.keys()
+      ]);
       for (const flat of this.states) {
-        const owned = this.timedBySource.get(flat.index);
-        if (!owned || owned.length === 0)
+        if (!allSources.has(flat.index))
           continue;
-        const { since, mark, tick } = this.timerNames(flat);
+        const timedOwned = this.timedBySource.get(flat.index) || [];
+        const periodicOwned = this.periodicBySource.get(flat.index) || [];
+        const { since, tick } = this.timerNames(flat);
         const body = [];
-        for (const idx of owned) {
-          const t = transitions[idx];
-          const guard = this.guards.get(idx);
-          const target = this.states[this.resolveEntry(this.resolveRef(t.target, "target"))];
-          const duration = typeof t.after === "string" ? `(${tsType})systemParameters.${this.sanitize(t.after)}` : `${t.after}UL`;
-          const source2 = typeof t.after === "string" ? `${t.after} (parameter)` : `${t.after} ms`;
-          const calls = (t.actions || []).map((a) => `    action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
-          const fire = [
-            calls,
-            `    fsm.transitionTo(${target.symbol});`,
-            "    return;"
-          ].filter(Boolean).join("\n");
-          const condition = guard ? `elapsed >= ${duration} && ${guard.fnName}(&systemContext)` : `elapsed >= ${duration}`;
-          body.push(`  // after ${source2} -> ${t.target}${guard ? ", if the guard allows" : ""}
+        if (timedOwned.length > 0) {
+          const elapsedLine = `  const ${tsType} elapsed = ${now} - ${since};`;
+          const timedBody = [elapsedLine];
+          for (const idx of timedOwned) {
+            const t = transitions[idx];
+            const guard = this.guards.get(idx);
+            const target = this.states[this.resolveEntry(this.resolveRef(t.target, "target"))];
+            const duration = typeof t.after === "string" ? `(${tsType})systemParameters.${this.sanitize(t.after)}` : `${t.after}UL`;
+            const source2 = typeof t.after === "string" ? `${t.after} (parameter)` : `${t.after} ms`;
+            const calls = (t.actions || []).map((a) => `    action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
+            const fire = [
+              calls,
+              `    fsm.transitionTo(${target.symbol});`,
+              "    return;"
+            ].filter(Boolean).join("\n");
+            const condition = guard ? `elapsed >= ${duration} && ${guard.fnName}(&systemContext)` : `elapsed >= ${duration}`;
+            timedBody.push(`  // after ${source2} -> ${t.target}${guard ? ", if the guard allows" : ""}
   if (${condition}) {
 ${fire}
   }`);
+          }
+          body.push(...timedBody);
         }
-        blocks.push(`// Timers for "${flat.path}".
-static ${tsType} ${since} = 0;
-
-static void ${mark}() {
-  ${since} = ${now};
+        if (periodicOwned.length > 0) {
+          for (let i = 0; i < periodicOwned.length; i++) {
+            const idx = periodicOwned[i];
+            const t = transitions[idx];
+            const guard = this.guards.get(idx);
+            const interval = typeof t.every === "string" ? `(${tsType})systemParameters.${this.sanitize(t.every)}` : `${t.every}UL`;
+            const source2 = typeof t.every === "string" ? `${t.every} (parameter)` : `every ${t.every} ms`;
+            const dueVar = `dueAt_${this.sanitize(flat.path)}_${i}`;
+            const calls = (t.actions || []).map((a) => `    action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
+            const guardCheck = guard ? `
+  if (!${guard.fnName}(&systemContext)) { ${dueVar} += _iv_${i}; return; }` : "";
+            const intervalVar = `_iv_${i}`;
+            body.push(`  // ${source2}
+  {
+    const ${tsType} ${intervalVar} = ${interval};
+    if (${now} - ${dueVar} >= ${intervalVar}) {
+      ${dueVar} += ${intervalVar};
+      if (${now} - ${dueVar} >= ${intervalVar}) ${dueVar} = ${now};${guardCheck}
+${calls}
+    }
+  }`);
+          }
+        }
+        const periodicGlobals = periodicOwned.map((_, i) => `static ${tsType} dueAt_${this.sanitize(flat.path)}_${i} = 0;`).join("\n");
+        const hasTimed = timedOwned.length > 0;
+        const sinceGlobal = hasTimed ? `static ${tsType} ${since} = 0;
+` : "";
+        const entryName = this.entryCallbackName(flat);
+        const entryActionCalls = (flat.state?.entry ?? []).map((a) => `  action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
+        const entryFnBody = [
+          entryActionCalls ? `  syncContext();
+${entryActionCalls}` : null,
+          hasTimed ? `  ${since} = ${now};` : null
+        ].filter(Boolean).join("\n");
+        const entryFn = entryName ? `static void ${entryName}() {
+${entryFnBody}
 }
 
-static void ${tick}() {
+` : "";
+        blocks.push(`// Update tick for "${flat.path}".
+${sinceGlobal}${periodicGlobals}
+
+${entryFn}static void ${tick}() {
   syncContext();
-  const ${tsType} elapsed = ${now} - ${since};
 
 ${body.join("\n\n")}
 }`);
       }
       return `// ============================================================================
-// TIMED TRANSITIONS
+// TIMED AND PERIODIC TRANSITIONS
 // ============================================================================
 //
-// Generated from "after:" in the model. Ancestors tick before their active
-// child, so when both a state and its parent time out on the same pass the
-// inner one wins - the same precedence event handling already has.
+// "after:" generates a one-shot timed transition. Ancestors tick before their
+// active child, so when both a state and its parent time out on the same pass
+// the inner one wins - the same precedence event handling already has.
+//
+// "every:" runs actions on a repeating interval while the machine stays in
+// that state. Uses deadline-advance-by-interval to prevent drift.
 //
 // Subtraction on unsigned long is correct across the millis() rollover.
+
+${blocks.join("\n\n")}`;
+    }
+    /**
+     * Generate entry and exit callbacks for states that declare `entry:` or
+     * `exit:` actions but have no timed/periodic transitions.
+     *
+     * Timed states have their entry callback merged into generateTimeouts() so
+     * the clock stamp and entry actions appear in a single function.  Exit
+     * callbacks are always generated here since PulseHSM has no exit equivalent
+     * of the timer tick.
+     */
+    generateEntryExitCallbacks() {
+      if (!this.hasMachine)
+        return "";
+      const blocks = [];
+      for (const flat of this.states) {
+        if (flat.state === null)
+          continue;
+        const hasTimed = (this.timedBySource.get(flat.index)?.length ?? 0) > 0;
+        const entryActions = flat.state.entry ?? [];
+        const exitActions = flat.state.exit ?? [];
+        if (!hasTimed && entryActions.length > 0) {
+          const name = this.entryCallbackName(flat);
+          const calls = entryActions.map((a) => `  action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
+          blocks.push(`static void ${name}() {
+  syncContext();
+${calls}
+}`);
+        }
+        if (exitActions.length > 0) {
+          const name = this.exitCallbackName(flat);
+          const calls = exitActions.map((a) => `  action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
+          blocks.push(`static void ${name}() {
+  syncContext();
+${calls}
+}`);
+        }
+      }
+      if (blocks.length === 0)
+        return "";
+      return `// ============================================================================
+// ENTRY AND EXIT ACTIONS
+// ============================================================================
+//
+// Called once when the machine enters or exits a state. syncContext() runs
+// first so the action stub sees consistent sensor readings.
 
 ${blocks.join("\n\n")}`;
     }
@@ -6084,6 +7412,23 @@ ${blocks.join("\n\n")}`;
     // =========================================================================
     generateLoopFunction() {
       const body = [];
+      if (this.project.system.diagnostics) {
+        body.push("  runDiagnostics();");
+      }
+      const mqttRes = this.mqttResource();
+      if (mqttRes) {
+        const client = this.mqttClientVar(mqttRes);
+        const sensors = (this.project.system.components || []).filter((c) => String(c.class) === "sensor");
+        const telemetryDeclared = !!this.project.system.telemetry;
+        const hasPublications = !telemetryDeclared && sensors.length > 0 || this.hasMachine;
+        body.push(`  // Maintain MQTT connection and pump incoming messages.`, `  {`, `    static unsigned long _mqttReconnectAt = 0;`, `    if (!${client}.connected() && ${this.backend.nowExpr()} - _mqttReconnectAt >= 5000UL) {`, `      _mqttReconnectAt = ${this.backend.nowExpr()};`, `      connectMqtt();`, `    }`, `    ${client}.loop();`, `  }`);
+        if (hasPublications) {
+          body.push(`  // Publish sensor readings and state periodically.`, `  {`, `    static unsigned long _mqttPublishAt = 0;`, `    if (${this.backend.nowExpr()} - _mqttPublishAt >= 5000UL) {`, `      _mqttPublishAt = ${this.backend.nowExpr()};`, `      publishMqtt();`, `    }`, `  }`);
+        }
+        if (telemetryDeclared) {
+          body.push(`  runTelemetry();`);
+        }
+      }
       const hasPinSensors = (this.project.system.components || []).some((c) => String(c.class) === "sensor" && (c.type === "analog_input" || c.type === "digital_input"));
       if (hasPinSensors)
         body.push("  readSensors();");
@@ -6116,7 +7461,8 @@ ${blocks.join("\n\n")}`;
         body.push("  // Nothing declared to run. Add tasks: or commands: to the model.");
       }
       const sync = this.project.system.commands || (this.project.system.tasks || []).length ? "  syncContext();\n" : "";
-      const loopBody = `${sync}${body.join("\n")}`;
+      const safetyCall = this.project.system.safety ? "  runSafetyChecks();\n" : "";
+      const loopBody = `${safetyCall}${sync}${body.join("\n")}`;
       return `// ============================================================================
 // MAIN LOOP
 // ============================================================================
@@ -6317,8 +7663,10 @@ ${implementations.join("\n\n")}`;
         } else {
           sourceIdx = this.resolveRef(t.source, "source");
         }
-        this.resolveEntry(this.resolveRef(t.target, "target"));
-        const bucket = t.after !== void 0 ? this.timedBySource : this.transitionsBySource;
+        if (t.every === void 0) {
+          this.resolveEntry(this.resolveRef(t.target, "target"));
+        }
+        const bucket = t.after !== void 0 ? this.timedBySource : t.every !== void 0 ? this.periodicBySource : this.transitionsBySource;
         const list = bucket.get(sourceIdx) || [];
         list.push(idx);
         bucket.set(sourceIdx, list);
@@ -6515,19 +7863,39 @@ ${implementations.join("\n\n")}`;
     // =========================================================================
     publishTopics(project, prefix) {
       const topics = [];
-      for (const component of project.system.components || []) {
-        if (String(component.class) !== "sensor")
-          continue;
-        const leaf = this.segment(component.name, "sensor");
-        const unit = component.config?.unit;
-        topics.push({
-          topic: `${prefix}/${leaf}`,
-          kind: "sensor",
-          valueType: "float",
-          source: component.name,
-          driver: component.driver,
-          ...typeof unit === "string" ? { unit } : {}
-        });
+      const comm = project.system.communication;
+      if (comm?.publish !== void 0) {
+        const componentMap = new Map((project.system.components || []).map((c) => [c.name, c]));
+        for (const item2 of comm.publish) {
+          const component = componentMap.get(item2.sensor);
+          if (!component)
+            continue;
+          const leaf = this.segment(item2.topic ?? item2.sensor, "sensor");
+          const unit = component.config?.unit;
+          topics.push({
+            topic: `${prefix}/${leaf}`,
+            kind: "sensor",
+            valueType: "float",
+            source: item2.sensor,
+            driver: component.driver,
+            ...typeof unit === "string" ? { unit } : {}
+          });
+        }
+      } else {
+        for (const component of project.system.components || []) {
+          if (String(component.class) !== "sensor")
+            continue;
+          const leaf = this.segment(component.name, "sensor");
+          const unit = component.config?.unit;
+          topics.push({
+            topic: `${prefix}/${leaf}`,
+            kind: "sensor",
+            valueType: "float",
+            source: component.name,
+            driver: component.driver,
+            ...typeof unit === "string" ? { unit } : {}
+          });
+        }
       }
       const leaves = leafPaths(project.system.states);
       if (leaves.length > 0) {
@@ -6542,30 +7910,66 @@ ${implementations.join("\n\n")}`;
     }
     subscribeTopics(project, prefix) {
       const topics = [];
-      for (const parameter of project.system.parameters || []) {
-        const leaf = this.segment(parameter.name, "parameter");
-        topics.push({
-          topic: `${prefix}/setpoint/${leaf}`,
-          kind: "setpoint",
-          valueType: this.valueType(parameter.type),
-          parameter: parameter.name,
-          ...parameter.unit !== void 0 ? { unit: parameter.unit } : {},
-          ...parameter.default !== void 0 ? { default: parameter.default } : {},
-          ...parameter.min !== void 0 ? { min: parameter.min } : {},
-          ...parameter.max !== void 0 ? { max: parameter.max } : {},
-          ...parameter.description !== void 0 ? { description: parameter.description } : {}
-        });
-      }
-      for (const event of project.system.events || []) {
-        if (String(event.source) !== "mqtt")
-          continue;
-        topics.push({
-          topic: `${prefix}/event/${this.segment(event.name, "event")}`,
-          kind: "command",
-          valueType: "trigger",
-          event: event.name,
-          ...event.description !== void 0 ? { description: event.description } : {}
-        });
+      const comm = project.system.communication;
+      if (comm?.subscribe !== void 0) {
+        const paramMap = new Map((project.system.parameters || []).map((p) => [p.name, p]));
+        const eventMap = new Map((project.system.events || []).map((e) => [e.name, e]));
+        for (const item2 of comm.subscribe) {
+          if (item2.parameter !== void 0) {
+            const parameter = paramMap.get(item2.parameter);
+            if (!parameter)
+              continue;
+            const leaf = this.segment(item2.topic ?? item2.parameter, "parameter");
+            topics.push({
+              topic: `${prefix}/setpoint/${leaf}`,
+              kind: "setpoint",
+              valueType: this.valueType(parameter.type),
+              parameter: item2.parameter,
+              ...parameter.unit !== void 0 ? { unit: parameter.unit } : {},
+              ...parameter.default !== void 0 ? { default: parameter.default } : {},
+              ...parameter.min !== void 0 ? { min: parameter.min } : {},
+              ...parameter.max !== void 0 ? { max: parameter.max } : {},
+              ...parameter.description !== void 0 ? { description: parameter.description } : {}
+            });
+          } else if (item2.event !== void 0) {
+            const event = eventMap.get(item2.event);
+            if (!event)
+              continue;
+            topics.push({
+              topic: `${prefix}/event/${this.segment(item2.topic ?? item2.event, "event")}`,
+              kind: "command",
+              valueType: "trigger",
+              event: item2.event,
+              ...event.description !== void 0 ? { description: event.description } : {}
+            });
+          }
+        }
+      } else {
+        for (const parameter of project.system.parameters || []) {
+          const leaf = this.segment(parameter.name, "parameter");
+          topics.push({
+            topic: `${prefix}/setpoint/${leaf}`,
+            kind: "setpoint",
+            valueType: this.valueType(parameter.type),
+            parameter: parameter.name,
+            ...parameter.unit !== void 0 ? { unit: parameter.unit } : {},
+            ...parameter.default !== void 0 ? { default: parameter.default } : {},
+            ...parameter.min !== void 0 ? { min: parameter.min } : {},
+            ...parameter.max !== void 0 ? { max: parameter.max } : {},
+            ...parameter.description !== void 0 ? { description: parameter.description } : {}
+          });
+        }
+        for (const event of project.system.events || []) {
+          if (String(event.source) !== "mqtt")
+            continue;
+          topics.push({
+            topic: `${prefix}/event/${this.segment(event.name, "event")}`,
+            kind: "command",
+            valueType: "trigger",
+            event: event.name,
+            ...event.description !== void 0 ? { description: event.description } : {}
+          });
+        }
       }
       return topics;
     }
@@ -6709,6 +8113,8 @@ ${implementations.join("\n\n")}`;
       if (initialLeaf)
         reachable.add(initialLeaf);
       for (const t of system.transitions) {
+        if (t.target === void 0)
+          continue;
         const fullPath = resolvePath(system.states, t.target);
         if (!fullPath)
           continue;
@@ -6814,6 +8220,7 @@ ${implementations.join("\n\n")}`;
     "driver",
     "params",
     "unit",
+    "conversion",
     // pin / channel descriptors
     "pin",
     "channel",
@@ -7706,7 +9113,7 @@ ${implementations.join("\n\n")}`;
     "serial console \u2014 commands over the serial monitor, no state machine": {
       entry: "serial_console.yaml",
       files: {
-        "serial_console.yaml": '# A board you talk to over the serial monitor. Still no state machine.\n#\n# Two things the model owns here that are usually hand-written boilerplate:\n#\n#   1. The console\'s baud rate. `console` is a declared bus like any other, so\n#      the sketch opens it at the rate the model asks for - there is no\n#      hardcoded Serial.begin(115200) anywhere in the output.\n#   2. The command table. Reading a line without blocking, reassembling one\n#      split across loop() passes, and refusing one too long to fit are all\n#      generated. What a command *means* is your action, in C.\n\npulseir: "1"\n\nproject:\n  name: serial_console\n  version: "1.0"\n  description: Answers commands typed into the serial monitor\n\ntarget:\n  board: esp32\n\nhardware:\n  buses:\n    # Port 0 is the USB serial monitor. Naming it as a bus is what lets the\n    # model set the baud rate.\n    console: { interface: uart, port: 0, baud: 9600 }\n\n  devices:\n    led:  { type: digital_output, pin: GPIO2 }\n    fan:  { type: pwm_output, pin: GPIO27, channel: 0, frequency: 25000 }\n    temp: { type: analog_input, pin: GPIO34, unit: degC }\n\nparameters:\n  report_ms: { type: int, default: 2000, range: [200, 60000], unit: ms }\n  fan_duty:  { type: int, default: 128,  range: [0, 255] }\n\nactions:\n  led_on:    { driver: gpio_control, params: { device: led, value: HIGH } }\n  led_off:   { driver: gpio_control, params: { device: led, value: LOW } }\n  fan_start: { driver: pwm_control,  params: { device: fan, duty: fan_duty } }\n  fan_stop:  { driver: pwm_control,  params: { device: fan, duty: 0 } }\n  read_temp: { driver: adc_read,     params: { device: temp } }\n  show_help: { driver: console_help }\n\ncommands:\n  source: console\n  map:\n    on:   led_on\n    off:  led_off\n    fan:  fan_start\n    stop: fan_stop\n    help: show_help\n\n    # `log:` prints a line, with {name} filled from a declared parameter or\n    # sensor. The text and the values both come from this file - no printf in\n    # sight, and a typo in a name is a model error, not a C++ one.\n    status:\n      do: read_temp\n      log: "temp={temp} degC  fan_duty={fan_duty}"\n\n    # A command may also just answer, without doing anything.\n    setpoint:\n      log: "reporting every {report_ms} ms"\n\ntasks:\n  # The board reports on its own too, not only when asked. The log line runs\n  # after the actions, so it prints the reading just taken.\n  heartbeat:\n    every: report_ms\n    do: read_temp\n    log: "temp={temp} degC"\n    description: Report even when nobody types anything\n'
+        "serial_console.yaml": '# A board you talk to over the serial monitor. Still no state machine.\n#\n# Two things the model owns here that are usually hand-written boilerplate:\n#\n#   1. The console\'s baud rate. `console` is a declared bus like any other, so\n#      the sketch opens it at the rate the model asks for - there is no\n#      hardcoded Serial.begin(115200) anywhere in the output.\n#   2. The command table. Reading a line without blocking, reassembling one\n#      split across loop() passes, and refusing one too long to fit are all\n#      generated. What a command *means* is your action, in C.\n\npulseir: "1"\n\nproject:\n  name: serial_console\n  version: "1.0"\n  description: Answers commands typed into the serial monitor\n\ntarget:\n  board: esp32\n\nhardware:\n  buses:\n    # Port 0 is the USB serial monitor. Naming it as a bus is what lets the\n    # model set the baud rate.\n    console: { interface: uart, port: 0, baud: 9600 }\n\n  devices:\n    led:  { type: digital_output, pin: GPIO2 }\n    fan:  { type: pwm_output, pin: GPIO27, channel: 0, frequency: 25000 }\n    temp:\n      type: analog_input\n      pin: GPIO34\n      unit: degC\n      # LM35: 10 mV/\xB0C, 3.3 V reference, 12-bit ADC\n      conversion: "analogRead({pin}) * (3.3 / 4095.0) * 100.0"\n\nparameters:\n  report_ms: { type: int, default: 2000, range: [200, 60000], unit: ms }\n  fan_duty:  { type: int, default: 128,  range: [0, 255] }\n\nactions:\n  led_on:    { driver: gpio_control, params: { device: led, value: HIGH } }\n  led_off:   { driver: gpio_control, params: { device: led, value: LOW } }\n  fan_start: { driver: pwm_control,  params: { device: fan, duty: fan_duty } }\n  fan_stop:  { driver: pwm_control,  params: { device: fan, duty: 0 } }\n  read_temp: { driver: adc_read,     params: { device: temp } }\n  show_help: { driver: console_help }\n\ncommands:\n  source: console\n  map:\n    on:   led_on\n    off:  led_off\n    fan:  fan_start\n    stop: fan_stop\n    help: show_help\n\n    # `log:` prints a line, with {name} filled from a declared parameter or\n    # sensor. The text and the values both come from this file - no printf in\n    # sight, and a typo in a name is a model error, not a C++ one.\n    status:\n      do: read_temp\n      log: "temp={temp} degC  fan_duty={fan_duty}"\n\n    # A command may also just answer, without doing anything.\n    setpoint:\n      log: "reporting every {report_ms} ms"\n\ntasks:\n  # The board reports on its own too, not only when asked. The log line runs\n  # after the actions, so it prints the reading just taken.\n  heartbeat:\n    every: report_ms\n    do: read_temp\n    log: "temp={temp} degC"\n    description: Report even when nobody types anything\n'
       }
     },
     "boiler \u2014 multi-file, hierarchical states, guards": {
@@ -8269,14 +9676,14 @@ target:
     }
     if (system.transitions.length > 0) {
       const rows = system.transitions.map((t) => {
-        const targetPath = resolvePath(system.states, t.target);
+        const targetPath = t.target !== void 0 ? resolvePath(system.states, t.target) : null;
         const leaf = targetPath ? resolveEntryLeaf(system.states, targetPath) : null;
         const descends = leaf && targetPath && leaf !== targetPath;
-        const target = descends ? `${escapeHtml2(t.target)} <span class="arrow">\u21B3</span> <code>${escapeHtml2(leaf)}</code>` : escapeHtml2(t.target);
+        const target = t.target === void 0 ? '<span class="tag">stays</span>' : descends ? `${escapeHtml2(t.target)} <span class="arrow">\u21B3</span> <code>${escapeHtml2(leaf)}</code>` : escapeHtml2(t.target);
         const guard = t.guard ? `<code>${escapeHtml2(t.guard.name)}</code>` : '<span class="dim">\u2014</span>';
         const actions = t.actions?.length ? t.actions.map((a) => `<code>${escapeHtml2(a.name)}</code>`).join(" ") : '<span class="dim">\u2014</span>';
         const src = t.source === "*" ? '<span class="tag wild">any state</span>' : `<code>${escapeHtml2(t.source)}</code>`;
-        const trigger = t.event !== void 0 ? `<code>${escapeHtml2(t.event)}</code>` : `<span class="tag timer">after</span> <code>${escapeHtml2(String(t.after))}</code>`;
+        const trigger = t.event !== void 0 ? `<code>${escapeHtml2(t.event)}</code>` : t.every !== void 0 ? `<span class="tag timer">every</span> <code>${escapeHtml2(String(t.every))}</code>` : `<span class="tag timer">after</span> <code>${escapeHtml2(String(t.after))}</code>`;
         return `<tr><td>${src}</td><td>${trigger}</td><td>${target}</td><td>${guard}</td><td>${actions}</td></tr>`;
       }).join("");
       sections.push(`
@@ -8357,12 +9764,15 @@ target:
     const label = escapeHtml2(node.state.name);
     const isInitial = flat.some((s) => s.initialChildPath === path);
     const marker = isInitial ? '<span class="initial" title="initial child">\u25B8</span>' : "";
+    const entryActions = (node.state.entry ?? []).map((a) => `<span class="tag" title="entry action">\u21B3 ${escapeHtml2(a.name)}</span>`).join(" ");
+    const exitActions = (node.state.exit ?? []).map((a) => `<span class="tag" title="exit action">\u21B1 ${escapeHtml2(a.name)}</span>`).join(" ");
+    const hooks = entryActions || exitActions ? `<span class="state-hooks">${entryActions}${exitActions}</span>` : "";
     if (node.isLeaf) {
-      return `<div class="state leaf">${marker}<span>${label}</span></div>`;
+      return `<div class="state leaf">${marker}<span>${label}</span>${hooks}</div>`;
     }
     return `<div class="state composite">
     <div class="state-name">${marker}<span>${label}</span>
-      <span class="tag">composite</span></div>
+      <span class="tag">composite</span>${hooks}</div>
     <div class="children">${children.map((c) => renderStateNode(c.path, flat)).join("")}</div>
   </div>`;
   }
@@ -8926,7 +10336,10 @@ commands:
       label: "Digital input  (button, switch)",
       yaml: `hardware:
   devices:
-    button: { type: digital_input, pin: GPIO0 }`
+    # mode defaults to INPUT when omitted.
+    # Use INPUT_PULLUP for active-low buttons (no external resistor needed).
+    # Use INPUT_PULLDOWN for active-high buttons (ESP32 only).
+    button: { type: digital_input, pin: GPIO0, mode: INPUT_PULLUP }`
     },
     {
       group: "Device",
@@ -8941,6 +10354,160 @@ commands:
       yaml: `hardware:
   devices:
     sensor: { type: analog_input, pin: GPIO34, unit: V }`
+    },
+    {
+      group: "Device",
+      label: "Analog input  (with conversion formula)",
+      yaml: `hardware:
+  devices:
+    temp:
+      type: analog_input
+      pin: GPIO34
+      unit: degC
+      conversion: "analogRead({pin}) * (3.3 / 4095.0) * 100.0"`
+    },
+    {
+      group: "Device",
+      label: "DS18B20  (1-Wire temperature)",
+      yaml: `# Requires: DallasTemperature + OneWire \u2014 install via Arduino Library Manager
+hardware:
+  buses:
+    probe_bus: { interface: onewire, pin: GPIO4 }
+  devices:
+    water_temp:
+      type: ds18b20
+      bus: probe_bus
+      unit: degC
+
+actions:
+  read_temp: { driver: ds18b20, params: { device: water_temp } }
+
+tasks:
+  sensor_poll: { every: 2000, do: read_temp }`
+    },
+    {
+      group: "Device",
+      label: "DHT22  (temperature + humidity)",
+      yaml: `# Requires: DHT sensor library by Adafruit \u2014 install via Arduino Library Manager
+hardware:
+  devices:
+    air_temp:
+      type: dht22
+      pin: GPIO4
+      measure: temperature   # or: humidity
+      unit: degC
+
+actions:
+  read_dht: { driver: dht22, params: { device: air_temp } }
+
+tasks:
+  sensor_poll: { every: 2000, do: read_dht }`
+    },
+    {
+      group: "Device",
+      label: "BME280  (temp / humidity / pressure)",
+      yaml: `# Requires: Adafruit BME280 Library + Adafruit Unified Sensor \u2014 Library Manager
+hardware:
+  buses:
+    sensor_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    air_temp:
+      type: bme280
+      bus: sensor_bus
+      address: 0x76
+      measure: temperature   # temperature | humidity | pressure
+      unit: degC
+
+actions:
+  read_bme: { driver: bme280, params: { device: air_temp } }
+
+tasks:
+  sensor_poll: { every: 2000, do: read_bme }`
+    },
+    {
+      group: "Device",
+      label: "Digital input with interrupt (ISR)",
+      yaml: `# Interrupt-driven input: generates an ISR + attachInterrupt() call.
+# Add "raises: EVENT_NAME" to fire a state-machine event from the ISR.
+hardware:
+  devices:
+    button:
+      type: digital_input
+      pin: GPIO0
+      interrupt: FALLING   # RISING | FALLING | CHANGE
+      raises: BUTTON_PRESSED
+
+events:
+  BUTTON_PRESSED: { source: external }
+
+machine:
+  states:
+    idle:
+    active:
+  transitions:
+    - { from: idle,   on: BUTTON_PRESSED, to: active }
+    - { from: active, on: BUTTON_PRESSED, to: idle }`
+    },
+    {
+      group: "Device",
+      label: "LCD I2C  (character display)",
+      yaml: `# Requires: LiquidCrystal_I2C by Frank de Brabander \u2014 Arduino Library Manager
+hardware:
+  buses:
+    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    display:
+      type: lcd_i2c
+      bus: i2c_bus
+      address: 0x27   # scan with I2C scanner if unsure
+      cols: 16
+      rows: 2
+
+actions:
+  show_status: { driver: lcd_print, params: { device: display, row: 0, col: 0 } }
+  clear_screen: { driver: lcd_clear, params: { device: display } }
+
+tasks:
+  update_display: { every: 1000, do: [clear_screen, show_status] }`
+    },
+    {
+      group: "Device",
+      label: "OLED I2C  (SSD1306 display)",
+      yaml: `# Requires: Adafruit SSD1306 + Adafruit GFX Library \u2014 Arduino Library Manager
+hardware:
+  buses:
+    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    screen:
+      type: oled_i2c
+      bus: i2c_bus
+      address: 0x3C   # 0x3C most boards; 0x3D if SA0 is HIGH
+      width: 128
+      height: 64
+
+actions:
+  draw_status: { driver: oled_print, params: { device: screen, x: 0, y: 0, size: 1 } }
+
+tasks:
+  refresh: { every: 500, do: draw_status }`
+    },
+    {
+      group: "Device",
+      label: "DS3231 RTC  (real-time clock)",
+      yaml: `# Requires: RTClib by Adafruit \u2014 install via Arduino Library Manager
+hardware:
+  buses:
+    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    clock:
+      type: ds3231
+      bus: i2c_bus
+
+actions:
+  read_time: { driver: rtc_read, params: { device: clock } }
+
+tasks:
+  tick: { every: 1000, do: read_time }`
     },
     // ── Logic ────────────────────────────────────────────────────────────────
     {
@@ -8982,6 +10549,19 @@ machine:
   transitions:
     - { from: idle,   on: PRESS, to: active }
     - { from: active, on: PRESS, to: idle }`
+    },
+    {
+      group: "Logic",
+      label: "State with entry / exit actions",
+      yaml: `actions:
+  on_enter: { driver: my_driver }
+  on_exit:  { driver: my_driver }
+
+machine:
+  states:
+    active:
+      entry: on_enter
+      exit:  on_exit`
     }
   ];
   function insertSnippet(yaml2) {

@@ -607,6 +607,377 @@ test('adc_read action stub without conversion uses plain analogRead', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bus sensor tests: DS18B20, DHT22, BME280
+// ---------------------------------------------------------------------------
+
+const DS18B20_YAML = `
+pulseir: "1"
+project:
+  name: ds18b20_test
+  version: "1.0"
+
+hardware:
+  buses:
+    probe_bus: { interface: onewire, pin: GPIO4 }
+  devices:
+    water_temp:
+      type: ds18b20
+      bus: probe_bus
+      unit: degC
+
+actions:
+  read_temp: { driver: ds18b20, params: { device: water_temp } }
+
+tasks:
+  poll: { every: 2000, do: read_temp }
+`;
+
+const DHT22_YAML = `
+pulseir: "1"
+project:
+  name: dht22_test
+  version: "1.0"
+
+hardware:
+  devices:
+    air_temp:
+      type: dht22
+      pin: GPIO4
+      measure: temperature
+      unit: degC
+    air_rh:
+      type: dht22
+      pin: GPIO5
+      measure: humidity
+      unit: percent
+
+actions:
+  read_temp: { driver: dht22, params: { device: air_temp } }
+  read_rh:   { driver: dht22, params: { device: air_rh } }
+
+tasks:
+  poll: { every: 2000, do: [read_temp, read_rh] }
+`;
+
+const BME280_YAML = `
+pulseir: "1"
+project:
+  name: bme280_test
+  version: "1.0"
+
+hardware:
+  buses:
+    sensor_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    air_temp:
+      type: bme280
+      bus: sensor_bus
+      address: 0x76
+      measure: temperature
+      unit: degC
+    air_pressure:
+      type: bme280
+      bus: sensor_bus
+      address: 0x76
+      measure: pressure
+      unit: hPa
+
+actions:
+  read_temp:     { driver: bme280, params: { device: air_temp } }
+  read_pressure: { driver: bme280, params: { device: air_pressure } }
+
+tasks:
+  poll: { every: 2000, do: [read_temp, read_pressure] }
+`;
+
+test('ds18b20: includes DallasTemperature library', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, '#include <DallasTemperature.h>');
+});
+
+test('ds18b20: includes OneWire library (from bus)', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, '#include <OneWire.h>');
+});
+
+test('ds18b20: declares object using bus reference', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, 'DallasTemperature water_temp(&probeBus);');
+});
+
+test('ds18b20: calls begin() in setupInterfaces()', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, 'water_temp.begin();');
+});
+
+test('ds18b20: action stub calls requestTemperatures and getTempCByIndex', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, 'water_temp.requestTemperatures();');
+  has(code, 'systemSensors.water_temp = water_temp.getTempCByIndex(0);');
+});
+
+test('ds18b20: has Requires comment', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, 'Requires: DallasTemperature');
+});
+
+test('dht22: includes DHT library', () => {
+  const code = new Codegen().generate(parse(DHT22_YAML));
+  has(code, '#include <DHT.h>');
+});
+
+test('dht22: declares object with pin macro and DHT22 type', () => {
+  const code = new Codegen().generate(parse(DHT22_YAML));
+  has(code, 'DHT air_temp(AIR_TEMP_PIN, DHT22);');
+  has(code, '#define AIR_TEMP_PIN');
+});
+
+test('dht22: temperature action calls readTemperature', () => {
+  const code = new Codegen().generate(parse(DHT22_YAML));
+  has(code, 'systemSensors.air_temp = air_temp.readTemperature();');
+});
+
+test('dht22: humidity action calls readHumidity', () => {
+  const code = new Codegen().generate(parse(DHT22_YAML));
+  has(code, 'systemSensors.air_rh = air_rh.readHumidity();');
+});
+
+test('bme280: includes Adafruit_BME280 library', () => {
+  const code = new Codegen().generate(parse(BME280_YAML));
+  has(code, '#include <Adafruit_BME280.h>');
+});
+
+test('bme280: declares object and calls begin with address', () => {
+  const code = new Codegen().generate(parse(BME280_YAML));
+  has(code, 'Adafruit_BME280 air_temp;');
+  has(code, 'air_temp.begin(0x76);');
+});
+
+test('bme280: temperature action calls readTemperature', () => {
+  const code = new Codegen().generate(parse(BME280_YAML));
+  has(code, 'systemSensors.air_temp = air_temp.readTemperature();');
+});
+
+test('bme280: pressure action calls readPressure and converts to hPa', () => {
+  const code = new Codegen().generate(parse(BME280_YAML));
+  has(code, 'systemSensors.air_pressure = air_pressure.readPressure() / 100.0F;');
+});
+
+// ---------------------------------------------------------------------------
+// Gap 2: Interrupt / ISR wiring
+// ---------------------------------------------------------------------------
+
+const INTERRUPT_YAML = `
+pulseir: "1"
+project:
+  name: interrupt_test
+  version: "1.0"
+
+hardware:
+  devices:
+    button:
+      type: digital_input
+      pin: GPIO2
+      interrupt: FALLING
+      raises: button_pressed
+
+events:
+  button_pressed: { source: external }
+
+actions:
+  on_press: { driver: gpio_control, params: { device: button, value: LOW } }
+
+machine:
+  states:
+    idle:
+    active:
+  transitions:
+    - from: idle
+      on: button_pressed
+      to: active
+    - from: active
+      on: button_pressed
+      to: idle
+`;
+
+console.log('\n⚡ Testing Gap 2: Interrupt / ISR wiring...\n');
+
+test('interrupt: generates IRAM_ATTR ISR function', () => {
+  const code = new Codegen().generate(parse(INTERRUPT_YAML));
+  has(code, 'void IRAM_ATTR isr_button()');
+});
+
+test('interrupt: ISR dispatches the declared event to the FSM', () => {
+  const code = new Codegen().generate(parse(INTERRUPT_YAML));
+  has(code, 'fsm.sendEvent(EVENT_BUTTON_PRESSED)');
+});
+
+test('interrupt: generates attachInterrupt call with mode FALLING', () => {
+  const code = new Codegen().generate(parse(INTERRUPT_YAML));
+  has(code, 'attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), isr_button, FALLING)');
+});
+
+test('interrupt: IRAM_ATTR guard is emitted once (non-ESP32 compat)', () => {
+  const code = new Codegen().generate(parse(INTERRUPT_YAML));
+  has(code, '#ifndef IRAM_ATTR');
+});
+
+test('interrupt: interrupt and raises keys are not emitted as #define macros', () => {
+  const code = new Codegen().generate(parse(INTERRUPT_YAML));
+  hasNot(code, '#define BUTTON_INTERRUPT');
+  hasNot(code, '#define BUTTON_RAISES');
+});
+
+// ---------------------------------------------------------------------------
+// Gap 3: Display support — LCD I2C, OLED I2C, DS3231 RTC
+// ---------------------------------------------------------------------------
+
+const LCD_YAML = `
+pulseir: "1"
+project:
+  name: lcd_test
+  version: "1.0"
+
+hardware:
+  buses:
+    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    display:
+      type: lcd_i2c
+      bus: i2c_bus
+      address: 0x27
+      cols: 16
+      rows: 2
+
+actions:
+  show_status: { driver: lcd_print, params: { device: display, row: 0, col: 0 } }
+  clear_screen: { driver: lcd_clear, params: { device: display } }
+
+tasks:
+  update_display: { every: 1000, do: [clear_screen, show_status] }
+`;
+
+const OLED_YAML = `
+pulseir: "1"
+project:
+  name: oled_test
+  version: "1.0"
+
+hardware:
+  buses:
+    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    screen:
+      type: oled_i2c
+      bus: i2c_bus
+      address: 0x3C
+      width: 128
+      height: 64
+
+actions:
+  draw_status: { driver: oled_print, params: { device: screen, x: 0, y: 0, size: 1 } }
+
+tasks:
+  refresh: { every: 500, do: draw_status }
+`;
+
+const DS3231_YAML = `
+pulseir: "1"
+project:
+  name: rtc_test
+  version: "1.0"
+
+hardware:
+  buses:
+    i2c_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    clock:
+      type: ds3231
+      bus: i2c_bus
+
+actions:
+  read_time: { driver: rtc_read, params: { device: clock } }
+
+tasks:
+  tick: { every: 1000, do: read_time }
+`;
+
+console.log('\n⚡ Testing Gap 3: Display support + RTC...\n');
+
+test('lcd_i2c: includes LiquidCrystal_I2C library', () => {
+  const code = new Codegen().generate(parse(LCD_YAML));
+  has(code, '#include <LiquidCrystal_I2C.h>');
+});
+
+test('lcd_i2c: declares object with address, cols and rows in constructor', () => {
+  const code = new Codegen().generate(parse(LCD_YAML));
+  has(code, 'LiquidCrystal_I2C display(0x27, 16, 2);');
+});
+
+test('lcd_i2c: calls init() and backlight() in setupInterfaces()', () => {
+  const code = new Codegen().generate(parse(LCD_YAML));
+  has(code, 'display.init();');
+  has(code, 'display.backlight();');
+});
+
+test('lcd_i2c: lcd_print action stub calls setCursor', () => {
+  const code = new Codegen().generate(parse(LCD_YAML));
+  has(code, 'display.setCursor(0, 0);');
+});
+
+test('lcd_i2c: lcd_clear action stub calls clear()', () => {
+  const code = new Codegen().generate(parse(LCD_YAML));
+  has(code, 'display.clear();');
+});
+
+test('lcd_i2c: has Requires comment', () => {
+  const code = new Codegen().generate(parse(LCD_YAML));
+  has(code, 'Requires: LiquidCrystal_I2C');
+});
+
+test('oled_i2c: includes Adafruit_SSD1306 library', () => {
+  const code = new Codegen().generate(parse(OLED_YAML));
+  has(code, '#include <Adafruit_SSD1306.h>');
+});
+
+test('oled_i2c: declares object with width, height, Wire and reset in constructor', () => {
+  const code = new Codegen().generate(parse(OLED_YAML));
+  has(code, 'Adafruit_SSD1306 screen(128, 64, &Wire, -1);');
+});
+
+test('oled_i2c: calls begin with SSD1306_SWITCHCAPVCC and address', () => {
+  const code = new Codegen().generate(parse(OLED_YAML));
+  has(code, 'screen.begin(SSD1306_SWITCHCAPVCC, 0x3C);');
+});
+
+test('oled_i2c: oled_print action stub emits clearDisplay, setCursor and display()', () => {
+  const code = new Codegen().generate(parse(OLED_YAML));
+  has(code, 'screen.clearDisplay();');
+  has(code, 'screen.setCursor(0, 0);');
+  has(code, 'screen.display();');
+});
+
+test('ds3231: includes RTClib library', () => {
+  const code = new Codegen().generate(parse(DS3231_YAML));
+  has(code, '#include <RTClib.h>');
+});
+
+test('ds3231: declares RTC_DS3231 object with no constructor args', () => {
+  const code = new Codegen().generate(parse(DS3231_YAML));
+  has(code, 'RTC_DS3231 clock;');
+});
+
+test('ds3231: calls begin() in setupInterfaces()', () => {
+  const code = new Codegen().generate(parse(DS3231_YAML));
+  has(code, 'clock.begin();');
+});
+
+test('ds3231: rtc_read action stub generates commented DateTime example', () => {
+  const code = new Codegen().generate(parse(DS3231_YAML));
+  has(code, '// DateTime now = clock.now();');
+});
+
+// ---------------------------------------------------------------------------
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} backend test(s) failed`);

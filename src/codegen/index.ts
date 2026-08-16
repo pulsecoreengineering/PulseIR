@@ -80,13 +80,118 @@ const ROOT_PATH = '__root';
  * is the boilerplate this project exists to remove.
  *
  * Part types like ds18b20 or bme280 are absent on purpose: they sit on a bus,
- * and the bus owns the initialisation.
+ * and the bus owns the initialisation. Their library objects and begin() calls
+ * are handled by BUS_SENSOR_DEFS below.
  */
 const DEVICE_INTERFACE: Record<string, { interface: string; mode?: string }> = {
   digital_output: { interface: 'gpio', mode: 'OUTPUT' },
   digital_input:  { interface: 'gpio', mode: 'INPUT' },
   pwm_output:     { interface: 'pwm' },
   analog_input:   { interface: 'adc' },
+};
+
+/**
+ * Bus-attached or library-backed sensor/actuator types.
+ *
+ * PulseIR generates the glue: the #include, the object declaration, and the
+ * begin() call. The user installs the named library from the Arduino Library
+ * Manager. The wire protocol stays entirely inside the library.
+ */
+interface BusSensorDef {
+  library: string;      // Library Manager display name
+  include: string;      // Header to include
+  objectClass: string;  // C++ class name
+  reason: string;       // Comment shown in the install list
+  /** How the sensor connects. Controls constructor and init emission. */
+  mountedOn: 'onewire_ref' | 'pin' | 'i2c';
+  /** Constructor type argument, e.g. 'DHT22' for DHT sensors. */
+  typeArg?: string;
+  // i2c-mount customization (all optional; defaults match BME280 behavior)
+  /** Config keys whose values are passed as ctor args in this order. */
+  ctorConfigKeys?: string[];
+  /** Literal strings appended after config ctor args (e.g. '&Wire', '-1'). */
+  ctorLiterals?: string[];
+  /** Initialization method name (default: 'begin'). */
+  beginMethod?: string;
+  /** Constant prepended before address in the begin() call (OLED). */
+  beginPrefix?: string;
+  /** True: no address argument anywhere — begin() called with no args. */
+  noAddress?: boolean;
+  /** Extra method calls emitted after the main init call (e.g. 'backlight()'). */
+  postInit?: string[];
+  /** Hint address shown in TODO when user omits address (e.g. '0x3C' for OLED). */
+  hintAddress?: string;
+}
+
+const BUS_SENSOR_DEFS: Record<string, BusSensorDef> = {
+  ds18b20: {
+    library:     'DallasTemperature',
+    include:     'DallasTemperature.h',
+    objectClass: 'DallasTemperature',
+    reason:      'DS18B20 1-Wire temperature sensor',
+    mountedOn:   'onewire_ref',
+  },
+  dht22: {
+    library:     'DHT sensor library',
+    include:     'DHT.h',
+    objectClass: 'DHT',
+    reason:      'DHT11/DHT22 temperature + humidity',
+    mountedOn:   'pin',
+    typeArg:     'DHT22',
+  },
+  dht11: {
+    library:     'DHT sensor library',
+    include:     'DHT.h',
+    objectClass: 'DHT',
+    reason:      'DHT11/DHT22 temperature + humidity',
+    mountedOn:   'pin',
+    typeArg:     'DHT11',
+  },
+  bme280: {
+    library:     'Adafruit BME280 Library',
+    include:     'Adafruit_BME280.h',
+    objectClass: 'Adafruit_BME280',
+    reason:      'BME280 temperature / humidity / pressure',
+    mountedOn:   'i2c',
+  },
+  lcd_i2c: {
+    library:        'LiquidCrystal_I2C',
+    include:        'LiquidCrystal_I2C.h',
+    objectClass:    'LiquidCrystal_I2C',
+    reason:         'I2C character LCD display',
+    mountedOn:      'i2c',
+    ctorConfigKeys: ['address', 'cols', 'rows'],
+    beginMethod:    'init',
+    postInit:       ['backlight()'],
+    hintAddress:    '0x27',
+  },
+  oled_i2c: {
+    library:        'Adafruit SSD1306',
+    include:        'Adafruit_SSD1306.h',
+    objectClass:    'Adafruit_SSD1306',
+    reason:         'I2C OLED display (SSD1306)',
+    mountedOn:      'i2c',
+    ctorConfigKeys: ['width', 'height'],
+    ctorLiterals:   ['&Wire', '-1'],
+    beginPrefix:    'SSD1306_SWITCHCAPVCC',
+    hintAddress:    '0x3C',
+  },
+  ds3231: {
+    library:     'RTClib',
+    include:     'RTClib.h',
+    objectClass: 'RTC_DS3231',
+    reason:      'DS3231 real-time clock',
+    mountedOn:   'i2c',
+    noAddress:   true,
+  },
+  ds1307: {
+    library:     'RTClib',
+    include:     'RTClib.h',
+    objectClass: 'RTC_DS1307',
+    reason:      'DS1307 real-time clock',
+    mountedOn:   'i2c',
+    noAddress:   true,
+  },
 };
 
 export interface GeneratedFile {
@@ -375,10 +480,193 @@ ${this.generateActionImplementations()}
       ));
     }
 
+    // Library-backed sensors (ds18b20, dht22, bme280 …) generate their own
+    // object declarations and begin() calls via BUS_SENSOR_DEFS.
+    this.indexBusSensors();
+
+    // Interrupt wiring: ISR stubs + attachInterrupt() for digital_input devices
+    // that declare an "interrupt:" field.
+    this.indexInterrupts();
+
     // Declared libraries win, so a model can pin a version or override a header.
     for (const library of this.backend.declaredLibraries(this.project.system.libraries)) {
       this.libraries.set(library.name, library);
     }
+  }
+
+  /**
+   * Generate library includes, object declarations, and begin() calls for
+   * sensor device types defined in BUS_SENSOR_DEFS.
+   *
+   * PulseIR's contract: emit the glue (include + object + init); leave the
+   * wire-protocol implementation to the user's installed library. A
+   * "// Requires:" comment tells the user which package to install.
+   */
+  private indexBusSensors(): void {
+    for (const device of this.project.system.components || []) {
+      const def = BUS_SENSOR_DEFS[device.type || ''];
+      if (!def) continue;
+
+      const config  = device.config || {};
+      const sym     = this.sanitizeUpper(device.name);
+      const objVar  = this.sanitize(device.name);
+
+      const emission: InterfaceEmission = {
+        defines:   [],
+        globals:   [],
+        init:      [],
+        libraries: [{ name: def.library, include: def.include, source: 'registry', reason: def.reason }],
+        todos:     [],
+      };
+
+      if (def.mountedOn === 'onewire_ref') {
+        // DS18B20 — sits on a declared OneWire bus.
+        // The bus resource already generates the OneWire object; we just
+        // construct a DallasTemperature on top of it.
+        const busVar = device.bus ? this.busObjVar(device.bus) : 'oneWireBus';
+        emission.globals.push(
+          `// Requires: ${def.library} — install via Arduino Library Manager`,
+          `${def.objectClass} ${objVar}(&${busVar});`
+        );
+        emission.init.push(`${objVar}.begin();`);
+
+        if (!device.bus) {
+          emission.todos.push(`${device.name}: declare a OneWire bus and reference it with "bus:"`);
+        }
+
+      } else if (def.mountedOn === 'pin') {
+        // DHT22/DHT11 — has its own data pin.
+        const pinRaw   = String(config.pin ?? '');
+        const gpioMat  = /^(?:GPIO|IO)[_-]?(\d+)$/i.exec(pinRaw);
+        const pinLit   = gpioMat ? `${gpioMat[1]}  // ${pinRaw}` : (pinRaw || '/* pin */');
+        const pinMacro = `${sym}_PIN`;
+
+        emission.defines.push(`#define ${pinMacro} ${pinLit}`);
+        emission.globals.push(
+          `// Requires: ${def.library} — install via Arduino Library Manager`,
+          `${def.objectClass} ${objVar}(${pinMacro}${def.typeArg ? `, ${def.typeArg}` : ''});`
+        );
+        emission.init.push(`${objVar}.begin();`);
+
+        if (!config.pin) {
+          emission.todos.push(`${device.name}: add "pin: GPIO<N>" to specify the data pin`);
+        }
+
+      } else if (def.mountedOn === 'i2c') {
+        // I2C-attached device. Behavior varies by def fields; defaults match BME280.
+        const addrNum = config.address !== undefined ? Number(config.address) : undefined;
+        const addrHex = addrNum !== undefined
+          ? `0x${addrNum.toString(16).toUpperCase()}`
+          : undefined;
+
+        // Build constructor argument list from ctorConfigKeys, then ctorLiterals.
+        const ctorParts: string[] = [];
+        for (const key of (def.ctorConfigKeys ?? [])) {
+          if (key === 'address') {
+            ctorParts.push(addrHex ?? (def.hintAddress ?? '0x27') + '  /* TODO: verify address */');
+          } else {
+            const val = config[key];
+            ctorParts.push(val !== undefined ? String(val) : `/* ${key} */`);
+          }
+        }
+        for (const lit of (def.ctorLiterals ?? [])) {
+          ctorParts.push(lit);
+        }
+
+        emission.globals.push(
+          `// Requires: ${def.library} — install via Arduino Library Manager`,
+          `${def.objectClass} ${objVar}${ctorParts.length ? `(${ctorParts.join(', ')})` : ''};`
+        );
+
+        // Build init call.
+        const beginMethod  = def.beginMethod ?? 'begin';
+        const addressInCtor = (def.ctorConfigKeys ?? []).includes('address');
+
+        let initArgs: string;
+        if (def.noAddress) {
+          initArgs = '';  // DS3231/DS1307: begin() with no args
+        } else if (addressInCtor) {
+          initArgs = '';  // LCD: address already in ctor; init() takes no args
+        } else {
+          // BME280 / OLED: address goes into begin()
+          const addr = addrHex ?? (def.hintAddress ?? '0x76');
+          const parts = def.beginPrefix ? [def.beginPrefix, addr] : [addr];
+          initArgs = parts.join(', ');
+        }
+
+        emission.init.push(`${objVar}.${beginMethod}(${initArgs});`);
+        for (const call of (def.postInit ?? [])) {
+          emission.init.push(`${objVar}.${call};`);
+        }
+
+        if (addrNum === undefined && !def.noAddress) {
+          const hint = def.hintAddress ?? '0x76';
+          const detail = (def.ctorConfigKeys ?? []).includes('address')
+            ? `in the ctor — default is ${hint}`
+            : `passed to ${beginMethod}() — default is ${hint}`;
+          emission.todos.push(`${device.name}: verify the I2C address (${detail})`);
+        }
+      }
+
+      this.addEmission(device.name, emission);
+    }
+  }
+
+  /**
+   * Append ISR stubs and attachInterrupt() calls to emissions for digital_input
+   * devices that declare an "interrupt:" config field.
+   *
+   * PulseIR generates the glue — the ISR function and the attachInterrupt call —
+   * and optionally dispatches to the state machine when "raises:" names an event.
+   * The function is marked IRAM_ATTR so it runs from IRAM on ESP32; on other
+   * platforms IRAM_ATTR is defined as an empty macro in the harness.
+   */
+  private indexInterrupts(): void {
+    for (const device of this.project.system.components || []) {
+      if (device.type !== 'digital_input') continue;
+      const config = device.config || {};
+      if (!config.interrupt) continue;
+
+      const existing = this.emissions.get(device.name);
+      if (!existing) continue;
+
+      const mode    = String(config.interrupt).toUpperCase();
+      const sym     = this.sanitizeUpper(device.name);
+      const pin     = `${sym}_PIN`;
+      const isrName = `isr_${this.sanitize(device.name)}`;
+
+      let isrBody: string;
+      const raises = config.raises as string | undefined;
+      if (raises && this.hasMachine) {
+        isrBody = `  fsm.sendEvent(EVENT_${this.sanitizeUpper(raises)});`;
+      } else if (raises) {
+        isrBody = `  // TODO: dispatch EVENT_${this.sanitizeUpper(raises)} when the machine is running`;
+      } else {
+        isrBody = `  // TODO: handle interrupt for ${device.name} (add "raises: EVENT_NAME" to wire it)`;
+      }
+
+      existing.globals.push(
+        '',
+        `// ISR for ${device.name} — fires on ${mode} edge`,
+        `#ifndef IRAM_ATTR`,
+        `#define IRAM_ATTR  // non-ESP32: no IRAM section needed`,
+        `#endif`,
+        `void IRAM_ATTR ${isrName}() {`,
+        isrBody,
+        `}`,
+      );
+
+      existing.init.push(
+        `attachInterrupt(digitalPinToInterrupt(${pin}), ${isrName}, ${mode});`
+      );
+    }
+  }
+
+  /** Convert a bus resource name to the camelCase variable the interface backend generates. */
+  private busObjVar(busName: string): string {
+    return this.sanitizeUpper(busName)
+      .toLowerCase()
+      .replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
   }
 
   private addEmission(name: string, emission: InterfaceEmission): void {
@@ -535,7 +823,14 @@ ${this.defInterfaces()}`;
         interface: DEVICE_INTERFACE[d.type!].interface,
         description: d.description,
       }));
-    return [...buses, ...devices];
+    const busSensors = (this.project.system.components || [])
+      .filter(d => BUS_SENSOR_DEFS[d.type || ''])
+      .map(d => ({
+        name: d.name,
+        interface: d.type!,
+        description: d.description,
+      }));
+    return [...buses, ...devices, ...busSensors];
   }
 
   private declInterfaces(): string {
@@ -1736,6 +2031,104 @@ static void pollCommands() {
           return `  ${field} = (float)${this.backend.digitalReadExpr(pin)};\n  (void)ctx;`;
         }
         break;
+      }
+
+      case 'ds18b20': {
+        const deviceName = String(params.device ?? '');
+        if (this.isSensorComponent(deviceName)) {
+          const objVar = this.sanitize(deviceName);
+          const field  = `systemSensors.${objVar}`;
+          return `  ${objVar}.requestTemperatures();\n  ${field} = ${objVar}.getTempCByIndex(0);\n  (void)ctx;`;
+        }
+        break;
+      }
+
+      case 'dht22':
+      case 'dht11': {
+        const deviceName = String(params.device ?? '');
+        const component  = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (component && this.isSensorComponent(deviceName)) {
+          const objVar  = this.sanitize(deviceName);
+          const field   = `systemSensors.${objVar}`;
+          const measure = String(component.config?.measure ?? 'temperature');
+          const readCall = measure === 'humidity'
+            ? `${objVar}.readHumidity()`
+            : `${objVar}.readTemperature()`;
+          return `  ${field} = ${readCall};\n  if (isnan(${field})) { /* read failed */ }\n  (void)ctx;`;
+        }
+        break;
+      }
+
+      case 'bme280': {
+        const deviceName = String(params.device ?? '');
+        const component  = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (component && this.isSensorComponent(deviceName)) {
+          const objVar  = this.sanitize(deviceName);
+          const field   = `systemSensors.${objVar}`;
+          const measure = String(component.config?.measure ?? 'temperature');
+          let readCall: string;
+          switch (measure) {
+            case 'humidity': readCall = `${objVar}.readHumidity()`; break;
+            case 'pressure': readCall = `${objVar}.readPressure() / 100.0F`; break;
+            default:         readCall = `${objVar}.readTemperature()`; break;
+          }
+          return `  ${field} = ${readCall};\n  (void)ctx;`;
+        }
+        break;
+      }
+
+      case 'lcd_print': {
+        const deviceName = String(params.device ?? '');
+        const device = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (!device) break;
+        const objVar = this.sanitize(deviceName);
+        const col = params.col ?? 0;
+        const row = params.row ?? 0;
+        return [
+          `  ${objVar}.setCursor(${col}, ${row});`,
+          `  // ${objVar}.print("your text");        // literal string`,
+          `  // ${objVar}.print(systemSensors.value); // sensor reading`,
+          `  (void)ctx;`,
+        ].join('\n');
+      }
+
+      case 'lcd_clear': {
+        const deviceName = String(params.device ?? '');
+        const device = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (!device) break;
+        return `  ${this.sanitize(deviceName)}.clear();\n  (void)ctx;`;
+      }
+
+      case 'oled_print': {
+        const deviceName = String(params.device ?? '');
+        const device = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (!device) break;
+        const objVar = this.sanitize(deviceName);
+        const x    = params.x ?? 0;
+        const y    = params.y ?? 0;
+        const size = params.size ?? 1;
+        return [
+          `  ${objVar}.clearDisplay();`,
+          `  ${objVar}.setTextSize(${size});`,
+          `  ${objVar}.setTextColor(SSD1306_WHITE);`,
+          `  ${objVar}.setCursor(${x}, ${y});`,
+          `  // ${objVar}.print("your text");        // literal string`,
+          `  // ${objVar}.print(systemSensors.value); // sensor reading`,
+          `  ${objVar}.display();`,
+          `  (void)ctx;`,
+        ].join('\n');
+      }
+
+      case 'rtc_read': {
+        const deviceName = String(params.device ?? '');
+        const device = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (!device) break;
+        const objVar = this.sanitize(deviceName);
+        return [
+          `  // DateTime now = ${objVar}.now();`,
+          `  // systemSensors.timestamp = (float)now.unixtime();  // Unix seconds`,
+          `  (void)ctx;`,
+        ].join('\n');
       }
 
       case 'pwm_control': {
