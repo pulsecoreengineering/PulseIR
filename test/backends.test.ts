@@ -978,6 +978,246 @@ test('ds3231: rtc_read action stub generates commented DateTime example', () => 
 });
 
 // ---------------------------------------------------------------------------
+// Gap 4 tests: Power management (sleep / wake)
+// ---------------------------------------------------------------------------
+
+const SLEEP_YAML = `
+pulseir: "1"
+project:
+  name: sleep_test
+  version: "1.0"
+
+hardware:
+  devices:
+    btn: { type: digital_input, pin: GPIO0 }
+
+events:
+  wake_up: { source: external }
+
+actions:
+  go_to_sleep:
+    driver: sleep_control
+    params:
+      mode: deep_sleep
+      duration_ms: 10000
+      wake_pin: GPIO0
+      wake_level: 0
+
+machine:
+  states:
+    sleeping:
+      entry: go_to_sleep
+    awake:
+  transitions:
+    - { from: sleeping, on: wake_up, to: awake }
+    - { from: awake,    on: wake_up, to: sleeping }
+`;
+
+const LIGHT_SLEEP_YAML = `
+pulseir: "1"
+project:
+  name: light_sleep_test
+  version: "1.0"
+
+hardware:
+  devices:
+    led: { type: digital_output, pin: GPIO2 }
+
+actions:
+  nap:
+    driver: sleep_control
+    params:
+      mode: light_sleep
+      duration_ms: 500
+
+tasks:
+  tick: { every: 1000, do: nap }
+`;
+
+console.log('\n⚡ Testing Gap 4: Power management (sleep / wake)...\n');
+
+test('sleep_control: deep sleep emits esp_deep_sleep_start', () => {
+  const code = new Codegen().generate(parse(SLEEP_YAML));
+  has(code, 'esp_deep_sleep_start();');
+});
+
+test('sleep_control: timer wakeup uses duration_ms converted to microseconds', () => {
+  const code = new Codegen().generate(parse(SLEEP_YAML));
+  has(code, 'esp_sleep_enable_timer_wakeup(10000ULL * 1000ULL);');
+});
+
+test('sleep_control: GPIO wakeup emits esp_sleep_enable_ext0_wakeup', () => {
+  const code = new Codegen().generate(parse(SLEEP_YAML));
+  has(code, 'esp_sleep_enable_ext0_wakeup((gpio_num_t)GPIO0, 0);');
+});
+
+test('sleep_control: wrapped in #ifdef ARDUINO_ARCH_ESP32 guard', () => {
+  const code = new Codegen().generate(parse(SLEEP_YAML));
+  has(code, '#ifdef ARDUINO_ARCH_ESP32');
+});
+
+test('sleep_control: has fallback TODO for non-ESP32', () => {
+  const code = new Codegen().generate(parse(SLEEP_YAML));
+  has(code, "// TODO: sleep_control is ESP32-only");
+});
+
+test('sleep_control: light sleep emits esp_light_sleep_start', () => {
+  const code = new Codegen().generate(parse(LIGHT_SLEEP_YAML));
+  has(code, 'esp_light_sleep_start();');
+});
+
+test('sleep_control: light sleep does NOT emit deep sleep start', () => {
+  const code = new Codegen().generate(parse(LIGHT_SLEEP_YAML));
+  hasNot(code, 'esp_deep_sleep_start();');
+});
+
+// ---------------------------------------------------------------------------
+// Gap 5 tests: HTTP client & OTA updates
+// ---------------------------------------------------------------------------
+
+const OTA_YAML = `
+pulseir: "1"
+project:
+  name: ota_test
+  version: "1.0"
+
+hardware:
+  buses:
+    net: { interface: wifi, ssid: "MyNetwork" }
+    updater: { interface: ota, hostname: "esp32-device", port: 3232 }
+  devices:
+    led: { type: digital_output, pin: GPIO2 }
+
+tasks:
+  heartbeat: { every: 1000, do: toggle_led }
+
+actions:
+  toggle_led: { driver: gpio_control, params: { device: led } }
+`;
+
+const HTTP_YAML = `
+pulseir: "1"
+project:
+  name: http_test
+  version: "1.0"
+
+hardware:
+  buses:
+    net: { interface: wifi, ssid: "MyNetwork" }
+  devices:
+    led: { type: digital_output, pin: GPIO2 }
+
+events:
+  data_ready: { source: external }
+
+actions:
+  fetch_data:
+    driver: http_get
+    params:
+      url: "http://api.example.com/sensor"
+  send_data:
+    driver: http_post
+    params:
+      url: "http://api.example.com/readings"
+      body: '{"value":42}'
+      content_type: "application/json"
+
+tasks:
+  poll: { every: 5000, do: fetch_data }
+
+machine:
+  states:
+    idle:
+    posting:
+      entry: send_data
+  transitions:
+    - { from: idle,    on: data_ready, to: posting }
+    - { from: posting, on: data_ready, to: idle }
+`;
+
+console.log('\n⚡ Testing Gap 5: HTTP client & OTA updates...\n');
+
+test('ota: includes ArduinoOTA header', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, '#include <ArduinoOTA.h>');
+});
+
+test('ota: calls ArduinoOTA.setHostname in setupInterfaces', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, 'ArduinoOTA.setHostname("esp32-device");');
+});
+
+test('ota: calls ArduinoOTA.setPort in setupInterfaces', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, 'ArduinoOTA.setPort(3232);');
+});
+
+test('ota: calls ArduinoOTA.begin in setupInterfaces', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, 'ArduinoOTA.begin();');
+});
+
+test('ota: wraps init in ESP32/ESP8266 guard', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)');
+});
+
+test('ota: emits ArduinoOTA.handle() in loop()', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, 'ArduinoOTA.handle();');
+});
+
+test('ota: todo reminds user WiFi must be connected first', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, 'WiFi must be connected before ArduinoOTA.begin()');
+});
+
+test('http_get: emits HTTPClient.begin with url', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'http.begin("http://api.example.com/sensor");');
+});
+
+test('http_get: emits http.GET() call', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'int httpCode = http.GET();');
+});
+
+test('http_get: checks HTTP_CODE_OK', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'if (httpCode == HTTP_CODE_OK)');
+});
+
+test('http_get: calls http.end()', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'http.end();');
+});
+
+test('http_post: emits HTTPClient.begin with url', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'http.begin("http://api.example.com/readings");');
+});
+
+test('http_post: emits http.POST with body', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, `http.POST("{\\\"value\\\":42}");`);
+});
+
+test('http_post: sets Content-Type header', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'http.addHeader("Content-Type", "application/json");');
+});
+
+test('http_get/post: includes HTTPClient library header', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, '#include <HTTPClient.h>');
+});
+
+test('http_get: wrapped in ESP32/ESP8266 guard', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)');
+});
+
+// ---------------------------------------------------------------------------
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} backend test(s) failed`);

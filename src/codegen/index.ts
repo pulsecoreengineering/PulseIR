@@ -488,6 +488,9 @@ ${this.generateActionImplementations()}
     // that declare an "interrupt:" field.
     this.indexInterrupts();
 
+    // Action-implied libraries (e.g. HTTPClient when http_get/http_post is used).
+    this.indexActionLibraries();
+
     // Declared libraries win, so a model can pin a version or override a header.
     for (const library of this.backend.declaredLibraries(this.project.system.libraries)) {
       this.libraries.set(library.name, library);
@@ -659,6 +662,41 @@ ${this.generateActionImplementations()}
       existing.init.push(
         `attachInterrupt(digitalPinToInterrupt(${pin}), ${isrName}, ${mode});`
       );
+    }
+  }
+
+  /**
+   * Add action-implied libraries to the library map.
+   * Called after all emissions are indexed so action tables are complete.
+   */
+  private indexActionLibraries(): void {
+    const allDrivers = new Set<string>();
+    const collectFrom = (actions: { driver?: string }[] | undefined) => {
+      for (const a of actions || []) {
+        if (a.driver) allDrivers.add(a.driver);
+      }
+    };
+    // Collect drivers from all possible action sites.
+    const collectState = (state: State) => {
+      collectFrom(state.entry);
+      collectFrom(state.exit);
+      const collectRegion = (states: State[]) => states.forEach(collectState);
+      for (const region of state.regions || []) collectRegion(region.states);
+    };
+    for (const state of this.project.system.states || []) collectState(state);
+    this.project.system.transitions.forEach(t => collectFrom(t.actions));
+    for (const task of this.project.system.tasks || []) collectFrom(task.actions);
+    for (const cmd of this.project.system.commands?.commands || []) collectFrom(cmd.actions);
+
+    if (allDrivers.has('http_get') || allDrivers.has('http_post')) {
+      if (!this.libraries.has('HTTPClient')) {
+        this.libraries.set('HTTPClient', {
+          name: 'HTTPClient',
+          include: 'HTTPClient.h',
+          source: 'builtin',
+          reason: 'HTTP client actions (bundled with ESP32/ESP8266 Arduino core)',
+        });
+      }
     }
   }
 
@@ -2162,6 +2200,89 @@ static void pollCommands() {
         const list = cmds.length ? cmds.join(', ') : '(no commands declared)';
         return `  ${this.backend.printlnExpr(stream, `"Commands: ${list}"`)};` + '\n  (void)ctx;';
       }
+
+      case 'sleep_control': {
+        const mode = String(params.mode ?? 'deep_sleep');
+        const durationMs = params.duration_ms !== undefined ? Number(params.duration_ms) : undefined;
+        const wakePin    = params.wake_pin    !== undefined ? String(params.wake_pin)    : undefined;
+        const wakeLevel  = params.wake_level  !== undefined ? Number(params.wake_level)  : 0;
+
+        const lines: string[] = [
+          '  // Requires: ESP32 Arduino core (sleep APIs are built-in)',
+          '  #ifdef ARDUINO_ARCH_ESP32',
+        ];
+        if (durationMs !== undefined) {
+          lines.push(`    esp_sleep_enable_timer_wakeup(${durationMs}ULL * 1000ULL);  // ${durationMs} ms`);
+        }
+        if (wakePin !== undefined) {
+          lines.push(`    esp_sleep_enable_ext0_wakeup((gpio_num_t)${wakePin}, ${wakeLevel});`);
+        }
+        if (mode === 'light_sleep') {
+          lines.push('    esp_light_sleep_start();');
+        } else {
+          lines.push('    esp_deep_sleep_start();  // does not return');
+        }
+        lines.push(
+          '  #else',
+          `    // TODO: sleep_control is ESP32-only. Add your MCU's low-power call here.`,
+          '  #endif',
+          '  (void)ctx;',
+        );
+        return lines.join('\n');
+      }
+
+      case 'http_get': {
+        // Requires: HTTPClient — bundled with ESP32/ESP8266 Arduino core
+        const url = params.url !== undefined ? JSON.stringify(String(params.url)) : '"http://example.com/api"';
+        return [
+          '  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)',
+          '  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+          '  {',
+          '    HTTPClient http;',
+          `    http.begin(${url});`,
+          '    int httpCode = http.GET();',
+          '    if (httpCode == HTTP_CODE_OK) {',
+          '      String payload = http.getString();',
+          '      // TODO: parse payload',
+          '      (void)payload;',
+          '    }',
+          '    http.end();',
+          '  }',
+          '  #else',
+          '    // TODO: http_get is only available on ESP32/ESP8266.',
+          '  #endif',
+          '  (void)ctx;',
+        ].join('\n');
+      }
+
+      case 'http_post': {
+        // Requires: HTTPClient — bundled with ESP32/ESP8266 Arduino core
+        const url  = params.url  !== undefined ? JSON.stringify(String(params.url))  : '"http://example.com/api"';
+        const body = params.body !== undefined ? JSON.stringify(String(params.body)) : '"{}"';
+        const contentType = params.content_type !== undefined
+          ? JSON.stringify(String(params.content_type))
+          : '"application/json"';
+        return [
+          '  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)',
+          '  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+          '  {',
+          '    HTTPClient http;',
+          `    http.begin(${url});`,
+          `    http.addHeader("Content-Type", ${contentType});`,
+          `    int httpCode = http.POST(${body});`,
+          '    if (httpCode == HTTP_CODE_OK) {',
+          '      String payload = http.getString();',
+          '      // TODO: parse response',
+          '      (void)payload;',
+          '    }',
+          '    http.end();',
+          '  }',
+          '  #else',
+          '    // TODO: http_post is only available on ESP32/ESP8266.',
+          '  #endif',
+          '  (void)ctx;',
+        ].join('\n');
+      }
     }
 
     // Unknown or custom driver — the user writes the body.
@@ -2602,8 +2723,17 @@ static char _mqttPrefix[96];`,
 
   /** Every action the model actually uses, wherever it was used. */
   private everyUsedAction(): Action[] {
+    const stateActions: Action[] = [];
+    const collectState = (state: State) => {
+      for (const a of state.entry || []) stateActions.push(a);
+      for (const a of state.exit  || []) stateActions.push(a);
+      for (const region of state.regions || []) region.states.forEach(collectState);
+    };
+    for (const state of this.project.system.states || []) collectState(state);
+
     return [
       ...this.project.system.transitions.flatMap(t => t.actions || []),
+      ...stateActions,
       ...(this.project.system.tasks || []).flatMap(t => t.actions),
       ...(this.project.system.commands?.commands || []).flatMap(c => c.actions || []),
     ];
@@ -2939,6 +3069,13 @@ ${blocks.join('\n\n')}`;
     // Diagnostics first: watchdog reset must fire every loop without fail.
     if (this.project.system.diagnostics) {
       body.push('  runDiagnostics();');
+    }
+
+    // Interface loop hooks (e.g. ArduinoOTA.handle()) — must run every tick.
+    for (const emission of this.emissions.values()) {
+      if (emission.loop && emission.loop.length > 0) {
+        body.push(...emission.loop);
+      }
     }
 
     // MQTT reconnect + message pump (must come before everything that may
@@ -3284,6 +3421,14 @@ ${implementations.join('\n\n')}`;
     };
 
     this.project.system.transitions.forEach((t, idx) => collect(t.actions, `Transition ${idx}`));
+
+    // State entry/exit actions (inline or from catalogue).
+    const collectState = (state: State) => {
+      collect(state.entry, `State "${state.name}" entry`);
+      collect(state.exit,  `State "${state.name}" exit`);
+      for (const region of state.regions || []) region.states.forEach(collectState);
+    };
+    for (const state of this.project.system.states || []) collectState(state);
 
     // Tasks and commands call actions too, and a machine-less project has
     // nothing but those - miss them and it generates no stubs at all.

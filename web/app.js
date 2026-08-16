@@ -4309,6 +4309,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         "mqtt",
         "eeprom",
         "littlefs",
+        "ota",
         "custom"
       ];
       if (!known.includes(iface)) {
@@ -4793,7 +4794,8 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
     rs485: ["port"],
     mqtt: ["tls"],
     littlefs: ["format_on_fail"],
-    adc: ["unit", "conversion"]
+    adc: ["unit", "conversion"],
+    ota: ["hostname", "port"]
   };
   var KNOWN_KEYS = {
     gpio: ["pin", "pins", "mode"],
@@ -4811,6 +4813,7 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
     ethernet: ["cs", "mac"],
     ble: ["name", "service"],
     mqtt: ["host", "port", "prefix", "tls", "username", "password", "client_id"],
+    ota: ["hostname", "port", "password"],
     custom: []
   };
   var InterfaceBackend = class {
@@ -4947,6 +4950,27 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
           const txExpr = hasTx ? `(gpio_num_t)${sym}_TX` : "(gpio_num_t)4";
           const rxExpr = hasRx ? `(gpio_num_t)${sym}_RX` : "(gpio_num_t)5";
           out.init.push("#ifdef ARDUINO_ARCH_ESP32", `  static const twai_general_config_t ${sym}_g =`, `    TWAI_GENERAL_CONFIG_DEFAULT(${txExpr}, ${rxExpr}, TWAI_MODE_NORMAL);`, `  static const twai_timing_config_t ${sym}_t = ${timingMacro};`, `  static const twai_filter_config_t ${sym}_f = TWAI_FILTER_CONFIG_ACCEPT_ALL();`, `  twai_driver_install(&${sym}_g, &${sym}_t, &${sym}_f);`, "  twai_start();", "#else", `  // TODO: ${resource.name}: add your CAN library initialization here (e.g. MCP2515).`, "#endif");
+          break;
+        }
+        case "ota": {
+          out.libraries.push(BUILTIN("ArduinoOTA", "ArduinoOTA.h", "OTA firmware updates"));
+          const hostname = binding.hostname;
+          const port = binding.port !== void 0 ? Number(binding.port) : void 0;
+          const initLines = [
+            "#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)"
+          ];
+          if (hostname)
+            initLines.push(`  ArduinoOTA.setHostname(${JSON.stringify(hostname)});`);
+          if (port !== void 0)
+            initLines.push(`  ArduinoOTA.setPort(${port});`);
+          initLines.push("  ArduinoOTA.begin();", "#else", `  // TODO: ${resource.name}: ArduinoOTA is only available on ESP32/ESP8266.`, "#endif");
+          out.init.push(...initLines);
+          out.loop = [
+            "#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)",
+            "  ArduinoOTA.handle();",
+            "#endif"
+          ];
+          out.todos.push(`${resource.name}: WiFi must be connected before ArduinoOTA.begin() runs`);
           break;
         }
         default:
@@ -5474,6 +5498,7 @@ ${this.generateActionImplementations()}
       }
       this.indexBusSensors();
       this.indexInterrupts();
+      this.indexActionLibraries();
       for (const library of this.backend.declaredLibraries(this.project.system.libraries)) {
         this.libraries.set(library.name, library);
       }
@@ -5594,6 +5619,43 @@ ${this.generateActionImplementations()}
         }
         existing.globals.push("", `// ISR for ${device.name} \u2014 fires on ${mode} edge`, `#ifndef IRAM_ATTR`, `#define IRAM_ATTR  // non-ESP32: no IRAM section needed`, `#endif`, `void IRAM_ATTR ${isrName}() {`, isrBody, `}`);
         existing.init.push(`attachInterrupt(digitalPinToInterrupt(${pin}), ${isrName}, ${mode});`);
+      }
+    }
+    /**
+     * Add action-implied libraries to the library map.
+     * Called after all emissions are indexed so action tables are complete.
+     */
+    indexActionLibraries() {
+      const allDrivers = /* @__PURE__ */ new Set();
+      const collectFrom = (actions) => {
+        for (const a of actions || []) {
+          if (a.driver)
+            allDrivers.add(a.driver);
+        }
+      };
+      const collectState = (state) => {
+        collectFrom(state.entry);
+        collectFrom(state.exit);
+        const collectRegion = (states) => states.forEach(collectState);
+        for (const region of state.regions || [])
+          collectRegion(region.states);
+      };
+      for (const state of this.project.system.states || [])
+        collectState(state);
+      this.project.system.transitions.forEach((t) => collectFrom(t.actions));
+      for (const task of this.project.system.tasks || [])
+        collectFrom(task.actions);
+      for (const cmd of this.project.system.commands?.commands || [])
+        collectFrom(cmd.actions);
+      if (allDrivers.has("http_get") || allDrivers.has("http_post")) {
+        if (!this.libraries.has("HTTPClient")) {
+          this.libraries.set("HTTPClient", {
+            name: "HTTPClient",
+            include: "HTTPClient.h",
+            source: "builtin",
+            reason: "HTTP client actions (bundled with ESP32/ESP8266 Arduino core)"
+          });
+        }
       }
     }
     /** Convert a bus resource name to the camelCase variable the interface backend generates. */
@@ -6783,6 +6845,76 @@ static void pollCommands() {
           return `  ${this.backend.printlnExpr(stream, `"Commands: ${list}"`)};
   (void)ctx;`;
         }
+        case "sleep_control": {
+          const mode = String(params.mode ?? "deep_sleep");
+          const durationMs = params.duration_ms !== void 0 ? Number(params.duration_ms) : void 0;
+          const wakePin = params.wake_pin !== void 0 ? String(params.wake_pin) : void 0;
+          const wakeLevel = params.wake_level !== void 0 ? Number(params.wake_level) : 0;
+          const lines = [
+            "  // Requires: ESP32 Arduino core (sleep APIs are built-in)",
+            "  #ifdef ARDUINO_ARCH_ESP32"
+          ];
+          if (durationMs !== void 0) {
+            lines.push(`    esp_sleep_enable_timer_wakeup(${durationMs}ULL * 1000ULL);  // ${durationMs} ms`);
+          }
+          if (wakePin !== void 0) {
+            lines.push(`    esp_sleep_enable_ext0_wakeup((gpio_num_t)${wakePin}, ${wakeLevel});`);
+          }
+          if (mode === "light_sleep") {
+            lines.push("    esp_light_sleep_start();");
+          } else {
+            lines.push("    esp_deep_sleep_start();  // does not return");
+          }
+          lines.push("  #else", `    // TODO: sleep_control is ESP32-only. Add your MCU's low-power call here.`, "  #endif", "  (void)ctx;");
+          return lines.join("\n");
+        }
+        case "http_get": {
+          const url = params.url !== void 0 ? JSON.stringify(String(params.url)) : '"http://example.com/api"';
+          return [
+            "  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)",
+            "  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)",
+            "  {",
+            "    HTTPClient http;",
+            `    http.begin(${url});`,
+            "    int httpCode = http.GET();",
+            "    if (httpCode == HTTP_CODE_OK) {",
+            "      String payload = http.getString();",
+            "      // TODO: parse payload",
+            "      (void)payload;",
+            "    }",
+            "    http.end();",
+            "  }",
+            "  #else",
+            "    // TODO: http_get is only available on ESP32/ESP8266.",
+            "  #endif",
+            "  (void)ctx;"
+          ].join("\n");
+        }
+        case "http_post": {
+          const url = params.url !== void 0 ? JSON.stringify(String(params.url)) : '"http://example.com/api"';
+          const body = params.body !== void 0 ? JSON.stringify(String(params.body)) : '"{}"';
+          const contentType = params.content_type !== void 0 ? JSON.stringify(String(params.content_type)) : '"application/json"';
+          return [
+            "  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)",
+            "  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)",
+            "  {",
+            "    HTTPClient http;",
+            `    http.begin(${url});`,
+            `    http.addHeader("Content-Type", ${contentType});`,
+            `    int httpCode = http.POST(${body});`,
+            "    if (httpCode == HTTP_CODE_OK) {",
+            "      String payload = http.getString();",
+            "      // TODO: parse response",
+            "      (void)payload;",
+            "    }",
+            "    http.end();",
+            "  }",
+            "  #else",
+            "    // TODO: http_post is only available on ESP32/ESP8266.",
+            "  #endif",
+            "  (void)ctx;"
+          ].join("\n");
+        }
       }
       return "  // TODO: Implement the hardware calls for this action.\n  (void)ctx;";
     }
@@ -7138,8 +7270,20 @@ static char _mqttPrefix[96];`,
     }
     /** Every action the model actually uses, wherever it was used. */
     everyUsedAction() {
+      const stateActions = [];
+      const collectState = (state) => {
+        for (const a of state.entry || [])
+          stateActions.push(a);
+        for (const a of state.exit || [])
+          stateActions.push(a);
+        for (const region of state.regions || [])
+          region.states.forEach(collectState);
+      };
+      for (const state of this.project.system.states || [])
+        collectState(state);
       return [
         ...this.project.system.transitions.flatMap((t) => t.actions || []),
+        ...stateActions,
         ...(this.project.system.tasks || []).flatMap((t) => t.actions),
         ...(this.project.system.commands?.commands || []).flatMap((c) => c.actions || [])
       ];
@@ -7415,6 +7559,11 @@ ${blocks.join("\n\n")}`;
       if (this.project.system.diagnostics) {
         body.push("  runDiagnostics();");
       }
+      for (const emission of this.emissions.values()) {
+        if (emission.loop && emission.loop.length > 0) {
+          body.push(...emission.loop);
+        }
+      }
       const mqttRes = this.mqttResource();
       if (mqttRes) {
         const client = this.mqttClientVar(mqttRes);
@@ -7645,6 +7794,14 @@ ${implementations.join("\n\n")}`;
         }
       };
       this.project.system.transitions.forEach((t, idx) => collect(t.actions, `Transition ${idx}`));
+      const collectState = (state) => {
+        collect(state.entry, `State "${state.name}" entry`);
+        collect(state.exit, `State "${state.name}" exit`);
+        for (const region of state.regions || [])
+          region.states.forEach(collectState);
+      };
+      for (const state of this.project.system.states || [])
+        collectState(state);
       for (const task of this.project.system.tasks || []) {
         collect(task.actions, `Task "${task.name}"`);
       }
@@ -10508,6 +10665,84 @@ actions:
 
 tasks:
   tick: { every: 1000, do: read_time }`
+    },
+    // ── Power / connectivity ─────────────────────────────────────────────────
+    {
+      group: "Device",
+      label: "Deep sleep  (ESP32 power-down)",
+      yaml: `# Uses the ESP32 Arduino core sleep API \u2014 no extra library needed.
+events:
+  wake_up: { source: external }
+
+hardware:
+  devices:
+    wake_btn: { type: digital_input, pin: GPIO0 }
+
+actions:
+  go_to_sleep:
+    driver: sleep_control
+    params:
+      mode: deep_sleep
+      duration_ms: 30000   # wake after 30 s, or on GPIO0 LOW
+      wake_pin: GPIO0
+      wake_level: 0
+
+machine:
+  states:
+    awake:
+    sleeping:
+      entry: go_to_sleep
+  transitions:
+    - { from: awake,    on: wake_up, to: sleeping }
+    - { from: sleeping, on: wake_up, to: awake }`
+    },
+    {
+      group: "Device",
+      label: "OTA update  (ArduinoOTA over Wi-Fi)",
+      yaml: `# Requires: ArduinoOTA \u2014 bundled with the ESP32/ESP8266 Arduino core.
+# WiFi must be connected before ArduinoOTA.begin() runs.
+hardware:
+  buses:
+    net:
+      interface: wifi
+      ssid: \${WIFI_SSID}
+      password: \${WIFI_PASSWORD}
+    updater:
+      interface: ota
+      hostname: "my-esp32"
+      port: 3232
+
+tasks:
+  heartbeat: { every: 1000, do: blink_led }`
+    },
+    {
+      group: "Device",
+      label: "HTTP GET / POST  (ESP32/ESP8266)",
+      yaml: `# Requires: HTTPClient \u2014 bundled with the ESP32/ESP8266 Arduino core.
+hardware:
+  buses:
+    net:
+      interface: wifi
+      ssid: \${WIFI_SSID}
+      password: \${WIFI_PASSWORD}
+
+events:
+  data_ready: { source: external }
+
+actions:
+  fetch_sensor:
+    driver: http_get
+    params:
+      url: "http://api.example.com/sensor/1"
+  post_reading:
+    driver: http_post
+    params:
+      url: "http://api.example.com/readings"
+      body: '{"value":42}'
+      content_type: "application/json"
+
+tasks:
+  poll: { every: 10000, do: fetch_sensor }`
     },
     // ── Logic ────────────────────────────────────────────────────────────────
     {
