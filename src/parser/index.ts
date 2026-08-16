@@ -509,6 +509,7 @@ export class Parser {
     this.assertLibraryRefs(resources, libraries);
     this.assertBusRefs(components, resources);
     this.assertTimedTransitions(transitions, parameters || []);
+    this.assertPeriodicTransitions(transitions, parameters || []);
     this.assertTaskIntervals(tasks, parameters || []);
     this.assertLogRefs(tasks, commands, parameters || [], components || []);
     this.assertUsable(states, tasks, commands);
@@ -665,22 +666,62 @@ export class Parser {
       const on = entry.on as string | undefined;
       const to = entry.to as StateRef;
       const after = this.parseAfter(entry.after, index);
+      const every = entry.every !== undefined ? this.parseEvery(entry.every, index) : undefined;
 
-      // A transition fires on an event or after a duration - never both, and
-      // never neither, or there is nothing to make it happen.
-      if (on !== undefined && after !== undefined) {
+      // Exactly one trigger: on, after, or every.
+      const triggerCount = (on !== undefined ? 1 : 0) + (after !== undefined ? 1 : 0) + (every !== undefined ? 1 : 0);
+      if (triggerCount > 1) {
         throw new ParseError(
-          `Transition ${index + 1} has both "on" and "after". A transition fires ` +
-          'either when an event arrives or when a duration elapses, not both.'
+          `Transition ${index + 1} has more than one trigger ("on", "after", "every"). ` +
+          'A transition fires on exactly one: an event, a one-shot duration, or a repeating interval.'
         );
       }
-      if (on === undefined && after === undefined) {
+      if (triggerCount === 0) {
         throw new ParseError(
-          `Transition ${index + 1} has neither "on" nor "after", so nothing would ` +
-          'ever make it fire. Use "on: SOME_EVENT" or "after: 5000".'
+          `Transition ${index + 1} has neither "on", "after", nor "every", so nothing would ` +
+          'ever make it fire. Use "on: SOME_EVENT", "after: 5000", or "every: 1000".'
         );
       }
 
+      // `every:` transitions stay in their source state — no `to:` allowed.
+      if (every !== undefined) {
+        if (to !== undefined) {
+          throw new ParseError(
+            `Transition ${index + 1} has both "every" and "to". A periodic transition ` +
+            'runs actions in place without leaving the state, so "to" has no meaning here.'
+          );
+        }
+        if (typeof from !== 'string' || !from.trim()) {
+          throw new ParseError(`Transition ${index + 1} is missing "from"`);
+        }
+        if (from === '*') {
+          throw new ParseError(
+            `Transition ${index + 1} uses "every" from "*". A periodic interval is ` +
+            'measured per-state, so "from" must name a real state.'
+          );
+        }
+        if (!this.hasState(from)) {
+          throw new ParseError(`Transition "from" state "${from}" ${this.describeBadRef(from)}`);
+        }
+        const actions = this.resolveActions(entry.do, catalogue, index);
+        if (!actions?.length) {
+          throw new ParseError(
+            `Transition ${index + 1} uses "every" but has no "do" actions. ` +
+            'A periodic transition needs at least one action to run.'
+          );
+        }
+        return {
+          source: from,
+          every,
+          guard: entry.guard !== undefined && entry.guard !== null
+            ? this.parseGuard(entry.guard)
+            : undefined,
+          actions,
+          description: entry.description as string | undefined,
+        };
+      }
+
+      // Normal event/after transitions require "from" and "to".
       const trigger: Array<readonly [string, unknown]> = on !== undefined
         ? [['from', from], ['on', on], ['to', to]]
         : [['from', from], ['to', to]];
@@ -737,6 +778,28 @@ export class Parser {
         description: entry.description as string | undefined,
       };
     });
+  }
+
+  /**
+   * `every: 1000` or `every: poll_ms`.
+   * Same validation as `after:` but used for periodic in-state transitions.
+   */
+  private parseEvery(raw: unknown, index: number): number | string {
+    if (typeof raw === 'number') {
+      if (!Number.isInteger(raw) || raw <= 0) {
+        throw new ParseError(
+          `Transition ${index + 1} has every: ${raw}. It must be a positive whole ` +
+          'number of milliseconds, or the name of an int parameter.'
+        );
+      }
+      return raw;
+    }
+    if (typeof raw === 'string' && raw.trim()) return raw.trim();
+
+    throw new ParseError(
+      `Transition ${index + 1} has an "every" of type ${typeof raw}. Use a number of ` +
+      'milliseconds, or the name of an int parameter.'
+    );
   }
 
   /**
@@ -1422,6 +1485,30 @@ export class Parser {
     for (const task of tasks) check(task.log, `Task "${task.name}"`);
     for (const command of commands?.commands || []) {
       check(command.log, `Command "${command.match}"`);
+    }
+  }
+
+  /** An `every:` transition naming a parameter must name a real int parameter. */
+  private assertPeriodicTransitions(transitions: Transition[], parameters: Parameter[]): void {
+    const byName = new Map(parameters.map(p => [p.name, p]));
+
+    for (const t of transitions) {
+      if (typeof t.every !== 'string') continue;
+
+      const parameter = byName.get(t.every);
+      if (!parameter) {
+        const known = [...byName.keys()];
+        throw new ParseError(
+          `A periodic transition from "${t.source}" runs every "${t.every}", which is not a declared parameter. ` +
+          (known.length ? `Known parameters: ${known.join(', ')}.` : 'No parameters are declared.')
+        );
+      }
+      if (parameter.type !== 'int') {
+        throw new ParseError(
+          `A periodic transition from "${t.source}" runs every "${t.every}", which is declared as ` +
+          `${parameter.type}. An interval in milliseconds must be an int.`
+        );
+      }
     }
   }
 

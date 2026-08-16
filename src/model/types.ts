@@ -190,8 +190,12 @@ export interface Region {
 
 export interface Transition {
   source: StateRef;
-  target: StateRef;
-  /** What triggers it. Absent only on a timed transition, which has `after`. */
+  /**
+   * Destination state. Absent only on an `every:` periodic transition, which
+   * runs actions in place without leaving the current state.
+   */
+  target?: StateRef;
+  /** What triggers it. Absent on timed (`after`) and periodic (`every`) transitions. */
   event?: EventRef;
   /**
    * Fire this long after entering `source`, with no event at all.
@@ -205,6 +209,14 @@ export interface Transition {
    * escape hatch, which is the wrong direction (PLAN.md §0).
    */
   after?: number | string;
+  /**
+   * Repeat the actions every N ms while the machine stays in `source`.
+   *
+   * Unlike `after:`, there is no state change — only actions run. The clock
+   * uses the same deadline-advance-by-interval logic as `tasks:`, so drift
+   * does not accumulate. One of `event`, `after`, or `every` must be set.
+   */
+  every?: number | string;
   guard?: Guard;
   actions?: Action[];
   description?: string;

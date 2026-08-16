@@ -1,0 +1,54 @@
+# Fixture for "every:" periodic in-state transitions.
+#
+# A machine with both kinds of timed firing:
+#   - "after:" one-shot transition that leaves the state
+#   - "every:" repeating callback that stays in the state and runs actions
+
+project:
+  name: periodic_test
+  version: "1.0"
+
+target:
+  board: esp32
+
+parameters:
+  poll_ms: { type: int, default: 500, range: [50, 5000], unit: ms }
+
+events:
+  START: { source: external }
+  STOP:  { source: external }
+
+actions:
+  sample_sensor: {}
+  log_reading: {}
+  heartbeat: {}
+
+machine:
+  states:
+    idle:
+    monitoring:
+    done:
+
+  transitions:
+    - from: idle
+      on: START
+      to: monitoring
+
+    - from: monitoring
+      on: STOP
+      to: done
+
+    # Periodic: sample every poll_ms ms while monitoring, no state change.
+    - from: monitoring
+      every: poll_ms
+      do: [sample_sensor, log_reading]
+
+    # Literal-interval periodic with a guard.
+    - from: monitoring
+      every: 1000
+      do: heartbeat
+
+    # One-shot timed exit.
+    - from: done
+      after: 250
+      to: idle

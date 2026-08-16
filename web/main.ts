@@ -678,12 +678,14 @@ function renderStructure(project: PulseProject, validation: ValidationResult): s
   // ── Transitions ──────────────────────────────────────────────────────────
   if (system.transitions.length > 0) {
     const rows = system.transitions.map(t => {
-      const targetPath = resolvePath(system.states, t.target);
+      const targetPath = t.target !== undefined ? resolvePath(system.states, t.target) : null;
       const leaf = targetPath ? resolveEntryLeaf(system.states, targetPath) : null;
       const descends = leaf && targetPath && leaf !== targetPath;
-      const target = descends
-        ? `${escapeHtml(t.target)} <span class="arrow">↳</span> <code>${escapeHtml(leaf)}</code>`
-        : escapeHtml(t.target);
+      const target = t.target === undefined
+        ? '<span class="tag">stays</span>'
+        : descends
+          ? `${escapeHtml(t.target)} <span class="arrow">↳</span> <code>${escapeHtml(leaf!)}</code>`
+          : escapeHtml(t.target);
       const guard = t.guard ? `<code>${escapeHtml(t.guard.name)}</code>` : '<span class="dim">—</span>';
       const actions = t.actions?.length
         ? t.actions.map(a => `<code>${escapeHtml(a.name)}</code>`).join(' ')
@@ -693,7 +695,9 @@ function renderStructure(project: PulseProject, validation: ValidationResult): s
         : `<code>${escapeHtml(t.source)}</code>`;
       const trigger = t.event !== undefined
         ? `<code>${escapeHtml(t.event)}</code>`
-        : `<span class="tag timer">after</span> <code>${escapeHtml(String(t.after))}</code>`;
+        : t.every !== undefined
+          ? `<span class="tag timer">every</span> <code>${escapeHtml(String(t.every))}</code>`
+          : `<span class="tag timer">after</span> <code>${escapeHtml(String(t.after))}</code>`;
       return `<tr><td>${src}</td><td>${trigger}</td><td>${target}</td><td>${guard}</td><td>${actions}</td></tr>`;
     }).join('');
     sections.push(`

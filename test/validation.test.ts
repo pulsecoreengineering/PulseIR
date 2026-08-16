@@ -275,7 +275,7 @@ test('accepts a timer on a composite state', () => {
 test('rejects a transition with both "on" and "after"', () => {
   expectReject(
     timed('    - {from: idle, on: GO, after: 500, to: busy}'),
-    'both "on" and "after"',
+    'more than one trigger',
     'two triggers'
   );
 });
@@ -283,7 +283,7 @@ test('rejects a transition with both "on" and "after"', () => {
 test('rejects a transition with neither "on" nor "after"', () => {
   expectReject(
     timed('    - {from: idle, to: busy}'),
-    'neither "on" nor "after"',
+    'neither "on", "after", nor "every"',
     'no trigger'
   );
 });

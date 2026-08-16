@@ -38,13 +38,14 @@ export class DiagramEmitter {
 
     lines.push('');
 
-    // Normal transitions (non-wildcard).
-    const normals  = transitions.filter(t => t.source !== '*');
-    const wilds    = transitions.filter(t => t.source === '*');
+    // Normal transitions (non-wildcard, non-periodic).
+    const normals   = transitions.filter(t => t.source !== '*' && t.every === undefined);
+    const wilds     = transitions.filter(t => t.source === '*');
+    const periodics = transitions.filter(t => t.every !== undefined);
 
     for (const t of normals) {
       const src   = mid(leafOf(t.source));
-      const tgt   = mid(leafOf(t.target));
+      const tgt   = mid(leafOf(t.target!));
       const label = transitionLabel(t);
       lines.push(`${indent}${src} --> ${tgt}${label ? ` : ${label}` : ''}`);
     }
@@ -54,9 +55,21 @@ export class DiagramEmitter {
       lines.push('');
       lines.push(`${indent}%% Wildcard transitions (triggered from any active state):`);
       for (const t of wilds) {
-        const tgt   = mid(leafOf(t.target));
+        const tgt   = mid(leafOf(t.target!));
         const label = transitionLabel(t);
         lines.push(`${indent}%% any --> ${tgt}${label ? ` : ${label}` : ''}`);
+      }
+    }
+
+    // Periodic transitions — no arrow since they stay in the same state.
+    if (periodics.length > 0) {
+      lines.push('');
+      lines.push(`${indent}%% Periodic transitions (every N ms, no state change):`);
+      for (const t of periodics) {
+        const src   = mid(leafOf(t.source));
+        const dur   = typeof t.every === 'string' ? `{${t.every}}` : `${t.every}ms`;
+        const guard = t.guard ? ` [${t.guard.name}]` : '';
+        lines.push(`${indent}%% ${src} every ${dur}${guard}: ${(t.actions || []).map(a => a.name).join(', ')}`);
       }
     }
 

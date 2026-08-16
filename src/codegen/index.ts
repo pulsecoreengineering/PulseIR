@@ -140,6 +140,8 @@ export class Codegen {
   private transitionsBySource: Map<number, number[]> = new Map();
   /** state index → timed ("after") transitions leaving it, in model order */
   private timedBySource: Map<number, number[]> = new Map();
+  /** state index → periodic ("every") transitions, in model order */
+  private periodicBySource: Map<number, number[]> = new Map();
 
   private readonly backend: PlatformBackend;
   /** resource name → what its interface contributes to the sketch */
@@ -329,6 +331,7 @@ ${this.generateActionImplementations()}
     this.actionNames = new Set();
     this.transitionsBySource = new Map();
     this.timedBySource = new Map();
+    this.periodicBySource = new Map();
     this.emissions = new Map();
     this.libraries = new Map();
   }
@@ -960,7 +963,7 @@ ${handlers.join('\n\n')}`;
 
         const t = transitions[idx];
         const guard = this.guards.get(idx);
-        const target = this.states[this.resolveEntry(this.resolveRef(t.target, 'target'))];
+        const target = this.states[this.resolveEntry(this.resolveRef(t.target!, 'target'))];
         const calls = (t.actions || [])
           .map(a => `        action_${this.sanitize(a.name)}(&systemContext);`)
           .join('\n');
@@ -1049,10 +1052,12 @@ ${cases.join('\n')}
         const timed = this.timedBySource.get(flat.index)?.length
           ? this.timerNames(flat)
           : null;
+        const hasPeriodic = (this.periodicBySource.get(flat.index)?.length ?? 0) > 0;
+        const hasUpdate = timed || hasPeriodic;
 
         return `  ${flat.symbol} = fsm.addState(
       "${flat.path}",
-      ${timed ? `${timed.tick},   // update - checks the "after" timers` : 'nullptr,   // update'}
+      ${hasUpdate ? `${this.timerNames(flat).tick},   // update - "after" timers and "every" periodics` : 'nullptr,   // update'}
       ${timed ? `${timed.mark},  // entry - starts the "after" clock` : 'nullptr,   // entry'}
       nullptr,   // exit
       0,         // timeoutMs - unused; see generateTimeouts()
@@ -1960,76 +1965,134 @@ static char _mqttPrefix[96];`,
    * clock, which is exactly the semantics a composite timeout needs.
    */
   private generateTimeouts(): string {
-    if (this.timedBySource.size === 0) return '';
+    if (this.timedBySource.size === 0 && this.periodicBySource.size === 0) return '';
 
     const tsType = this.backend.timestampType();
     const now = this.backend.nowExpr();
     const transitions = this.project.system.transitions;
     const blocks: string[] = [];
 
+    // Collect all states that need an update callback — either timed or periodic.
+    const allSources = new Set([
+      ...this.timedBySource.keys(),
+      ...this.periodicBySource.keys(),
+    ]);
+
     for (const flat of this.states) {
-      const owned = this.timedBySource.get(flat.index);
-      if (!owned || owned.length === 0) continue;
+      if (!allSources.has(flat.index)) continue;
+
+      const timedOwned = this.timedBySource.get(flat.index) || [];
+      const periodicOwned = this.periodicBySource.get(flat.index) || [];
 
       const { since, mark, tick } = this.timerNames(flat);
       const body: string[] = [];
 
+      // "after:" clauses — one-shot timed transitions.
       // Unlike an event handler, an earlier unguarded candidate does NOT
       // shadow the ones after it: they are reached at different elapsed times.
-      // "after 8s, trip" listed before "after 2s, proceed" still lets the
-      // shorter one fire, because at 2s the longer test is simply false.
-      for (const idx of owned) {
-        const t = transitions[idx];
-        const guard = this.guards.get(idx);
-        const target = this.states[this.resolveEntry(this.resolveRef(t.target, 'target'))];
-        const duration = typeof t.after === 'string'
-          ? `(${tsType})systemParameters.${this.sanitize(t.after)}`
-          : `${t.after}UL`;
-        const source = typeof t.after === 'string' ? `${t.after} (parameter)` : `${t.after} ms`;
+      if (timedOwned.length > 0) {
+        const elapsedLine = `  const ${tsType} elapsed = ${now} - ${since};`;
+        const timedBody: string[] = [elapsedLine];
 
-        const calls = (t.actions || [])
-          .map(a => `    action_${this.sanitize(a.name)}(&systemContext);`)
-          .join('\n');
+        for (const idx of timedOwned) {
+          const t = transitions[idx];
+          const guard = this.guards.get(idx);
+          const target = this.states[this.resolveEntry(this.resolveRef(t.target!, 'target'))];
+          const duration = typeof t.after === 'string'
+            ? `(${tsType})systemParameters.${this.sanitize(t.after)}`
+            : `${t.after}UL`;
+          const source = typeof t.after === 'string' ? `${t.after} (parameter)` : `${t.after} ms`;
 
-        const fire = [
-          calls,
-          `    fsm.transitionTo(${target.symbol});`,
-          '    return;',
-        ].filter(Boolean).join('\n');
+          const calls = (t.actions || [])
+            .map(a => `    action_${this.sanitize(a.name)}(&systemContext);`)
+            .join('\n');
 
-        // Guards see the live machine, same as in an event handler.
-        const condition = guard
-          ? `elapsed >= ${duration} && ${guard.fnName}(&systemContext)`
-          : `elapsed >= ${duration}`;
+          const fire = [
+            calls,
+            `    fsm.transitionTo(${target.symbol});`,
+            '    return;',
+          ].filter(Boolean).join('\n');
 
-        body.push(`  // after ${source} -> ${t.target}${guard ? ', if the guard allows' : ''}
+          const condition = guard
+            ? `elapsed >= ${duration} && ${guard.fnName}(&systemContext)`
+            : `elapsed >= ${duration}`;
+
+          timedBody.push(`  // after ${source} -> ${t.target}${guard ? ', if the guard allows' : ''}
   if (${condition}) {
 ${fire}
   }`);
+        }
+        body.push(...timedBody);
       }
 
-      blocks.push(`// Timers for "${flat.path}".
-static ${tsType} ${since} = 0;
+      // "every:" clauses — repeating in-state callbacks.
+      // Uses deadline-advance-by-interval to prevent drift (same as tasks:).
+      if (periodicOwned.length > 0) {
+        for (let i = 0; i < periodicOwned.length; i++) {
+          const idx = periodicOwned[i];
+          const t = transitions[idx];
+          const guard = this.guards.get(idx);
+          const interval = typeof t.every === 'string'
+            ? `(${tsType})systemParameters.${this.sanitize(t.every)}`
+            : `${t.every}UL`;
+          const source = typeof t.every === 'string' ? `${t.every} (parameter)` : `every ${t.every} ms`;
 
-static void ${mark}() {
+          const dueVar = `dueAt_${this.sanitize(flat.path)}_${i}`;
+
+          const calls = (t.actions || [])
+            .map(a => `    action_${this.sanitize(a.name)}(&systemContext);`)
+            .join('\n');
+
+          const guardCheck = guard ? `\n  if (!${guard.fnName}(&systemContext)) { ${dueVar} += _iv_${i}; return; }` : '';
+          const intervalVar = `_iv_${i}`;
+
+          body.push(`  // ${source}
+  {
+    const ${tsType} ${intervalVar} = ${interval};
+    if (${now} - ${dueVar} >= ${intervalVar}) {
+      ${dueVar} += ${intervalVar};
+      if (${now} - ${dueVar} >= ${intervalVar}) ${dueVar} = ${now};${guardCheck}
+${calls}
+    }
+  }`);
+        }
+      }
+
+      // "every:" deadline globals (one per periodic transition; survive state re-entry).
+      const periodicGlobals = periodicOwned.map((_, i) =>
+        `static ${tsType} dueAt_${this.sanitize(flat.path)}_${i} = 0;`
+      ).join('\n');
+
+      const hasTimed = timedOwned.length > 0;
+
+      // Only emit the entry-timestamp global and mark() when "after:" is present.
+      const sinceGlobal = hasTimed ? `static ${tsType} ${since} = 0;\n` : '';
+      const markFn = hasTimed ? `static void ${mark}() {
   ${since} = ${now};
 }
 
-static void ${tick}() {
+` : '';
+
+      blocks.push(`// Update tick for "${flat.path}".
+${sinceGlobal}${periodicGlobals}
+
+${markFn}static void ${tick}() {
   syncContext();
-  const ${tsType} elapsed = ${now} - ${since};
 
 ${body.join('\n\n')}
 }`);
     }
 
     return `// ============================================================================
-// TIMED TRANSITIONS
+// TIMED AND PERIODIC TRANSITIONS
 // ============================================================================
 //
-// Generated from "after:" in the model. Ancestors tick before their active
-// child, so when both a state and its parent time out on the same pass the
-// inner one wins - the same precedence event handling already has.
+// "after:" generates a one-shot timed transition. Ancestors tick before their
+// active child, so when both a state and its parent time out on the same pass
+// the inner one wins - the same precedence event handling already has.
+//
+// "every:" runs actions on a repeating interval while the machine stays in
+// that state. Uses deadline-advance-by-interval to prevent drift.
 //
 // Subtraction on unsigned long is correct across the millis() rollover.
 
@@ -2436,12 +2499,18 @@ ${implementations.join('\n\n')}`;
         sourceIdx = this.resolveRef(t.source, 'source');
       }
 
-      // Validate the target eagerly so errors point at the model, not at C++.
-      this.resolveEntry(this.resolveRef(t.target, 'target'));
+      // Periodic ("every") transitions have no target — they stay in place.
+      // Validate the target only for transitions that actually leave the state.
+      if (t.every === undefined) {
+        this.resolveEntry(this.resolveRef(t.target!, 'target'));
+      }
 
       // Timed transitions never reach an onEvent handler - no event arrives -
       // so they are collected separately and become the state's update tick.
-      const bucket = t.after !== undefined ? this.timedBySource : this.transitionsBySource;
+      // Periodic transitions similarly land in the update tick.
+      const bucket = t.after !== undefined ? this.timedBySource
+                   : t.every !== undefined ? this.periodicBySource
+                   : this.transitionsBySource;
       const list = bucket.get(sourceIdx) || [];
       list.push(idx);
       bucket.set(sourceIdx, list);
