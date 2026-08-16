@@ -111,6 +111,51 @@ export class ArduinoBackend implements PlatformBackend {
     return this.ledcWriteLines(pin, channel, dutyExpr, board);
   }
 
+  httpGetLines(url: string, _board: string): string {
+    return [
+      '  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)',
+      '  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+      '  {',
+      '    HTTPClient http;',
+      `    http.begin(${url});`,
+      '    int httpCode = http.GET();',
+      '    if (httpCode == HTTP_CODE_OK) {',
+      '      String payload = http.getString();',
+      '      // TODO: parse payload',
+      '      (void)payload;',
+      '    }',
+      '    http.end();',
+      '  }',
+      '  #else',
+      '    // TODO: http_get is only available on ESP32/ESP8266.',
+      '  #endif',
+      '  (void)ctx;',
+    ].join('\n');
+  }
+
+  httpPostLines(url: string, body: string, contentType: string, _board: string): string {
+    return [
+      '  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)',
+      '  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+      '  {',
+      '    HTTPClient http;',
+      `    http.begin(${url});`,
+      `    http.addHeader("Content-Type", ${contentType});`,
+      `    int httpCode = http.POST(${body});`,
+      '    if (httpCode == HTTP_CODE_OK) {',
+      '      String payload = http.getString();',
+      '      // TODO: parse response',
+      '      (void)payload;',
+      '    }',
+      '    http.end();',
+      '  }',
+      '  #else',
+      '    // TODO: http_post is only available on ESP32/ESP8266.',
+      '  #endif',
+      '  (void)ctx;',
+    ].join('\n');
+  }
+
   emitInterface(resource: Resource, symbol: string): InterfaceEmission {
     return this.interfaces.emit(resource, symbol);
   }

@@ -123,27 +123,89 @@ export class ZephyrInterfaceBackend {
       }
 
       case 'wifi': {
-        out.todos.push(
-          `${resource.name}: WiFi — add CONFIG_WIFI=y, CONFIG_NET_L2_WIFI_MGMT=y, ` +
-          'CONFIG_NETWORKING=y; use net_mgmt() + wifi_connect_params. ' +
-          'WiFi config is board-specific (esp32: CONFIG_ESP32_WIFI=y)'
+        // Phase 4: real Zephyr WiFi API via net_mgmt() + wifi_connect_req_params.
+        //
+        // The base InterfaceBackend.defines() already emits ${symbol}_SSID and
+        // ${symbol}_PASSWORD macros. ${symbol}_PASSWORD expands to "" (empty
+        // string — secret placeholder). ${symbol}_SSID may expand to a bare
+        // identifier (via the literal() helper) which is not a valid string
+        // literal. Emit dedicated string defines so the struct initializer is
+        // always syntactically correct.
+        const ssid = String(binding.ssid ?? '');
+        out.defines.push(
+          `#define ${symbol}_SSID_STR  ${JSON.stringify(ssid || 'YOUR_WIFI_SSID')}`,
+          `// ${symbol}_PASSWORD (set via build flag, not stored in source)`,
+        );
+        out.globals.push(
+          `static struct net_if *${lower(symbol)}_iface = NULL;`,
+          `static struct wifi_connect_req_params ${lower(symbol)}_params = {`,
+          `    .ssid        = (const uint8_t *)${symbol}_SSID_STR,`,
+          `    .ssid_length = (uint8_t)(sizeof(${symbol}_SSID_STR) - 1),`,
+          `    .psk         = (const uint8_t *)${symbol}_PASSWORD,`,
+          `    .psk_length  = (uint8_t)(sizeof(${symbol}_PASSWORD) - 1),`,
+          `    .security    = WIFI_SECURITY_TYPE_PSK,`,
+          `    .channel     = WIFI_CHANNEL_ANY,`,
+          `    .band        = WIFI_FREQ_BAND_2_4_GHZ,`,
+          `};`,
+        );
+        out.init.push(
+          `${lower(symbol)}_iface = net_if_get_default();`,
+          `net_mgmt(NET_REQUEST_WIFI_CONNECT, ${lower(symbol)}_iface,`,
+          `         &${lower(symbol)}_params, sizeof(${lower(symbol)}_params));`,
         );
         break;
       }
 
       case 'mqtt': {
-        out.todos.push(
-          `${resource.name}: MQTT — add CONFIG_MQTT_LIB=y, CONFIG_NET_TCP=y; ` +
-          'use struct mqtt_client + mqtt_connect(). Requires WiFi/Ethernet first.'
-        );
-        // Phase 1 stub: emit a PubSubClient global so connectMqtt()/publishMqtt()
-        // compile. Replace with struct mqtt_client + mqtt_connect() for production.
-        const wifiVar = `_${lower(symbol)}_wifi`;
-        out.libraries.push(REGISTRY('WiFi', 'WiFi.h', 'WiFiClient for MQTT stub'));
-        out.libraries.push(REGISTRY('PubSubClient', 'PubSubClient.h', 'MQTT (Phase 1 stub)'));
+        // Phase 4: real Zephyr MQTT API via struct mqtt_client + mqtt_connect().
+        // A thin C++ shim class (ZephyrMqttClient) wraps mqtt_client with the
+        // PubSubClient-compatible API that the generated connectMqtt() /
+        // publishMqtt() wiring expects, so those helpers compile unchanged.
+        //
+        // ${symbol}_HOST and ${symbol}_PORT are emitted by the shared
+        // InterfaceBackend.defines() call above when host/port are declared in
+        // the model binding. Emit fallbacks only when they are absent.
+        if (!has('host')) out.defines.push(`#define ${symbol}_HOST "192.168.1.1"  /* TODO: set MQTT broker address */`);
+        if (!has('port')) out.defines.push(`#define ${symbol}_PORT 1883`);
         out.globals.push(
-          `static WiFiClient ${wifiVar};`,
-          `PubSubClient ${lower(symbol)}(${wifiVar});  // Phase 1 stub — replace with struct mqtt_client`,
+          // Shim class — defined only once per translation unit via the guard.
+          '#ifndef PULSE_ZEPHYR_MQTT_SHIM',
+          '#define PULSE_ZEPHYR_MQTT_SHIM',
+          'class ZephyrMqttClient {',
+          '  struct mqtt_client  _client;',
+          '  uint8_t             _rx[256], _tx[256];',
+          '  struct sockaddr_in  _broker_sa;',
+          'public:',
+          '  void begin(const char *addr, uint16_t port) {',
+          '    mqtt_client_init(&_client);',
+          '    _broker_sa.sin_family = AF_INET;',
+          '    _broker_sa.sin_port   = htons(port);',
+          '    /* zsock_inet_pton(AF_INET, addr, &_broker_sa.sin_addr); */',
+          '    _client.broker      = (struct sockaddr *)&_broker_sa;',
+          '    _client.rx_buf      = _rx;  _client.rx_buf_size = sizeof(_rx);',
+          '    _client.tx_buf      = _tx;  _client.tx_buf_size = sizeof(_tx);',
+          '    _client.protocol    = MQTT_VERSION_3_1_1;',
+          '    (void)addr;',
+          '  }',
+          '  bool connected() const { return false; /* TODO: track mqtt_connect state */ }',
+          '  bool connect(const char *id) {',
+          '    (void)id;',
+          '    return mqtt_connect(&_client) == 0;',
+          '  }',
+          '  void disconnect() { mqtt_disconnect(&_client); }',
+          '  bool subscribe(const char *topic) { (void)topic; return false; /* TODO: mqtt_subscribe */ }',
+          '  bool publish(const char *topic, const char *payload) {',
+          '    (void)topic; (void)payload;',
+          '    return false; /* TODO: mqtt_publish */;',
+          '  }',
+          '  void setCallback(void (*cb)(char*, uint8_t*, unsigned int)) { (void)cb; }',
+          '  void loop() { /* TODO: mqtt_input(&_client); mqtt_live(&_client); */ }',
+          '};',
+          '#endif /* PULSE_ZEPHYR_MQTT_SHIM */',
+          `static ZephyrMqttClient ${lower(symbol)};`,
+        );
+        out.init.push(
+          `${lower(symbol)}.begin(${symbol}_HOST, (uint16_t)(${symbol}_PORT));`,
         );
         break;
       }

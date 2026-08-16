@@ -2226,56 +2226,17 @@ static void pollCommands() {
       }
 
       case 'http_get': {
-        // Requires: HTTPClient — bundled with ESP32/ESP8266 Arduino core
-        const url = params.url !== undefined ? JSON.stringify(String(params.url)) : '"http://example.com/api"';
-        return [
-          '  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)',
-          '  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
-          '  {',
-          '    HTTPClient http;',
-          `    http.begin(${url});`,
-          '    int httpCode = http.GET();',
-          '    if (httpCode == HTTP_CODE_OK) {',
-          '      String payload = http.getString();',
-          '      // TODO: parse payload',
-          '      (void)payload;',
-          '    }',
-          '    http.end();',
-          '  }',
-          '  #else',
-          '    // TODO: http_get is only available on ESP32/ESP8266.',
-          '  #endif',
-          '  (void)ctx;',
-        ].join('\n');
+        const url   = params.url !== undefined ? JSON.stringify(String(params.url)) : '"http://example.com/api"';
+        const board = (this.project.target?.board ?? '').toLowerCase();
+        return this.backend.httpGetLines(url, board);
       }
 
       case 'http_post': {
-        // Requires: HTTPClient — bundled with ESP32/ESP8266 Arduino core
-        const url  = params.url  !== undefined ? JSON.stringify(String(params.url))  : '"http://example.com/api"';
-        const body = params.body !== undefined ? JSON.stringify(String(params.body)) : '"{}"';
-        const contentType = params.content_type !== undefined
-          ? JSON.stringify(String(params.content_type))
-          : '"application/json"';
-        return [
-          '  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)',
-          '  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
-          '  {',
-          '    HTTPClient http;',
-          `    http.begin(${url});`,
-          `    http.addHeader("Content-Type", ${contentType});`,
-          `    int httpCode = http.POST(${body});`,
-          '    if (httpCode == HTTP_CODE_OK) {',
-          '      String payload = http.getString();',
-          '      // TODO: parse response',
-          '      (void)payload;',
-          '    }',
-          '    http.end();',
-          '  }',
-          '  #else',
-          '    // TODO: http_post is only available on ESP32/ESP8266.',
-          '  #endif',
-          '  (void)ctx;',
-        ].join('\n');
+        const url         = params.url          !== undefined ? JSON.stringify(String(params.url))          : '"http://example.com/api"';
+        const body        = params.body         !== undefined ? JSON.stringify(String(params.body))         : '"{}"';
+        const contentType = params.content_type !== undefined ? JSON.stringify(String(params.content_type)) : '"application/json"';
+        const board       = (this.project.target?.board ?? '').toLowerCase();
+        return this.backend.httpPostLines(url, body, contentType, board);
       }
     }
 

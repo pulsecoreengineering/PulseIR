@@ -49,6 +49,10 @@ export class ZephyrBackend implements PlatformBackend {
       '#include <zephyr/drivers/gpio.h>',
       '#include <zephyr/drivers/pwm.h>',
       '#include <zephyr/drivers/uart.h>',
+      '#include <zephyr/net/net_if.h>',
+      '#include <zephyr/net/wifi_mgmt.h>',
+      '#include <zephyr/net/mqtt.h>',
+      '#include <zephyr/net/http/client.h>',
       hasMachine ? '#include "PulseHSM.h"' : '',
     ].filter(Boolean);
 
@@ -150,6 +154,58 @@ export class ZephyrBackend implements PlatformBackend {
     // PWM_HZ(freq) = 1_000_000_000 / freq gives period_ns.
     // Duty scale: 0 to (2^resolution - 1).
     return `  pwm_set_dt(&${sym}_PWM, PWM_HZ(${freqMacro}), PWM_HZ(${freqMacro}) * (uint32_t)(${dutyExpr}) / ((1u << ${resMacro}) - 1u));`;
+  }
+
+  httpGetLines(url: string, _board: string): string {
+    // Zephyr HTTP client (CONFIG_HTTP_CLIENT=y). The caller must open a TCP
+    // socket to the server before invoking http_client_req().
+    // Use {} (value-init) not {0}: the first field is an enum, so {0} triggers
+    // -fpermissive, and {0} with -Wmissing-field-initializers is also an error.
+    return [
+      '  {',
+      '    static uint8_t _http_recv[512];',
+      '    struct http_request _http_req;',
+      '    __builtin_memset(&_http_req, 0, sizeof(_http_req));',
+      '    _http_req.method       = HTTP_GET;',
+      `    _http_req.url          = ${url};`,
+      `    _http_req.host         = ${url};  /* TODO: split host from path */`,
+      '    _http_req.protocol     = "HTTP/1.1";',
+      '    _http_req.recv_buf     = _http_recv;',
+      '    _http_req.recv_buf_len = sizeof(_http_recv);',
+      '    /* TODO: open TCP socket to host:80, then call:',
+      '     *   http_client_req(sock, &_http_req, K_SECONDS(3), NULL);',
+      '     *   zsock_close(sock);',
+      '     */',
+      '    (void)_http_req;',
+      '  }',
+      '  (void)ctx;',
+    ].join('\n');
+  }
+
+  httpPostLines(url: string, body: string, contentType: string, _board: string): string {
+    return [
+      '  {',
+      '    static uint8_t _http_recv[512];',
+      `    static const char _http_body[] = ${body};`,
+      '    struct http_request _http_req;',
+      '    __builtin_memset(&_http_req, 0, sizeof(_http_req));',
+      '    _http_req.method             = HTTP_POST;',
+      `    _http_req.url                = ${url};`,
+      `    _http_req.host               = ${url};  /* TODO: split host from path */`,
+      '    _http_req.protocol           = "HTTP/1.1";',
+      `    _http_req.content_type_value = ${contentType};`,
+      '    _http_req.payload            = _http_body;',
+      '    _http_req.payload_len        = sizeof(_http_body) - 1;',
+      '    _http_req.recv_buf           = _http_recv;',
+      '    _http_req.recv_buf_len       = sizeof(_http_recv);',
+      '    /* TODO: open TCP socket to host:80, then call:',
+      '     *   http_client_req(sock, &_http_req, K_SECONDS(3), NULL);',
+      '     *   zsock_close(sock);',
+      '     */',
+      '    (void)_http_req;',
+      '  }',
+      '  (void)ctx;',
+    ].join('\n');
   }
 
   // ── Hardware interfaces ───────────────────────────────────────────────────

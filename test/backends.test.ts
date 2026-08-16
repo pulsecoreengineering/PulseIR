@@ -1584,6 +1584,217 @@ test('Zephyr: pwm_output without frequency defaults to 5000 Hz macro', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Phase 4: WiFi, MQTT, HTTP (Zephyr)
+// ---------------------------------------------------------------------------
+
+const WIFI_YAML = `
+pulseir: "1"
+project:
+  name: wifi_test
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "MyNetwork" }
+tasks:
+  heartbeat: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`;
+
+const WIFI_MQTT_YAML = `
+pulseir: "1"
+project:
+  name: mqtt_test
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "MyNetwork" }
+    broker: { interface: mqtt, host: "192.168.1.100", port: 1883 }
+tasks:
+  heartbeat: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`;
+
+const HTTP_ZEPHYR_YAML = `
+pulseir: "1"
+project:
+  name: http_zephyr
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "MyNetwork" }
+tasks:
+  poll: { every: 5000, do: fetch }
+actions:
+  fetch:
+    driver: http_get
+    params:
+      url: "http://api.example.com/data"
+`;
+
+const HTTP_POST_ZEPHYR_YAML = `
+pulseir: "1"
+project:
+  name: http_post_zephyr
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "MyNetwork" }
+tasks:
+  upload: { every: 10000, do: send }
+actions:
+  send:
+    driver: http_post
+    params:
+      url: "http://api.example.com/data"
+      body: '{"v":1}'
+      content_type: "application/json"
+`;
+
+console.log('\n⚡ Testing Phase 4: WiFi, MQTT, HTTP (Zephyr)...\n');
+
+// ── WiFi ─────────────────────────────────────────────────────────────────────
+
+test('Zephyr: WiFi interface emits net_if pointer global', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, 'struct net_if *uplink_iface');
+});
+
+test('Zephyr: WiFi interface emits wifi_connect_req_params struct', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, 'struct wifi_connect_req_params uplink_params');
+});
+
+test('Zephyr: WiFi init calls net_mgmt with NET_REQUEST_WIFI_CONNECT', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, 'net_mgmt(NET_REQUEST_WIFI_CONNECT');
+});
+
+test('Zephyr: WiFi params reference SSID_STR macro for ssid field', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, '.ssid        = (const uint8_t *)UPLINK_SSID_STR');
+});
+
+test('Zephyr: WiFi params set WIFI_SECURITY_TYPE_PSK', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, '.security    = WIFI_SECURITY_TYPE_PSK');
+});
+
+test('Zephyr: WiFi generated code includes <zephyr/net/wifi_mgmt.h>', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, '#include <zephyr/net/wifi_mgmt.h>');
+});
+
+test('Zephyr: WiFi generated code includes <zephyr/net/net_if.h>', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, '#include <zephyr/net/net_if.h>');
+});
+
+// ── MQTT ─────────────────────────────────────────────────────────────────────
+
+test('Zephyr: MQTT interface emits ZephyrMqttClient shim class', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'class ZephyrMqttClient');
+});
+
+test('Zephyr: MQTT interface emits static ZephyrMqttClient instance', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'static ZephyrMqttClient broker');
+});
+
+test('Zephyr: MQTT shim wraps struct mqtt_client', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'struct mqtt_client  _client');
+});
+
+test('Zephyr: MQTT shim begin() calls mqtt_client_init', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'mqtt_client_init(&_client)');
+});
+
+test('Zephyr: MQTT shim begin() calls mqtt_connect in connect()', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'mqtt_connect(&_client)');
+});
+
+test('Zephyr: MQTT init calls broker.begin() with HOST and PORT macros', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'broker.begin(BROKER_HOST');
+  has(code, 'BROKER_PORT');
+});
+
+test('Zephyr: MQTT generated code includes <zephyr/net/mqtt.h>', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, '#include <zephyr/net/mqtt.h>');
+});
+
+// ── HTTP ─────────────────────────────────────────────────────────────────────
+
+test('Zephyr: http_get action emits struct http_request', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_ZEPHYR_YAML));
+  has(code, 'struct http_request _http_req');
+});
+
+test('Zephyr: http_get action sets HTTP_GET method', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_ZEPHYR_YAML));
+  has(code, '_http_req.method       = HTTP_GET');
+});
+
+test('Zephyr: http_get action sets url from model params', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_ZEPHYR_YAML));
+  has(code, '_http_req.url          = "http://api.example.com/data"');
+});
+
+test('Zephyr: http_get action provides recv_buf', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_ZEPHYR_YAML));
+  has(code, '_http_req.recv_buf     = _http_recv');
+});
+
+test('Zephyr: http_get generated code includes <zephyr/net/http/client.h>', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_ZEPHYR_YAML));
+  has(code, '#include <zephyr/net/http/client.h>');
+});
+
+test('Zephyr: http_post action sets HTTP_POST method', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_POST_ZEPHYR_YAML));
+  has(code, '_http_req.method             = HTTP_POST');
+});
+
+test('Zephyr: http_post action sets body from model params', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_POST_ZEPHYR_YAML));
+  has(code, `static const char _http_body[] = `);
+});
+
+test('Zephyr: http_post action sets content_type_value', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_POST_ZEPHYR_YAML));
+  has(code, '_http_req.content_type_value = "application/json"');
+});
+
+test('Zephyr: http_post action sets payload and payload_len', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_POST_ZEPHYR_YAML));
+  has(code, '_http_req.payload            = _http_body');
+  has(code, '_http_req.payload_len        = sizeof(_http_body) - 1');
+});
+
+// ── prj.conf: CONFIG_HTTP_CLIENT ─────────────────────────────────────────────
+
+test('ZephyrProjectEmitter: prj.conf adds CONFIG_HTTP_CLIENT=y when http_get is declared', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(HTTP_ZEPHYR_YAML));
+  has(files.prjConf, 'CONFIG_HTTP_CLIENT=y');
+});
+
+test('ZephyrProjectEmitter: prj.conf adds CONFIG_HTTP_CLIENT=y when http_post is declared', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(HTTP_POST_ZEPHYR_YAML));
+  has(files.prjConf, 'CONFIG_HTTP_CLIENT=y');
+});
+
+test('ZephyrProjectEmitter: prj.conf does NOT add CONFIG_HTTP_CLIENT when no HTTP actions', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(WIFI_YAML));
+  hasNot(files.prjConf, 'CONFIG_HTTP_CLIENT=y');
+});
+
+// ---------------------------------------------------------------------------
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} backend test(s) failed`);

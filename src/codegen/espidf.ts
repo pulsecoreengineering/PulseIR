@@ -150,6 +150,37 @@ export class EspIdfBackend implements PlatformBackend {
     return this.ledcWriteLines(`${sym}_PIN`, `${sym}_CHANNEL`, dutyExpr, board);
   }
 
+  httpGetLines(url: string, _board: string): string {
+    return [
+      '  // Requires: esp_http_client (CONFIG_ESP_HTTP_CLIENT_ENABLE=y in sdkconfig)',
+      '  {',
+      '    esp_http_client_config_t _cfg = {};',
+      `    _cfg.url = ${url};`,
+      '    esp_http_client_handle_t _client = esp_http_client_init(&_cfg);',
+      '    esp_http_client_perform(_client);',
+      '    esp_http_client_cleanup(_client);',
+      '  }',
+      '  (void)ctx;',
+    ].join('\n');
+  }
+
+  httpPostLines(url: string, body: string, contentType: string, _board: string): string {
+    return [
+      '  // Requires: esp_http_client (CONFIG_ESP_HTTP_CLIENT_ENABLE=y in sdkconfig)',
+      '  {',
+      '    esp_http_client_config_t _cfg = {};',
+      `    _cfg.url    = ${url};`,
+      '    _cfg.method = HTTP_METHOD_POST;',
+      '    esp_http_client_handle_t _client = esp_http_client_init(&_cfg);',
+      `    esp_http_client_set_header(_client, "Content-Type", ${contentType});`,
+      `    esp_http_client_set_post_field(_client, ${body}, (int)strlen(${body}));`,
+      '    esp_http_client_perform(_client);',
+      '    esp_http_client_cleanup(_client);',
+      '  }',
+      '  (void)ctx;',
+    ].join('\n');
+  }
+
   emitInterface(resource: Resource, symbol: string): InterfaceEmission {
     return this.interfaces.emit(resource, symbol);
   }

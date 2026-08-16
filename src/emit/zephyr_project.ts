@@ -29,20 +29,27 @@ export class ZephyrProjectEmitter {
     const hasMachine  = project.system.states.length > 0;
     const resources   = project.system.resources  ?? [];
     const components  = project.system.components ?? [];
-
     // Bus interface types declared in hardware.buses.
     const busIfaces = new Set(resources.map(r => String(r.interface)));
 
-    // Device types declared in hardware.devices (digital_output / digital_input
-    // both use the GPIO driver, so either one enables CONFIG_GPIO).
+    // Device types declared in hardware.devices.
     const deviceTypes = new Set(components.map(c => String(c.type ?? '')));
     const hasGpioDevices =
       deviceTypes.has('digital_output') || deviceTypes.has('digital_input');
     const hasPwmDevices = deviceTypes.has('pwm_output');
 
+    // Collect action driver names from all three action sites (transitions,
+    // tasks, commands) to detect CONFIG_HTTP_CLIENT requirements.
+    const allActionDrivers = new Set<string>([
+      ...project.system.transitions.flatMap(t => (t.actions ?? []).map(a => String(a.driver ?? ''))),
+      ...(project.system.tasks ?? []).flatMap(t => (t.actions ?? []).map(a => String(a.driver ?? ''))),
+      ...(project.system.commands?.commands ?? []).flatMap(c => (c.actions ?? []).map(a => String(a.driver ?? ''))),
+    ]);
+    const hasHttpActions = allActionDrivers.has('http_get') || allActionDrivers.has('http_post');
+
     return {
       cmake:   this.cmake(project.name, hasMachine),
-      prjConf: this.prjConf(busIfaces, hasGpioDevices, hasPwmDevices),
+      prjConf: this.prjConf(busIfaces, hasGpioDevices, hasPwmDevices, hasHttpActions),
       overlay: this.generateOverlay(resources, components),
     };
   }
@@ -65,7 +72,7 @@ export class ZephyrProjectEmitter {
     ].join('\n');
   }
 
-  private prjConf(busIfaces: Set<string>, hasGpioDevices: boolean, hasPwmDevices: boolean): string {
+  private prjConf(busIfaces: Set<string>, hasGpioDevices: boolean, hasPwmDevices: boolean, hasHttpActions: boolean): string {
     const lines: string[] = [
       '# C++ language support',
       'CONFIG_CPP=y',
@@ -109,6 +116,12 @@ export class ZephyrProjectEmitter {
     if (busIfaces.has('mqtt')) {
       add('MQTT client',
         'CONFIG_MQTT_LIB=y',
+        'CONFIG_NET_TCP=y',
+      );
+    }
+    if (hasHttpActions) {
+      add('HTTP client',
+        'CONFIG_HTTP_CLIENT=y',
         'CONFIG_NET_TCP=y',
       );
     }

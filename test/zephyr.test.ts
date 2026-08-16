@@ -322,6 +322,103 @@ test('boiler: pwm_control on pwm_output device uses pwm_set_dt in Phase 3', () =
   assert(code.includes('gpio_dt_spec HEATER_GPIO'), 'heater must retain gpio_dt_spec for gpio_control');
 });
 
+// ── Phase 4: WiFi, MQTT, HTTP ─────────────────────────────────────────────────
+
+test('wifi interface: net_mgmt connect call compiles without errors', () => {
+  const code = generateInline(`
+pulseir: "1"
+project:
+  name: wifi_connect
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "TestNet" }
+tasks:
+  heartbeat: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`);
+  compile('wifi_connect', code);
+  assert(code.includes('struct net_if *uplink_iface'),
+    'WiFi must declare struct net_if pointer');
+  assert(code.includes('NET_REQUEST_WIFI_CONNECT'),
+    'WiFi init must call net_mgmt with NET_REQUEST_WIFI_CONNECT');
+});
+
+test('mqtt interface: ZephyrMqttClient shim compiles without errors', () => {
+  const code = generateInline(`
+pulseir: "1"
+project:
+  name: mqtt_shim
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "TestNet" }
+    broker: { interface: mqtt, host: "192.168.1.100", port: 1883 }
+  devices:
+    temp: { type: analog_input, pin: GPIO34, class: sensor, unit: celsius }
+tasks:
+  heartbeat: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`);
+  compile('mqtt_shim', code);
+  assert(code.includes('class ZephyrMqttClient'),
+    'MQTT interface must emit ZephyrMqttClient shim class');
+  assert(code.includes('mqtt_client_init(&_client)'),
+    'ZephyrMqttClient::begin must call mqtt_client_init');
+});
+
+test('http_get: Zephyr http_client struct-based request compiles without errors', () => {
+  const code = generateInline(`
+pulseir: "1"
+project:
+  name: http_get_zephyr
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "TestNet" }
+tasks:
+  poll: { every: 5000, do: fetch }
+actions:
+  fetch:
+    driver: http_get
+    params:
+      url: "http://api.example.com/data"
+`);
+  compile('http_get_zephyr', code);
+  assert(code.includes('struct http_request _http_req'),
+    'http_get must emit struct http_request');
+  assert(code.includes('_http_req.method       = HTTP_GET'),
+    'http_get must set HTTP_GET method');
+});
+
+test('http_post: Zephyr http_client struct-based POST compiles without errors', () => {
+  const code = generateInline(`
+pulseir: "1"
+project:
+  name: http_post_zephyr
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "TestNet" }
+tasks:
+  upload: { every: 10000, do: send }
+actions:
+  send:
+    driver: http_post
+    params:
+      url: "http://api.example.com/readings"
+      body: '{"v":42}'
+      content_type: "application/json"
+`);
+  compile('http_post_zephyr', code);
+  assert(code.includes('_http_req.method             = HTTP_POST'),
+    'http_post must set HTTP_POST method');
+  assert(code.includes('_http_req.content_type_value = "application/json"'),
+    'http_post must set content_type_value');
+});
+
 // ---------------------------------------------------------------------------
 
 if (failures > 0) {

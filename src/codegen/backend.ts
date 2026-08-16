@@ -113,6 +113,29 @@ export interface PlatformBackend {
    */
   pwmWriteLines(sym: string, freqMacro: string, resMacro: string, dutyExpr: string, board: string): string;
 
+  /**
+   * Multi-line action body for an HTTP GET request.
+   *
+   * url:   fully-qualified URL string, already JSON-escaped and quoted
+   *        (e.g. `'"http://example.com/api"'`).
+   * board: target board string (used by Arduino for arch guard selection).
+   *
+   * Returns the complete body block including `(void)ctx;`.
+   */
+  httpGetLines(url: string, board: string): string;
+
+  /**
+   * Multi-line action body for an HTTP POST request.
+   *
+   * url:         fully-qualified URL string, JSON-escaped and quoted.
+   * body:        request body string, JSON-escaped and quoted.
+   * contentType: MIME type string, JSON-escaped and quoted.
+   * board:       target board string.
+   *
+   * Returns the complete body block including `(void)ctx;`.
+   */
+  httpPostLines(url: string, body: string, contentType: string, board: string): string;
+
   // ── Hardware interfaces ───────────────────────────────────────────────────
 
   /** Translate a declared resource to the lines it contributes to the sketch. */
