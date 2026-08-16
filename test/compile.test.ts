@@ -1430,6 +1430,79 @@ test('diagnostics: emits watchdog and heartbeat setup and loop calls', () => {
 });
 
 // ============================================================================
+// COMMUNICATION
+// ============================================================================
+
+test('communication: stable topic name used in publishMqtt and only listed sensor published', () => {
+  const sketch = generate(path.join(repoRoot, 'test/fixtures/communication.yaml'));
+
+  // publishMqtt must use the stable topic "temp", not the sensor name "temperature".
+  assert(
+    sketch.includes('"/temp"') || sketch.includes('%s/temp"'),
+    'stable topic "temp" not used in publishMqtt'
+  );
+
+  // The unlisted sensor "pressure" must not appear in publishMqtt.
+  const publishIdx = sketch.indexOf('publishMqtt()');
+  if (publishIdx !== -1) {
+    const publishBody = sketch.slice(publishIdx, sketch.indexOf('\n}', publishIdx));
+    assert(!publishBody.includes('pressure'), '"pressure" sensor published despite not being listed in communication.publish');
+  }
+
+  // connectMqtt must subscribe to the stable setpoint topic derived from the parameter name.
+  assert(
+    sketch.includes('/setpoint/setpoint'),
+    'setpoint subscription not wired in connectMqtt'
+  );
+
+  // connectMqtt must subscribe to the event topic for RESET.
+  assert(
+    sketch.includes('/event/RESET') || sketch.includes('/event/reset'),
+    'RESET event subscription not wired in connectMqtt'
+  );
+
+  // onMqttMessage must dispatch RESET.
+  assert(
+    sketch.includes('EVENT_RESET') || sketch.includes('sendEvent'),
+    'RESET event not dispatched in onMqttMessage'
+  );
+});
+
+// ============================================================================
+// SAFETY
+// ============================================================================
+
+test('safety: emits runSafetyChecks at the top of loop and correct rule bodies', () => {
+  const sketch = generate(path.join(repoRoot, 'test/fixtures/safety.yaml'));
+
+  // runSafetyChecks must be called from loop().
+  assert(sketch.includes('runSafetyChecks()'), 'runSafetyChecks() not called from loop()');
+
+  // It must appear BEFORE fsm.update() in the sketch text.
+  const safetyIdx = sketch.indexOf('runSafetyChecks()');
+  const fsmIdx    = sketch.indexOf('fsm.update()');
+  assert(safetyIdx < fsmIdx, 'runSafetyChecks() must come before fsm.update()');
+
+  // Latching latch variable must be declared.
+  assert(sketch.includes('_latch_over_temperature'), 'latch variable not emitted');
+
+  // Guard function called.
+  assert(sketch.includes('guard_over_safe_temp()'), 'guard_over_safe_temp() not called');
+  assert(sketch.includes('guard_low_pressure()'), 'guard_low_pressure() not called');
+
+  // Response actions called with null context.
+  assert(sketch.includes('cut_power(nullptr)'), 'cut_power not called in safety rule');
+  assert(sketch.includes('close_valve(nullptr)'), 'close_valve not called in safety rule');
+  assert(sketch.includes('alert(nullptr)'), 'alert not called in safety rule');
+
+  // Latching rule transitions to safe_shutdown.
+  assert(
+    sketch.includes('S_SAFE_SHUTDOWN'),
+    'transitionTo safe_shutdown not emitted for latching rule'
+  );
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} compile test(s) failed`);

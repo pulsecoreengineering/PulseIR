@@ -1,0 +1,64 @@
+# Fixture for communication: — explicit MQTT publish/subscribe with stable topics.
+#
+# Key points this exercises:
+#   - publish: lists one sensor with a stable topic name ("temp" instead of
+#     "temperature"), proving that renaming the sensor would not break the topic.
+#   - subscribe: lists one parameter and one event whose source is "external"
+#     (not "mqtt"), proving that communication: grants MQTT access independently
+#     of the event's source field.
+#   - Only the listed sensor publishes; "pressure" is declared but not listed so
+#     it must not appear in publishMqtt().
+
+project:
+  name: comm_test
+  version: "1.0"
+
+target:
+  board: esp32
+
+hardware:
+  buses:
+    broker:
+      interface: mqtt
+      host: mqtt.example.com
+      port: 1883
+
+  devices:
+    temperature:
+      type: analog_input
+      pin: GPIO34
+      class: sensor
+    pressure:
+      type: analog_input
+      pin: GPIO35
+      class: sensor
+
+events:
+  START:  { source: external }
+  RESET:  { source: external }
+
+parameters:
+  setpoint:
+    type: float
+    default: 25.0
+    unit: "C"
+
+machine:
+  states:
+    idle:
+    running:
+  transitions:
+    - from: idle
+      on: START
+      to: running
+    - from: running
+      on: RESET
+      to: idle
+
+communication:
+  publish:
+    - sensor: temperature
+      topic: temp
+  subscribe:
+    - parameter: setpoint
+    - event: RESET

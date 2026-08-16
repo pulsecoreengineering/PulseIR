@@ -606,6 +606,264 @@ test('rejects telemetry when a channel has no interval and there is no default',
 });
 
 // ============================================================================
+// COMMUNICATION
+// ============================================================================
+
+function withComm(body: string): string {
+  return `
+project: {name: c, version: "1.0"}
+hardware:
+  buses:
+    broker: {interface: mqtt, host: mqtt.example.com}
+  devices:
+    temperature: {class: sensor, type: analog_input, pin: GPIO34}
+    pressure:    {class: sensor, type: analog_input, pin: GPIO35}
+events:
+  START: {source: external}
+  RESET: {source: external}
+parameters:
+  setpoint: {type: float, default: 25.0}
+machine:
+  states:
+    idle:
+    running:
+  transitions:
+    - {from: idle, on: START, to: running}
+    - {from: running, on: RESET, to: idle}
+${body}
+`;
+}
+
+test('accepts communication with publish and subscribe', () => {
+  const project = expectAccept(withComm(`communication:
+  publish:
+    - sensor: temperature
+      topic: temp
+  subscribe:
+    - parameter: setpoint
+    - event: RESET`), 'full communication block');
+
+  const comm = project.system.communication;
+  if (!comm) throw new Error('communication not parsed');
+  if (comm.publish?.length !== 1 || comm.publish[0].sensor !== 'temperature')
+    throw new Error('publish item not preserved');
+  if (comm.publish[0].topic !== 'temp')
+    throw new Error('stable topic not preserved');
+  if (comm.subscribe?.length !== 2)
+    throw new Error('subscribe items not preserved');
+});
+
+test('rejects communication publish referencing an unknown sensor', () => {
+  expectReject(
+    withComm(`communication:\n  publish:\n    - sensor: humidity`),
+    'not a declared sensor',
+    'unknown sensor'
+  );
+});
+
+test('rejects communication subscribe referencing an unknown parameter', () => {
+  expectReject(
+    withComm(`communication:\n  subscribe:\n    - parameter: target`),
+    'not a declared parameter',
+    'unknown parameter'
+  );
+});
+
+test('rejects communication subscribe referencing an unknown event', () => {
+  expectReject(
+    withComm(`communication:\n  subscribe:\n    - event: STOP`),
+    'not a declared event',
+    'unknown event'
+  );
+});
+
+test('rejects communication subscribe item with neither parameter nor event', () => {
+  expectReject(
+    withComm(`communication:\n  subscribe:\n    - topic: orphan`),
+    'must have "parameter:" or "event:"',
+    'empty subscribe item'
+  );
+});
+
+test('rejects communication subscribe item with both parameter and event', () => {
+  expectReject(
+    withComm(`communication:\n  subscribe:\n    - parameter: setpoint\n      event: RESET`),
+    'cannot have both',
+    'ambiguous subscribe item'
+  );
+});
+
+test('rejects a communication topic segment with illegal characters', () => {
+  expectReject(
+    withComm(`communication:\n  publish:\n    - sensor: temperature\n      topic: "temp/sensor"`),
+    'not allowed in an MQTT segment',
+    'topic with slash'
+  );
+});
+
+test('communication: event can be subscribed regardless of its source field', () => {
+  // RESET has source: external, but listing it in communication.subscribe is valid —
+  // the communication block is the declaration of MQTT access, not the event's source.
+  expectAccept(
+    withComm(`communication:\n  subscribe:\n    - event: RESET`),
+    'external-sourced event in subscribe'
+  );
+});
+
+// ============================================================================
+// SAFETY
+// ============================================================================
+
+function withSafety(body: string): string {
+  return `
+project: {name: s, version: "1.0"}
+hardware:
+  devices:
+    temp: {class: sensor, type: analog_input, pin: GPIO34}
+events:
+  START: {source: external}
+actions:
+  cut_power:   {}
+  alert:       {}
+machine:
+  states:
+    idle:
+    running:
+    safe_shutdown:
+  transitions:
+    - {from: idle, on: START, to: running}
+${body}
+`;
+}
+
+test('accepts a full safety block with latching and non-latching rules', () => {
+  const project = expectAccept(withSafety(`safety:
+  over_temp:
+    check: guard_over_temp
+    severity: critical
+    response: [cut_power]
+    to: safe_shutdown
+    latching: true
+  low_pressure:
+    check: guard_low_pressure
+    severity: warning
+    response: [alert]`), 'full safety block');
+
+  const safety = project.system.safety;
+  if (!safety) throw new Error('safety not parsed');
+  if (safety.rules.length !== 2) throw new Error('expected 2 rules');
+  const r0 = safety.rules[0];
+  if (r0.name !== 'over_temp') throw new Error('rule name not preserved');
+  if (r0.check !== 'guard_over_temp') throw new Error('check not preserved');
+  if (!r0.latching) throw new Error('latching not preserved');
+  if (r0.to !== 'safe_shutdown') throw new Error('to not preserved');
+  if (!r0.response?.includes('cut_power')) throw new Error('response not preserved');
+});
+
+test('rejects safety rule with no check:', () => {
+  expectReject(
+    withSafety(`safety:\n  no_check:\n    response: [cut_power]`),
+    '"check:" is required',
+    'missing check'
+  );
+});
+
+test('rejects safety rule check with illegal C identifier', () => {
+  expectReject(
+    withSafety(`safety:\n  bad:\n    check: "123bad"\n    response: [cut_power]`),
+    'not a valid C identifier',
+    'bad check identifier'
+  );
+});
+
+test('rejects safety rule with an undeclared action in response', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    response: [unknown_action]`),
+    'not a declared action',
+    'unknown response action'
+  );
+});
+
+test('rejects safety rule with an unknown to: state', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    response: [cut_power]\n    to: does_not_exist`),
+    'not a declared state',
+    'unknown to state'
+  );
+});
+
+test('rejects safety rule with to: when there is no machine', () => {
+  expectReject(`
+project: {name: s, version: "1.0"}
+tasks:
+  blink: {every: 500, do: cut_power}
+actions:
+  cut_power: {}
+safety:
+  r:
+    check: guard_x
+    to: somewhere
+    response: [cut_power]
+`, 'requires a state machine', 'to without machine');
+});
+
+test('rejects safety rule with neither response nor to', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x`),
+    'must have at least',
+    'no effect rule'
+  );
+});
+
+test('rejects safety with an unknown severity', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    severity: fatal\n    response: [cut_power]`),
+    '"critical" or "warning"',
+    'unknown severity'
+  );
+});
+
+test('accepts reset_when and restore on a latching rule', () => {
+  const project = expectAccept(withSafety(`safety:
+  over_temp:
+    check: guard_over_temp
+    severity: critical
+    response: [cut_power]
+    latching: true
+    reset_when: guard_temp_normal
+    restore: [alert]`), 'reset_when + restore');
+
+  const rule = project.system.safety?.rules[0];
+  if (!rule) throw new Error('rule not parsed');
+  if (rule.reset_when !== 'guard_temp_normal') throw new Error('reset_when not preserved');
+  if (!rule.restore?.includes('alert')) throw new Error('restore not preserved');
+});
+
+test('rejects reset_when on a non-latching rule', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    response: [cut_power]\n    reset_when: guard_ok`),
+    'only valid when "latching: true"',
+    'reset_when without latching'
+  );
+});
+
+test('rejects restore without reset_when', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    response: [cut_power]\n    latching: true\n    restore: [alert]`),
+    'requires "reset_when:"',
+    'restore without reset_when'
+  );
+});
+
+test('rejects restore with an undeclared action', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    response: [cut_power]\n    latching: true\n    reset_when: guard_ok\n    restore: [no_such_action]`),
+    'not a declared action',
+    'unknown restore action'
+  );
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} validation test(s) failed`);

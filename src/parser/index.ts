@@ -26,9 +26,15 @@ import type {
   Diagnostics,
   Telemetry,
   TelemetryChannel,
+  Communication,
+  CommunicationPublishItem,
+  CommunicationSubscribeItem,
+  Safety,
+  SafetyRule,
 } from '../model/index.js';
 import type { SourceResolver } from './resolver.js';
 import { findPinConflicts, describePinConflict } from '../analysis/pins.js';
+import { loadProfile, checkBoardProfile } from '../analysis/board_profiles.js';
 import { parseTemplate, templateRefs, TemplateError } from '../analysis/template.js';
 
 export interface ParseOptions {
@@ -416,6 +422,21 @@ export class Parser {
       throw new ParseError(fatal.map(describePinConflict).join('\n\n'));
     }
 
+    // Board-profile checks: input-only pins, flash-reserved pins, ADC2+Wi-Fi.
+    // Only runs when a known profile exists for the declared board.
+    if (project.target?.board) {
+      const profile = loadProfile(project.target.board);
+      if (profile) {
+        const violations = checkBoardProfile(project, profile);
+        const errors   = violations.filter(v => v.severity === 'error');
+        const warnings = violations.filter(v => v.severity === 'warning');
+        for (const w of warnings) this.warnings.push(w.message);
+        if (errors.length > 0) {
+          throw new ParseError(errors.map(v => v.message).join('\n\n'));
+        }
+      }
+    }
+
     return project;
   }
 
@@ -532,8 +553,10 @@ export class Parser {
       }
     }
 
-    const diagnostics = this.parseDiagnostics(raw.diagnostics, parameters || []);
-    const telemetry   = this.parseTelemetry(raw.telemetry, components || [], parameters || []);
+    const diagnostics    = this.parseDiagnostics(raw.diagnostics, parameters || []);
+    const telemetry      = this.parseTelemetry(raw.telemetry, components || [], parameters || []);
+    const communication  = this.parseCommunication(raw.communication, components || [], events, parameters || []);
+    const safety         = this.parseSafety(raw.safety, actionCatalogue, states);
 
     return {
       name: (raw.name as string) || ((raw.project as Record<string, unknown>)?.name as string) || 'unnamed',
@@ -549,6 +572,8 @@ export class Parser {
       libraries,
       diagnostics,
       telemetry,
+      communication,
+      safety,
     };
   }
 
@@ -933,6 +958,152 @@ export class Parser {
     };
   }
 
+  private parseSafety(
+    raw: unknown,
+    actionCatalogue: Map<string, Action>,
+    states: State[]
+  ): Safety | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (!isPlainObject(raw)) {
+      throw new ParseError('safety: must be a mapping of named rules (e.g. over_temperature: ...)');
+    }
+
+    const hasMachine = states.length > 0;
+    const rules: SafetyRule[] = [];
+
+    for (const [name, def] of Object.entries(raw as Record<string, unknown>)) {
+      if (!isPlainObject(def)) {
+        throw new ParseError(`safety.${name}: must be a mapping (check:, response:, to:, ...)`);
+      }
+      const d = def as Record<string, unknown>;
+
+      // check: required C guard function name
+      if (typeof d.check !== 'string' || !d.check) {
+        throw new ParseError(`safety.${name}: "check:" is required and must name a C guard function`);
+      }
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(d.check)) {
+        throw new ParseError(
+          `safety.${name}.check: "${d.check}" is not a valid C identifier`
+        );
+      }
+
+      // severity
+      let severity: 'critical' | 'warning' | undefined;
+      if (d.severity !== undefined) {
+        if (d.severity !== 'critical' && d.severity !== 'warning') {
+          throw new ParseError(
+            `safety.${name}.severity: must be "critical" or "warning", got "${d.severity}"`
+          );
+        }
+        severity = d.severity as 'critical' | 'warning';
+      }
+
+      // response: list of declared action names
+      let response: string[] | undefined;
+      if (d.response !== undefined) {
+        const rawList = this.asList(d.response, `safety.${name}.response`);
+        if (!rawList) throw new ParseError(`safety.${name}.response must be a list`);
+        response = rawList.map((item, i) => {
+          if (typeof item !== 'string') {
+            throw new ParseError(`safety.${name}.response[${i}] must be an action name`);
+          }
+          if (!actionCatalogue.has(item)) {
+            const avail = [...actionCatalogue.keys()].join(', ') || '(none declared)';
+            throw new ParseError(
+              `safety.${name}.response: "${item}" is not a declared action. Available: ${avail}`
+            );
+          }
+          return item;
+        });
+      }
+
+      // to: target state name
+      let to: string | undefined;
+      if (d.to !== undefined) {
+        to = String(d.to);
+        if (!hasMachine) {
+          throw new ParseError(
+            `safety.${name}.to: "${to}" requires a state machine (machine: with states)`
+          );
+        }
+        if (!this.stateNames.has(to)) {
+          const avail = [...this.stateNames].join(', ') || '(none)';
+          throw new ParseError(
+            `safety.${name}.to: "${to}" is not a declared state. Declared: ${avail}`
+          );
+        }
+      }
+
+      // Must have at least one effect
+      if (!response?.length && !to) {
+        throw new ParseError(
+          `safety.${name}: must have at least "response:" (actions) or "to:" (transition)`
+        );
+      }
+
+      const rule: SafetyRule = { name, check: d.check };
+      if (d.description !== undefined) rule.description = String(d.description);
+      if (severity !== undefined) rule.severity = severity;
+      if (response?.length) rule.response = response;
+      if (to !== undefined) rule.to = to;
+
+      const isLatching = d.latching === true || d.latching === 'true';
+      if (isLatching) rule.latching = true;
+
+      // reset_when / restore — only meaningful for latching rules.
+      if (d.reset_when !== undefined) {
+        if (!isLatching) {
+          throw new ParseError(
+            `safety.${name}.reset_when: only valid when "latching: true"`
+          );
+        }
+        const rw = String(d.reset_when);
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(rw)) {
+          throw new ParseError(
+            `safety.${name}.reset_when: "${rw}" is not a valid C identifier`
+          );
+        }
+        rule.reset_when = rw;
+      }
+
+      if (d.restore !== undefined) {
+        if (!isLatching) {
+          throw new ParseError(
+            `safety.${name}.restore: only valid when "latching: true"`
+          );
+        }
+        if (rule.reset_when === undefined) {
+          throw new ParseError(
+            `safety.${name}.restore: requires "reset_when:" — restore actions only fire when the latch clears`
+          );
+        }
+        const rawRestore = this.asList(d.restore, `safety.${name}.restore`);
+        if (!rawRestore) throw new ParseError(`safety.${name}.restore must be a list`);
+        const restore = rawRestore.map((item, i) => {
+          if (typeof item !== 'string') {
+            throw new ParseError(`safety.${name}.restore[${i}] must be an action name`);
+          }
+          if (!actionCatalogue.has(item)) {
+            const avail = [...actionCatalogue.keys()].join(', ') || '(none declared)';
+            throw new ParseError(
+              `safety.${name}.restore: "${item}" is not a declared action. Available: ${avail}`
+            );
+          }
+          return item;
+        });
+        if (restore.length) rule.restore = restore;
+      }
+
+      rules.push(rule);
+    }
+
+    if (rules.length === 0) {
+      throw new ParseError('safety: declared with no rules — add at least one named rule');
+    }
+
+    return { rules };
+  }
+
   private parseDiagnostics(raw: unknown, parameters: Parameter[]): Diagnostics | undefined {
     if (raw === undefined || raw === null) return undefined;
     if (!isPlainObject(raw)) {
@@ -1038,6 +1209,119 @@ export class Parser {
 
     this.assertTelemetryIntervals({ interval_ms, topic_prefix, channels }, parameters);
     return { interval_ms, topic_prefix, channels };
+  }
+
+  private parseCommunication(
+    raw: unknown,
+    components: Component[],
+    events: Event[],
+    parameters: Parameter[]
+  ): Communication | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (!isPlainObject(raw)) {
+      throw new ParseError('communication: must be a mapping (publish:, subscribe:)');
+    }
+
+    const sensorNames = new Set(
+      components.filter(c => String(c.class) === 'sensor').map(c => c.name)
+    );
+    const paramNames  = new Set(parameters.map(p => p.name));
+    const eventNames  = new Set(events.map(e => e.name));
+
+    const validTopicSeg = (topic: string, where: string): void => {
+      if (!/^[A-Za-z0-9_.-]+$/.test(topic)) {
+        throw new ParseError(
+          `${where} topic "${topic}" contains characters not allowed in an MQTT segment ` +
+          '(use only A-Z a-z 0-9 _ . -)'
+        );
+      }
+    };
+
+    let publish: CommunicationPublishItem[] | undefined;
+    if (raw.publish !== undefined) {
+      const rawList = this.asList(raw.publish, 'communication.publish');
+      if (!rawList) throw new ParseError('communication.publish must be a list');
+      publish = rawList.map((item, i) => {
+        if (!isPlainObject(item)) {
+          throw new ParseError(`communication.publish[${i}] must be a mapping with "sensor:"`);
+        }
+        const d = item as Record<string, unknown>;
+        if (typeof d.sensor !== 'string' || !d.sensor) {
+          throw new ParseError(`communication.publish[${i}] must have a "sensor:" field`);
+        }
+        if (!sensorNames.has(d.sensor)) {
+          const avail = [...sensorNames].join(', ') || '(none declared)';
+          throw new ParseError(
+            `communication.publish sensor "${d.sensor}" is not a declared sensor component. ` +
+            `Available: ${avail}`
+          );
+        }
+        const out: CommunicationPublishItem = { sensor: d.sensor };
+        if (d.topic !== undefined) {
+          const t = String(d.topic);
+          validTopicSeg(t, `communication.publish[${i}]`);
+          out.topic = t;
+        }
+        return out;
+      });
+    }
+
+    let subscribe: CommunicationSubscribeItem[] | undefined;
+    if (raw.subscribe !== undefined) {
+      const rawList = this.asList(raw.subscribe, 'communication.subscribe');
+      if (!rawList) throw new ParseError('communication.subscribe must be a list');
+      subscribe = rawList.map((item, i) => {
+        if (!isPlainObject(item)) {
+          throw new ParseError(
+            `communication.subscribe[${i}] must be a mapping with "parameter:" or "event:"`
+          );
+        }
+        const d = item as Record<string, unknown>;
+        const param = d.parameter !== undefined ? String(d.parameter) : undefined;
+        const event = d.event !== undefined ? String(d.event) : undefined;
+        if (!param && !event) {
+          throw new ParseError(
+            `communication.subscribe[${i}] must have "parameter:" or "event:"`
+          );
+        }
+        if (param && event) {
+          throw new ParseError(
+            `communication.subscribe[${i}] cannot have both "parameter:" and "event:" — split into two items`
+          );
+        }
+        if (param !== undefined && !paramNames.has(param)) {
+          const avail = [...paramNames].join(', ') || '(none declared)';
+          throw new ParseError(
+            `communication.subscribe parameter "${param}" is not a declared parameter. Available: ${avail}`
+          );
+        }
+        if (event !== undefined && !eventNames.has(event)) {
+          const avail = [...eventNames].join(', ') || '(none declared)';
+          throw new ParseError(
+            `communication.subscribe event "${event}" is not a declared event. Available: ${avail}`
+          );
+        }
+        const out: CommunicationSubscribeItem = {};
+        if (param !== undefined) out.parameter = param;
+        if (event !== undefined) out.event = event;
+        if (d.topic !== undefined) {
+          const t = String(d.topic);
+          validTopicSeg(t, `communication.subscribe[${i}]`);
+          out.topic = t;
+        }
+        return out;
+      });
+    }
+
+    if (!publish?.length && !subscribe?.length) {
+      this.warnings.push('communication: declared with no publish: or subscribe: — has no effect');
+      return undefined;
+    }
+
+    return {
+      ...(publish?.length ? { publish } : {}),
+      ...(subscribe?.length ? { subscribe } : {}),
+    };
   }
 
   /** Validate that heartbeat interval references a declared int parameter. */

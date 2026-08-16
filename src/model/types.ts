@@ -398,6 +398,88 @@ export interface Telemetry {
   channels: TelemetryChannel[];
 }
 
+/** One sensor to publish in the `communication.publish` list. */
+export interface CommunicationPublishItem {
+  /** Name of a declared sensor component. */
+  sensor: string;
+  /** Stable MQTT topic segment. Defaults to the sensor name. */
+  topic?: string;
+}
+
+/** One entry in the `communication.subscribe` list — either a parameter setpoint or an event trigger. */
+export interface CommunicationSubscribeItem {
+  /** Name of a declared parameter to expose as a remotely-settable setpoint. */
+  parameter?: string;
+  /** Name of a declared event to allow triggering via MQTT. */
+  event?: string;
+  /** Stable MQTT topic segment. Defaults to the parameter/event name. */
+  topic?: string;
+}
+
+/**
+ * Explicit MQTT communication contract.
+ *
+ * Without this block the codegen publishes every sensor and subscribes every
+ * parameter and every mqtt-sourced event. With it only the listed items are
+ * wired, and each carries an optional stable `topic:` segment so renaming the
+ * underlying sensor or parameter never silently breaks a dashboard.
+ *
+ * Machine state is always published when a state machine is declared — it does
+ * not need to appear in `publish`.
+ */
+export interface Communication {
+  /** Sensor readings to publish over MQTT. */
+  publish?: CommunicationPublishItem[];
+  /** Setpoints (parameters) and event triggers to subscribe. */
+  subscribe?: CommunicationSubscribeItem[];
+}
+
+/** One named safety rule: a C guard that is checked every loop iteration. */
+export interface SafetyRule {
+  /** Rule name (from the YAML key). */
+  name: string;
+  /** C guard function returning true when the condition is unsafe. */
+  check: string;
+  /** Human-readable description, reproduced as a comment in the generated code. */
+  description?: string;
+  /** Severity for documentation; does not affect code generation. */
+  severity?: 'critical' | 'warning';
+  /** Actions to invoke when the check fires. Called with a null context. */
+  response?: string[];
+  /** Target state to transition to when the check fires. Requires a machine. */
+  to?: string;
+  /** Once triggered, keeps acting on every loop even if check returns false. */
+  latching?: boolean;
+  /**
+   * C guard function that clears a latching fault when it returns true.
+   * Checked before the trip guard each loop, so hysteresis is expressed
+   * purely in C (e.g. trip at >75°C, reset at <60°C).
+   * Only valid when `latching: true`.
+   */
+  reset_when?: string;
+  /**
+   * Actions to call when a latching fault clears via `reset_when`.
+   * Called with a null context, in order, before the trip guard is re-checked.
+   * Only valid when `latching: true` and `reset_when` is set.
+   */
+  restore?: string[];
+}
+
+/**
+ * Pre-dispatch safety policy.
+ *
+ * `runSafetyChecks()` runs at the very top of `loop()`, before the HSM tick,
+ * so a critical fault preempts normal event dispatch regardless of which leaf
+ * state the machine is currently in.
+ *
+ * Conditions are named C guards — you write the comparison, the model owns
+ * the policy (severity, response actions, target state, latching behaviour).
+ * This keeps expression evaluation out of the YAML and the check testable.
+ */
+export interface Safety {
+  rules: SafetyRule[];
+}
+
 export interface PulseSystem {
   name: string;
   version?: string;
@@ -424,6 +506,10 @@ export interface PulseSystem {
   diagnostics?: Diagnostics;
   /** Selective MQTT publishing per sensor, each with its own interval. */
   telemetry?: Telemetry;
+  /** Explicit MQTT publish/subscribe contract with stable topic names. */
+  communication?: Communication;
+  /** Pre-dispatch safety rules checked at the top of every loop() iteration. */
+  safety?: Safety;
 
   metadata?: Metadata;
 }

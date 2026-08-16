@@ -102,23 +102,42 @@ export class TopicEmitter {
 
   private publishTopics(project: PulseProject, prefix: string): PublishTopic[] {
     const topics: PublishTopic[] = [];
+    const comm = project.system.communication;
 
-    // One topic per sensor component. Readings are numeric, matching the
-    // SystemSensors struct codegen generates from these same components.
-    for (const component of project.system.components || []) {
-      if (String(component.class) !== 'sensor') continue;
-
-      const leaf = this.segment(component.name, 'sensor');
-      const unit = component.config?.unit;
-
-      topics.push({
-        topic: `${prefix}/${leaf}`,
-        kind: 'sensor',
-        valueType: 'float',
-        source: component.name,
-        driver: component.driver,
-        ...(typeof unit === 'string' ? { unit } : {}),
-      });
+    if (comm?.publish !== undefined) {
+      // Explicit communication block: only the listed sensors, with stable topic names.
+      const componentMap = new Map(
+        (project.system.components || []).map(c => [c.name, c])
+      );
+      for (const item of comm.publish) {
+        const component = componentMap.get(item.sensor);
+        if (!component) continue; // parser already validated
+        const leaf = this.segment(item.topic ?? item.sensor, 'sensor');
+        const unit = component.config?.unit;
+        topics.push({
+          topic: `${prefix}/${leaf}`,
+          kind: 'sensor',
+          valueType: 'float',
+          source: item.sensor,
+          driver: component.driver,
+          ...(typeof unit === 'string' ? { unit } : {}),
+        });
+      }
+    } else {
+      // Implicit: all sensor components publish.
+      for (const component of project.system.components || []) {
+        if (String(component.class) !== 'sensor') continue;
+        const leaf = this.segment(component.name, 'sensor');
+        const unit = component.config?.unit;
+        topics.push({
+          topic: `${prefix}/${leaf}`,
+          kind: 'sensor',
+          valueType: 'float',
+          source: component.name,
+          driver: component.driver,
+          ...(typeof unit === 'string' ? { unit } : {}),
+        });
+      }
     }
 
     // The machine only ever rests in a leaf state, so those are the only
@@ -139,39 +158,70 @@ export class TopicEmitter {
 
   private subscribeTopics(project: PulseProject, prefix: string): SubscribeTopic[] {
     const topics: SubscribeTopic[] = [];
+    const comm = project.system.communication;
 
-    // Parameters are the writable tunables. The IR knows their type, unit and
-    // range, which is what a dashboard needs to render a bounded control -
-    // information a hand-written `float spTemp = 30.0;` throws away.
-    for (const parameter of project.system.parameters || []) {
-      const leaf = this.segment(parameter.name, 'parameter');
+    if (comm?.subscribe !== undefined) {
+      // Explicit communication block: only listed items, with stable topic names.
+      const paramMap = new Map((project.system.parameters || []).map(p => [p.name, p]));
+      const eventMap = new Map((project.system.events || []).map(e => [e.name, e]));
 
-      topics.push({
-        topic: `${prefix}/setpoint/${leaf}`,
-        kind: 'setpoint',
-        valueType: this.valueType(parameter.type),
-        parameter: parameter.name,
-        ...(parameter.unit !== undefined ? { unit: parameter.unit } : {}),
-        ...(parameter.default !== undefined ? { default: parameter.default } : {}),
-        ...(parameter.min !== undefined ? { min: parameter.min } : {}),
-        ...(parameter.max !== undefined ? { max: parameter.max } : {}),
-        ...(parameter.description !== undefined ? { description: parameter.description } : {}),
-      });
-    }
+      for (const item of comm.subscribe) {
+        if (item.parameter !== undefined) {
+          const parameter = paramMap.get(item.parameter);
+          if (!parameter) continue;
+          const leaf = this.segment(item.topic ?? item.parameter, 'parameter');
+          topics.push({
+            topic: `${prefix}/setpoint/${leaf}`,
+            kind: 'setpoint',
+            valueType: this.valueType(parameter.type),
+            parameter: item.parameter,
+            ...(parameter.unit !== undefined ? { unit: parameter.unit } : {}),
+            ...(parameter.default !== undefined ? { default: parameter.default } : {}),
+            ...(parameter.min !== undefined ? { min: parameter.min } : {}),
+            ...(parameter.max !== undefined ? { max: parameter.max } : {}),
+            ...(parameter.description !== undefined ? { description: parameter.description } : {}),
+          });
+        } else if (item.event !== undefined) {
+          const event = eventMap.get(item.event);
+          if (!event) continue;
+          topics.push({
+            topic: `${prefix}/event/${this.segment(item.topic ?? item.event, 'event')}`,
+            kind: 'command',
+            valueType: 'trigger',
+            event: item.event,
+            ...(event.description !== undefined ? { description: event.description } : {}),
+          });
+        }
+      }
+    } else {
+      // Implicit: all parameters subscribe as setpoints; mqtt-sourced events subscribe.
+      for (const parameter of project.system.parameters || []) {
+        const leaf = this.segment(parameter.name, 'parameter');
+        topics.push({
+          topic: `${prefix}/setpoint/${leaf}`,
+          kind: 'setpoint',
+          valueType: this.valueType(parameter.type),
+          parameter: parameter.name,
+          ...(parameter.unit !== undefined ? { unit: parameter.unit } : {}),
+          ...(parameter.default !== undefined ? { default: parameter.default } : {}),
+          ...(parameter.min !== undefined ? { min: parameter.min } : {}),
+          ...(parameter.max !== undefined ? { max: parameter.max } : {}),
+          ...(parameter.description !== undefined ? { description: parameter.description } : {}),
+        });
+      }
 
-    // Only events the model explicitly marks as arriving over MQTT. Exposing
-    // every event would let a dashboard drive transitions the designer never
-    // meant to be remotely triggerable.
-    for (const event of project.system.events || []) {
-      if (String(event.source) !== 'mqtt') continue;
-
-      topics.push({
-        topic: `${prefix}/event/${this.segment(event.name, 'event')}`,
-        kind: 'command',
-        valueType: 'trigger',
-        event: event.name,
-        ...(event.description !== undefined ? { description: event.description } : {}),
-      });
+      // Only events explicitly marked as MQTT-sourced. Exposing every event
+      // would let a dashboard trigger transitions the designer never intended.
+      for (const event of project.system.events || []) {
+        if (String(event.source) !== 'mqtt') continue;
+        topics.push({
+          topic: `${prefix}/event/${this.segment(event.name, 'event')}`,
+          kind: 'command',
+          valueType: 'trigger',
+          event: event.name,
+          ...(event.description !== undefined ? { description: event.description } : {}),
+        });
+      }
     }
 
     return topics;
