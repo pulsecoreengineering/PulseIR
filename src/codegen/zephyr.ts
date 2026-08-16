@@ -82,6 +82,7 @@ export class ZephyrBackend implements PlatformBackend {
 
   nowExpr(): string      { return 'k_uptime_get()'; }
   timestampType(): string { return 'int64_t'; }
+  durationLiteral(ms: number): string { return `INT64_C(${ms})`; }
 
   // ── Console ──────────────────────────────────────────────────────────────────
 

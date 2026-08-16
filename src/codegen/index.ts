@@ -1484,8 +1484,8 @@ ${body}
       const pinExpr = typeof pin === 'number' ? String(pin) : `HEARTBEAT_PIN`;
       const ivRaw = diag.heartbeat.interval_ms ?? 1000;
       const ivExpr = typeof ivRaw === 'number'
-        ? `${ivRaw}UL`
-        : `(unsigned long)systemParameters.${this.sanitize(String(ivRaw))}`;
+        ? this.backend.durationLiteral(ivRaw)
+        : `(${this.backend.timestampType()})systemParameters.${this.sanitize(String(ivRaw))}`;
 
       if (typeof pin !== 'number') {
         // Named pin — emit a #define so the user can override it.
@@ -1561,8 +1561,8 @@ ${body}
     for (const ch of tel.channels) {
       const ivRaw = ch.interval_ms ?? tel.interval_ms!;
       const ivExpr = typeof ivRaw === 'number'
-        ? `${ivRaw}UL`
-        : `(unsigned long)systemParameters.${this.sanitize(String(ivRaw))}`;
+        ? this.backend.durationLiteral(ivRaw)
+        : `(${this.backend.timestampType()})systemParameters.${this.sanitize(String(ivRaw))}`;
 
       const field = `systemSensors.${this.sanitize(ch.sensor)}`;
       const topicPart = ch.topic
@@ -1774,7 +1774,7 @@ ${this.backend.renderSetup(setupBody)}`;
       const base = this.sanitize(task.name);
       const interval = typeof task.every === 'string'
         ? `(${tsType})systemParameters.${this.sanitize(task.every)}`
-        : `${task.every}UL`;
+        : this.backend.durationLiteral(task.every);
       const source = typeof task.every === 'string' ? `${task.every} (parameter)` : `every ${task.every}ms`;
       const calls = [
         ...task.actions.map(a => `  action_${this.sanitize(a.name)}(&systemContext);`),
@@ -2866,7 +2866,7 @@ static char _mqttPrefix[96];`,
           const target = this.states[this.resolveEntry(this.resolveRef(t.target!, 'target'))];
           const duration = typeof t.after === 'string'
             ? `(${tsType})systemParameters.${this.sanitize(t.after)}`
-            : `${t.after}UL`;
+            : this.backend.durationLiteral(t.after ?? 0);
           const source = typeof t.after === 'string' ? `${t.after} (parameter)` : `${t.after} ms`;
 
           const calls = (t.actions || [])
@@ -2900,7 +2900,7 @@ ${fire}
           const guard = this.guards.get(idx);
           const interval = typeof t.every === 'string'
             ? `(${tsType})systemParameters.${this.sanitize(t.every)}`
-            : `${t.every}UL`;
+            : this.backend.durationLiteral(t.every ?? 0);
           const source = typeof t.every === 'string' ? `${t.every} (parameter)` : `every ${t.every} ms`;
 
           const dueVar = `dueAt_${this.sanitize(flat.path)}_${i}`;
@@ -3093,8 +3093,8 @@ ${blocks.join('\n\n')}`;
       body.push(
         `  // Maintain MQTT connection and pump incoming messages.`,
         `  {`,
-        `    static unsigned long _mqttReconnectAt = 0;`,
-        `    if (!${client}.connected() && ${this.backend.nowExpr()} - _mqttReconnectAt >= 5000UL) {`,
+        `    static ${this.backend.timestampType()} _mqttReconnectAt = 0;`,
+        `    if (!${client}.connected() && ${this.backend.nowExpr()} - _mqttReconnectAt >= ${this.backend.durationLiteral(5000)}) {`,
         `      _mqttReconnectAt = ${this.backend.nowExpr()};`,
         `      connectMqtt();`,
         `    }`,
@@ -3105,8 +3105,8 @@ ${blocks.join('\n\n')}`;
         body.push(
           `  // Publish sensor readings and state periodically.`,
           `  {`,
-          `    static unsigned long _mqttPublishAt = 0;`,
-          `    if (${this.backend.nowExpr()} - _mqttPublishAt >= 5000UL) {`,
+          `    static ${this.backend.timestampType()} _mqttPublishAt = 0;`,
+          `    if (${this.backend.nowExpr()} - _mqttPublishAt >= ${this.backend.durationLiteral(5000)}) {`,
           `      _mqttPublishAt = ${this.backend.nowExpr()};`,
           `      publishMqtt();`,
           `    }`,

@@ -42,6 +42,12 @@ export interface PlatformBackend {
   /** C type for storing a millisecond timestamp or duration. */
   timestampType(): string;
 
+  /**
+   * Format a numeric millisecond literal for use in comparisons against nowExpr().
+   * Arduino: `250UL`; Zephyr/ESP-IDF: `INT64_C(250)`.
+   */
+  durationLiteral(ms: number): string;
+
   // ── Console ───────────────────────────────────────────────────────────────
 
   /** The C identifier for the UART stream on a given port number. */

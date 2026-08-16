@@ -25,6 +25,19 @@ static inline int32_t k_msleep(int32_t ms)       { (void)ms; return 0; }
 /* Advance the virtual clock — call from host test drivers. */
 static inline void zephyrTestAdvance(int64_t ms) { _zephyr_uptime_ms += ms; }
 
+/* Arduino-compatible stubs ------------------------------------------------ */
+/* Some model action params use HIGH/LOW, and conversion formulas may call
+ * analogRead().  Guard so they don't conflict if Arduino.h is also included
+ * (e.g. via PulseHSM.h in state-machine models). */
+#ifndef HIGH
+#  define HIGH 1
+#  define LOW  0
+#endif
+#ifndef PULSE_ZEPHYR_ANALOGREAD_STUB
+#  define PULSE_ZEPHYR_ANALOGREAD_STUB
+static inline int analogRead(int _pin) { (void)_pin; return 0; }
+#endif
+
 /* Console ------------------------------------------------------------------ */
 
 /* printk() routes to vprintf on the host; gcc/clang will type-check the fmt. */

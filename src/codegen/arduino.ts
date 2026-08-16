@@ -43,6 +43,7 @@ export class ArduinoBackend implements PlatformBackend {
 
   nowExpr(): string { return 'millis()'; }
   timestampType(): string { return 'unsigned long'; }
+  durationLiteral(ms: number): string { return `${ms}UL`; }
 
   consoleStreamName(port: number): string {
     return port === 0 ? 'Serial' : `Serial${port}`;

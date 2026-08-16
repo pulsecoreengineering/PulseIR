@@ -84,6 +84,7 @@ export class EspIdfBackend implements PlatformBackend {
 
   nowExpr(): string   { return '(esp_timer_get_time() / 1000LL)'; }
   timestampType(): string { return 'int64_t'; }
+  durationLiteral(ms: number): string { return `INT64_C(${ms})`; }
 
   consoleStreamName(port: number): string {
     return port === 0 ? 'UART_NUM_0' : `UART_NUM_${port}`;

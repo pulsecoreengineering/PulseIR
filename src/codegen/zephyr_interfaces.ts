@@ -14,6 +14,13 @@ import type { Resource, Library } from '../model/index.js';
 import { InterfaceBackend } from './interfaces.js';
 import type { ImpliedLibrary, InterfaceEmission } from './interfaces.js';
 
+const REGISTRY = (name: string, include: string, reason: string): ImpliedLibrary =>
+  ({ name, include, source: 'registry', reason });
+
+function lower(symbol: string): string {
+  return symbol.toLowerCase().replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+}
+
 export class ZephyrInterfaceBackend {
   /** Reused only for the platform-agnostic #define generation. */
   private readonly defines = new InterfaceBackend();
@@ -112,6 +119,15 @@ export class ZephyrInterfaceBackend {
           `${resource.name}: MQTT — add CONFIG_MQTT_LIB=y, CONFIG_NET_TCP=y; ` +
           'use struct mqtt_client + mqtt_connect(). Requires WiFi/Ethernet first.'
         );
+        // Phase 1 stub: emit a PubSubClient global so connectMqtt()/publishMqtt()
+        // compile. Replace with struct mqtt_client + mqtt_connect() for production.
+        const wifiVar = `_${lower(symbol)}_wifi`;
+        out.libraries.push(REGISTRY('WiFi', 'WiFi.h', 'WiFiClient for MQTT stub'));
+        out.libraries.push(REGISTRY('PubSubClient', 'PubSubClient.h', 'MQTT (Phase 1 stub)'));
+        out.globals.push(
+          `static WiFiClient ${wifiVar};`,
+          `PubSubClient ${lower(symbol)}(${wifiVar});  // Phase 1 stub — replace with struct mqtt_client`,
+        );
         break;
       }
 
@@ -145,6 +161,15 @@ export class ZephyrInterfaceBackend {
           `${resource.name}: 1-Wire is not a native Zephyr peripheral — ` +
           'use a bit-bang driver via GPIO (CONFIG_GPIO=y)'
         );
+        // Phase 1 stub: emit an OneWire global so library-backed sensors (ds18b20)
+        // that reference this bus compile. Replace with a GPIO bit-bang driver
+        // in production.
+        if (has('pin')) {
+          out.libraries.push(REGISTRY('OneWire', 'OneWire.h', '1-Wire bus (Phase 1 stub)'));
+          out.globals.push(
+            `OneWire ${lower(symbol)}(${ref('pin')});  // Phase 1 stub — replace with GPIO bit-bang`,
+          );
+        }
         break;
       }
 
