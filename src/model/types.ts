@@ -450,6 +450,19 @@ export interface SafetyRule {
   to?: string;
   /** Once triggered, keeps acting on every loop even if check returns false. */
   latching?: boolean;
+  /**
+   * C guard function that clears a latching fault when it returns true.
+   * Checked before the trip guard each loop, so hysteresis is expressed
+   * purely in C (e.g. trip at >75°C, reset at <60°C).
+   * Only valid when `latching: true`.
+   */
+  reset_when?: string;
+  /**
+   * Actions to call when a latching fault clears via `reset_when`.
+   * Called with a null context, in order, before the trip guard is re-checked.
+   * Only valid when `latching: true` and `reset_when` is set.
+   */
+  restore?: string[];
 }
 
 /**

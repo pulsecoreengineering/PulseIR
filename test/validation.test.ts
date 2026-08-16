@@ -823,6 +823,46 @@ test('rejects safety with an unknown severity', () => {
   );
 });
 
+test('accepts reset_when and restore on a latching rule', () => {
+  const project = expectAccept(withSafety(`safety:
+  over_temp:
+    check: guard_over_temp
+    severity: critical
+    response: [cut_power]
+    latching: true
+    reset_when: guard_temp_normal
+    restore: [alert]`), 'reset_when + restore');
+
+  const rule = project.system.safety?.rules[0];
+  if (!rule) throw new Error('rule not parsed');
+  if (rule.reset_when !== 'guard_temp_normal') throw new Error('reset_when not preserved');
+  if (!rule.restore?.includes('alert')) throw new Error('restore not preserved');
+});
+
+test('rejects reset_when on a non-latching rule', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    response: [cut_power]\n    reset_when: guard_ok`),
+    'only valid when "latching: true"',
+    'reset_when without latching'
+  );
+});
+
+test('rejects restore without reset_when', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    response: [cut_power]\n    latching: true\n    restore: [alert]`),
+    'requires "reset_when:"',
+    'restore without reset_when'
+  );
+});
+
+test('rejects restore with an undeclared action', () => {
+  expectReject(
+    withSafety(`safety:\n  r:\n    check: guard_x\n    response: [cut_power]\n    latching: true\n    reset_when: guard_ok\n    restore: [no_such_action]`),
+    'not a declared action',
+    'unknown restore action'
+  );
+});
+
 // ============================================================================
 
 if (failures > 0) {

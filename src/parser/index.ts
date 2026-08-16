@@ -1030,7 +1030,54 @@ export class Parser {
       if (severity !== undefined) rule.severity = severity;
       if (response?.length) rule.response = response;
       if (to !== undefined) rule.to = to;
-      if (d.latching === true || d.latching === 'true') rule.latching = true;
+
+      const isLatching = d.latching === true || d.latching === 'true';
+      if (isLatching) rule.latching = true;
+
+      // reset_when / restore — only meaningful for latching rules.
+      if (d.reset_when !== undefined) {
+        if (!isLatching) {
+          throw new ParseError(
+            `safety.${name}.reset_when: only valid when "latching: true"`
+          );
+        }
+        const rw = String(d.reset_when);
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(rw)) {
+          throw new ParseError(
+            `safety.${name}.reset_when: "${rw}" is not a valid C identifier`
+          );
+        }
+        rule.reset_when = rw;
+      }
+
+      if (d.restore !== undefined) {
+        if (!isLatching) {
+          throw new ParseError(
+            `safety.${name}.restore: only valid when "latching: true"`
+          );
+        }
+        if (rule.reset_when === undefined) {
+          throw new ParseError(
+            `safety.${name}.restore: requires "reset_when:" — restore actions only fire when the latch clears`
+          );
+        }
+        const rawRestore = this.asList(d.restore, `safety.${name}.restore`);
+        if (!rawRestore) throw new ParseError(`safety.${name}.restore must be a list`);
+        const restore = rawRestore.map((item, i) => {
+          if (typeof item !== 'string') {
+            throw new ParseError(`safety.${name}.restore[${i}] must be an action name`);
+          }
+          if (!actionCatalogue.has(item)) {
+            const avail = [...actionCatalogue.keys()].join(', ') || '(none declared)';
+            throw new ParseError(
+              `safety.${name}.restore: "${item}" is not a declared action. Available: ${avail}`
+            );
+          }
+          return item;
+        });
+        if (restore.length) rule.restore = restore;
+      }
+
       rules.push(rule);
     }
 

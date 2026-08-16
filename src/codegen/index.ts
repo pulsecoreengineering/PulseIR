@@ -1056,6 +1056,17 @@ ${cases.join('\n')}
         lines.push(`  static bool ${latchVar} = false;`);
       }
 
+      // Auto-reset: checked before the trip guard so that if both fire
+      // simultaneously the fault immediately re-trips after restoring.
+      if (rule.latching && rule.reset_when) {
+        lines.push(`  if (${latchVar} && ${rule.reset_when}()) {`);
+        lines.push(`    ${latchVar} = false;`);
+        for (const action of rule.restore || []) {
+          lines.push(`    ${this.sanitize(action)}(nullptr);`);
+        }
+        lines.push('  }');
+      }
+
       // Condition expression.
       const cond = rule.latching
         ? `${latchVar} || ${rule.check}()`
