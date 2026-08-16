@@ -1486,6 +1486,104 @@ actions:
 });
 
 // ---------------------------------------------------------------------------
+// Zephyr Phase 3: PWM via pwm_dt_spec
+// ---------------------------------------------------------------------------
+
+const PWM_YAML = `
+pulseir: "1"
+project:
+  name: pwm_test
+  version: "1.0"
+
+hardware:
+  devices:
+    motor: { type: pwm_output, pin: GPIO18, channel: 0, frequency: 1000, resolution: 8 }
+
+events:
+  RUN:  { source: external }
+  STOP: { source: external }
+
+actions:
+  spin:  { driver: pwm_control, params: { device: motor, duty: 128 } }
+  brake: { driver: pwm_control, params: { device: motor, duty: 0   } }
+
+machine:
+  states:
+    idle:
+    running:
+  transitions:
+    - from: idle
+      on: RUN
+      to: running
+      do: spin
+    - from: running
+      on: STOP
+      to: idle
+      do: brake
+`;
+
+test('Zephyr: pwm_output device emits pwm_dt_spec global', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, 'struct pwm_dt_spec MOTOR_PWM = PWM_DT_SPEC_GET(DT_PATH(zephyr_user), motor_pwms)');
+});
+
+test('Zephyr: pwm_control action body emits pwm_set_dt()', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, 'pwm_set_dt(&MOTOR_PWM, PWM_HZ(MOTOR_FREQUENCY),');
+});
+
+test('Zephyr: pwm_control duty uses resolution macro for scale', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, '(1u << MOTOR_RESOLUTION) - 1u');
+});
+
+test('Zephyr: pwm_output device also emits gpio_dt_spec fallback for gpio_control', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, 'struct gpio_dt_spec MOTOR_GPIO = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), motor_gpios)');
+});
+
+test('Zephyr: generated code includes <zephyr/drivers/pwm.h>', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, '#include <zephyr/drivers/pwm.h>');
+});
+
+test('ZephyrProjectEmitter: prj.conf adds CONFIG_PWM=y for pwm_output devices', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(PWM_YAML));
+  has(files.prjConf, 'CONFIG_PWM=y');
+});
+
+test('ZephyrProjectEmitter: overlay includes gpio entry for pwm_output device', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(PWM_YAML));
+  assert(files.overlay !== undefined, 'overlay must be defined for pwm_output');
+  has(files.overlay!, 'motor-gpios = <&gpio0 18 GPIO_ACTIVE_HIGH>');
+});
+
+test('ZephyrProjectEmitter: overlay includes pwms entry for pwm_output device', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(PWM_YAML));
+  assert(files.overlay !== undefined, 'overlay must be defined for pwm_output');
+  // frequency 1000 Hz → period_ns = 1_000_000 ns; channel 0.
+  has(files.overlay!, 'motor-pwms = <&pwm0 0 1000000 PWM_POLARITY_NORMAL>');
+});
+
+test('Zephyr: FREQUENCY and RESOLUTION macros are emitted for pwm_output', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, '#define MOTOR_FREQUENCY 1000');
+  has(code, '#define MOTOR_RESOLUTION 8');
+});
+
+test('Zephyr: pwm_output without resolution defaults to 8-bit macro', () => {
+  const noResYaml = PWM_YAML.replace('frequency: 1000, resolution: 8', 'frequency: 1000');
+  const code = new Codegen(new ZephyrBackend()).generate(parse(noResYaml));
+  has(code, '#define MOTOR_RESOLUTION 8');
+});
+
+test('Zephyr: pwm_output without frequency defaults to 5000 Hz macro', () => {
+  const noFreqYaml = PWM_YAML.replace('frequency: 1000, resolution: 8', 'resolution: 8');
+  const code = new Codegen(new ZephyrBackend()).generate(parse(noFreqYaml));
+  has(code, '#define MOTOR_FREQUENCY 5000');
+});
+
+// ---------------------------------------------------------------------------
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} backend test(s) failed`);

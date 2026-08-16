@@ -275,6 +275,53 @@ test('sizing macros precede <zephyr/kernel.h> so they take effect', () => {
   assert(sizingPos < kernelPos, 'sizing macros must come before <zephyr/kernel.h>');
 });
 
+// ── Phase 3: PWM via pwm_dt_spec ─────────────────────────────────────────────
+
+test('pwm_output: pwm_dt_spec global and pwm_set_dt() action compile without errors', () => {
+  const code = generateInline(`
+pulseir: "1"
+project:
+  name: pwm_motor
+  version: "1.0"
+hardware:
+  devices:
+    motor: { type: pwm_output, pin: GPIO18, channel: 0, frequency: 1000, resolution: 8 }
+events:
+  RUN:  { source: external }
+  STOP: { source: external }
+actions:
+  spin:  { driver: pwm_control, params: { device: motor, duty: 128 } }
+  brake: { driver: pwm_control, params: { device: motor, duty: 0   } }
+machine:
+  states:
+    idle:
+    running:
+  transitions:
+    - from: idle
+      on: RUN
+      to: running
+      do: spin
+    - from: running
+      on: STOP
+      to: idle
+      do: brake
+`);
+  compile('pwm_motor', code);
+  assert(code.includes('pwm_dt_spec MOTOR_PWM'),  'must declare pwm_dt_spec for motor');
+  assert(code.includes('pwm_set_dt(&MOTOR_PWM,'), 'must call pwm_set_dt in action body');
+  assert(code.includes('PWM_HZ(MOTOR_FREQUENCY)'), 'must use PWM_HZ macro for period');
+  assert(code.includes('#include <zephyr/drivers/pwm.h>'), 'must include pwm driver header');
+});
+
+test('boiler: pwm_control on pwm_output device uses pwm_set_dt in Phase 3', () => {
+  const code = generateFrom(path.join(repoRoot, 'examples/boiler/pulse.yaml'));
+  compile('boiler_pwm3', code);
+  assert(code.includes('pwm_dt_spec HEATER_PWM'),  'boiler heater must declare pwm_dt_spec');
+  assert(code.includes('pwm_set_dt(&HEATER_PWM,'), 'reduce_heat must use pwm_set_dt');
+  // gpio_dt_spec fallback must still exist so gpio_control (shutdown_all) can target heater.
+  assert(code.includes('gpio_dt_spec HEATER_GPIO'), 'heater must retain gpio_dt_spec for gpio_control');
+});
+
 // ---------------------------------------------------------------------------
 
 if (failures > 0) {

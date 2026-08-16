@@ -146,6 +146,10 @@ export class EspIdfBackend implements PlatformBackend {
     ].join('\n');
   }
 
+  pwmWriteLines(sym: string, _freqMacro: string, _resMacro: string, dutyExpr: string, board: string): string {
+    return this.ledcWriteLines(`${sym}_PIN`, `${sym}_CHANNEL`, dutyExpr, board);
+  }
+
   emitInterface(resource: Resource, symbol: string): InterfaceEmission {
     return this.interfaces.emit(resource, symbol);
   }

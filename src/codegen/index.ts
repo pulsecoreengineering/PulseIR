@@ -2174,23 +2174,17 @@ static void pollCommands() {
         const device = (this.project.system.components || []).find(c => c.name === deviceName);
         if (!device) break;
 
-        const pinMacro     = `${this.sanitizeUpper(deviceName)}_PIN`;
-        const channelMacro = `${this.sanitizeUpper(deviceName)}_CHANNEL`;
-        const dutyRaw      = params.duty;
-        const dutyParam    = (this.project.system.parameters || []).find(p => p.name === String(dutyRaw));
-        const dutyExpr     = dutyParam
+        const sym       = this.sanitizeUpper(deviceName);
+        const freqMacro = `${sym}_FREQUENCY`;
+        const resMacro  = `${sym}_RESOLUTION`;
+        const dutyRaw   = params.duty;
+        const dutyParam = (this.project.system.parameters || []).find(p => p.name === String(dutyRaw));
+        const dutyExpr  = dutyParam
           ? `ctx->parameters->${this.sanitize(String(dutyRaw))}`
           : dutyRaw !== undefined ? String(dutyRaw) : '0';
 
-        const board   = (this.project.target?.board ?? '').toLowerCase();
-        const isAvr   = /avr|uno|mega|nano|atmega|leonardo/.test(board);
-        const isRp    = /rp2040|pico/.test(board);
-
-        if (isAvr || isRp) {
-          return `  ${this.backend.analogWriteExpr(pinMacro, dutyExpr)};\n  (void)ctx;`;
-        }
-        // ESP32 (explicit or unknown board) — portable guard that compiles everywhere.
-        return this.backend.ledcWriteLines(pinMacro, channelMacro, dutyExpr, board) + '\n  (void)ctx;';
+        const board = (this.project.target?.board ?? '').toLowerCase();
+        return this.backend.pwmWriteLines(sym, freqMacro, resMacro, dutyExpr, board) + '\n  (void)ctx;';
       }
 
       case 'console_help': {

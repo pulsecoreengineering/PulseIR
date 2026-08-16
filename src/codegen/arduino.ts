@@ -100,6 +100,17 @@ export class ArduinoBackend implements PlatformBackend {
     ].join('\n');
   }
 
+  pwmWriteLines(sym: string, _freqMacro: string, _resMacro: string, dutyExpr: string, board: string): string {
+    const pin     = `${sym}_PIN`;
+    const channel = `${sym}_CHANNEL`;
+    const isAvr   = /avr|uno|mega|nano|atmega|leonardo/.test(board);
+    const isRp    = /rp2040|pico/.test(board);
+    if (isAvr || isRp) {
+      return `  ${this.analogWriteExpr(pin, dutyExpr)};`;
+    }
+    return this.ledcWriteLines(pin, channel, dutyExpr, board);
+  }
+
   emitInterface(resource: Resource, symbol: string): InterfaceEmission {
     return this.interfaces.emit(resource, symbol);
   }

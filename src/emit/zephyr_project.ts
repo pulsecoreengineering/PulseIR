@@ -38,10 +38,11 @@ export class ZephyrProjectEmitter {
     const deviceTypes = new Set(components.map(c => String(c.type ?? '')));
     const hasGpioDevices =
       deviceTypes.has('digital_output') || deviceTypes.has('digital_input');
+    const hasPwmDevices = deviceTypes.has('pwm_output');
 
     return {
       cmake:   this.cmake(project.name, hasMachine),
-      prjConf: this.prjConf(busIfaces, hasGpioDevices),
+      prjConf: this.prjConf(busIfaces, hasGpioDevices, hasPwmDevices),
       overlay: this.generateOverlay(resources, components),
     };
   }
@@ -64,7 +65,7 @@ export class ZephyrProjectEmitter {
     ].join('\n');
   }
 
-  private prjConf(busIfaces: Set<string>, hasGpioDevices: boolean): string {
+  private prjConf(busIfaces: Set<string>, hasGpioDevices: boolean, hasPwmDevices: boolean): string {
     const lines: string[] = [
       '# C++ language support',
       'CONFIG_CPP=y',
@@ -88,7 +89,7 @@ export class ZephyrProjectEmitter {
     if (busIfaces.has('spi')) {
       add('SPI driver', 'CONFIG_SPI=y');
     }
-    if (busIfaces.has('pwm')) {
+    if (busIfaces.has('pwm') || hasPwmDevices) {
       add('PWM driver', 'CONFIG_PWM=y');
     }
     if (busIfaces.has('adc')) {
@@ -155,8 +156,18 @@ export class ZephyrProjectEmitter {
       if (pinStr === undefined) continue;
       const pinNum = Number(String(pinStr).replace(/^GPIO/i, ''));
       if (isNaN(pinNum)) continue;
-      const prop = c.name.toLowerCase().replace(/_/g, '-') + '-gpios';
-      entries.push(`        ${prop} = <&gpio0 ${pinNum} GPIO_ACTIVE_HIGH>;`);
+      const baseProp = c.name.toLowerCase().replace(/_/g, '-');
+
+      // GPIO spec entry — every pin-bearing component gets one for gpio_dt_spec.
+      entries.push(`        ${baseProp}-gpios = <&gpio0 ${pinNum} GPIO_ACTIVE_HIGH>;`);
+
+      // PWM spec entry — pwm_output devices additionally need a pwms property.
+      if (String(c.type ?? '') === 'pwm_output') {
+        const freq      = Number(c.config?.frequency ?? 5000);
+        const channel   = Number(c.config?.channel ?? 0);
+        const periodNs  = Math.round(1_000_000_000 / freq);
+        entries.push(`        ${baseProp}-pwms = <&pwm0 ${channel} ${periodNs} PWM_POLARITY_NORMAL>;`);
+      }
     }
 
     if (entries.length === 0) return undefined;

@@ -47,6 +47,7 @@ export class ZephyrBackend implements PlatformBackend {
     const zephyrHeaders = [
       '#include <zephyr/kernel.h>',
       '#include <zephyr/drivers/gpio.h>',
+      '#include <zephyr/drivers/pwm.h>',
       '#include <zephyr/drivers/uart.h>',
       hasMachine ? '#include "PulseHSM.h"' : '',
     ].filter(Boolean);
@@ -139,9 +140,16 @@ export class ZephyrBackend implements PlatformBackend {
     return `/* TODO: pwm_set_dt() needed for pin ${pin}, duty ${duty} */ (void)0`;
   }
 
-  // Phase 3 will generate pwm_set_dt() here with proper DT node resolution.
   ledcWriteLines(pin: string, _channel: string, duty: string, _board: string): string {
-    return `  /* TODO: pwm_set_dt() for ${pin} duty=${duty} — Phase 3 */`;
+    // Fallback for callers that still use ledcWriteLines directly (none in Phase 3+).
+    return `  /* TODO: pwm_set_dt() for ${pin} duty=${duty} */`;
+  }
+
+  pwmWriteLines(sym: string, freqMacro: string, resMacro: string, dutyExpr: string, _board: string): string {
+    // pwm_set_dt(spec, period_ns, pulse_ns)
+    // PWM_HZ(freq) = 1_000_000_000 / freq gives period_ns.
+    // Duty scale: 0 to (2^resolution - 1).
+    return `  pwm_set_dt(&${sym}_PWM, PWM_HZ(${freqMacro}), PWM_HZ(${freqMacro}) * (uint32_t)(${dutyExpr}) / ((1u << ${resMacro}) - 1u));`;
   }
 
   // ── Hardware interfaces ───────────────────────────────────────────────────

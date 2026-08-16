@@ -97,10 +97,20 @@ export class ZephyrInterfaceBackend {
       }
 
       case 'pwm': {
-        out.todos.push(
-          `${resource.name}: PWM — add CONFIG_PWM=y; use DEVICE_DT_GET(DT_NODELABEL(pwm0)) ` +
-          'with pwm_set_dt() or pwm_set_cycles()'
+        if (!has('pin')) {
+          out.todos.push(`${resource.name}: add a "pin" binding for pwm_set_dt()`);
+          break;
+        }
+        // Ensure FREQUENCY and RESOLUTION macros exist — pwmWriteLines() references both.
+        if (!has('frequency')) out.defines.push(`#define ${symbol}_FREQUENCY 5000`);
+        if (!has('resolution')) out.defines.push(`#define ${symbol}_RESOLUTION 8`);
+
+        const specName = `${symbol}_PWM`;
+        const propName = `${symbol.toLowerCase()}_pwms`;
+        out.globals.push(
+          `static const struct pwm_dt_spec ${specName} = PWM_DT_SPEC_GET(DT_PATH(zephyr_user), ${propName});`,
         );
+        // pwm_set_dt() configures and drives on first call — no separate init needed.
         break;
       }
 

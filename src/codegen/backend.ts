@@ -98,6 +98,21 @@ export interface PlatformBackend {
    */
   ledcWriteLines(pin: string, channel: string, duty: string, board: string): string;
 
+  /**
+   * Multi-line block emitting a PWM duty-cycle write given the sanitized-upper
+   * device symbol and the macros already emitted by the interface backend.
+   *
+   * sym:       sanitized-upper symbol ("HEATER")
+   * freqMacro: C macro for frequency in Hz ("HEATER_FREQUENCY")
+   * resMacro:  C macro for bit resolution ("HEATER_RESOLUTION")
+   * dutyExpr:  C expression for duty value (0 to 2^res-1)
+   * board:     target board string (used by Arduino for LEDC variant selection)
+   *
+   * Returns a multi-line block WITHOUT trailing `(void)ctx;`.
+   * Caller appends `\n  (void)ctx;`.
+   */
+  pwmWriteLines(sym: string, freqMacro: string, resMacro: string, dutyExpr: string, board: string): string;
+
   // ── Hardware interfaces ───────────────────────────────────────────────────
 
   /** Translate a declared resource to the lines it contributes to the sketch. */
