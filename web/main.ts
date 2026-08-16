@@ -1596,6 +1596,61 @@ commands:
       unit: degC
       conversion: "analogRead({pin}) * (3.3 / 4095.0) * 100.0"`
   },
+  { group: 'Device', label: 'DS18B20  (1-Wire temperature)',
+    yaml:
+`# Requires: DallasTemperature + OneWire — install via Arduino Library Manager
+hardware:
+  buses:
+    probe_bus: { interface: onewire, pin: GPIO4 }
+  devices:
+    water_temp:
+      type: ds18b20
+      bus: probe_bus
+      unit: degC
+
+actions:
+  read_temp: { driver: ds18b20, params: { device: water_temp } }
+
+tasks:
+  sensor_poll: { every: 2000, do: read_temp }`
+  },
+  { group: 'Device', label: 'DHT22  (temperature + humidity)',
+    yaml:
+`# Requires: DHT sensor library by Adafruit — install via Arduino Library Manager
+hardware:
+  devices:
+    air_temp:
+      type: dht22
+      pin: GPIO4
+      measure: temperature   # or: humidity
+      unit: degC
+
+actions:
+  read_dht: { driver: dht22, params: { device: air_temp } }
+
+tasks:
+  sensor_poll: { every: 2000, do: read_dht }`
+  },
+  { group: 'Device', label: 'BME280  (temp / humidity / pressure)',
+    yaml:
+`# Requires: Adafruit BME280 Library + Adafruit Unified Sensor — Library Manager
+hardware:
+  buses:
+    sensor_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    air_temp:
+      type: bme280
+      bus: sensor_bus
+      address: 0x76
+      measure: temperature   # temperature | humidity | pressure
+      unit: degC
+
+actions:
+  read_bme: { driver: bme280, params: { device: air_temp } }
+
+tasks:
+  sensor_poll: { every: 2000, do: read_bme }`
+  },
 
   // ── Logic ────────────────────────────────────────────────────────────────
   { group: 'Logic', label: 'Parameter  (tunable value)',

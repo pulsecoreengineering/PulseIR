@@ -80,13 +80,65 @@ const ROOT_PATH = '__root';
  * is the boilerplate this project exists to remove.
  *
  * Part types like ds18b20 or bme280 are absent on purpose: they sit on a bus,
- * and the bus owns the initialisation.
+ * and the bus owns the initialisation. Their library objects and begin() calls
+ * are handled by BUS_SENSOR_DEFS below.
  */
 const DEVICE_INTERFACE: Record<string, { interface: string; mode?: string }> = {
   digital_output: { interface: 'gpio', mode: 'OUTPUT' },
   digital_input:  { interface: 'gpio', mode: 'INPUT' },
   pwm_output:     { interface: 'pwm' },
   analog_input:   { interface: 'adc' },
+};
+
+/**
+ * Bus-attached or library-backed sensor types.
+ *
+ * PulseIR generates the glue: the #include, the object declaration, and the
+ * begin() call. The user installs the named library from the Arduino Library
+ * Manager. The wire protocol stays entirely inside the library.
+ */
+interface BusSensorDef {
+  library: string;      // Library Manager display name
+  include: string;      // Header to include
+  objectClass: string;  // C++ class name
+  reason: string;       // Comment shown in the install list
+  /** How the sensor connects. Controls constructor and init emission. */
+  mountedOn: 'onewire_ref' | 'pin' | 'i2c';
+  /** Constructor type argument, e.g. 'DHT22' for DHT sensors. */
+  typeArg?: string;
+}
+
+const BUS_SENSOR_DEFS: Record<string, BusSensorDef> = {
+  ds18b20: {
+    library:     'DallasTemperature',
+    include:     'DallasTemperature.h',
+    objectClass: 'DallasTemperature',
+    reason:      'DS18B20 1-Wire temperature sensor',
+    mountedOn:   'onewire_ref',
+  },
+  dht22: {
+    library:     'DHT sensor library',
+    include:     'DHT.h',
+    objectClass: 'DHT',
+    reason:      'DHT11/DHT22 temperature + humidity',
+    mountedOn:   'pin',
+    typeArg:     'DHT22',
+  },
+  dht11: {
+    library:     'DHT sensor library',
+    include:     'DHT.h',
+    objectClass: 'DHT',
+    reason:      'DHT11/DHT22 temperature + humidity',
+    mountedOn:   'pin',
+    typeArg:     'DHT11',
+  },
+  bme280: {
+    library:     'Adafruit BME280 Library',
+    include:     'Adafruit_BME280.h',
+    objectClass: 'Adafruit_BME280',
+    reason:      'BME280 temperature / humidity / pressure',
+    mountedOn:   'i2c',
+  },
 };
 
 export interface GeneratedFile {
@@ -375,10 +427,100 @@ ${this.generateActionImplementations()}
       ));
     }
 
+    // Library-backed sensors (ds18b20, dht22, bme280 …) generate their own
+    // object declarations and begin() calls via BUS_SENSOR_DEFS.
+    this.indexBusSensors();
+
     // Declared libraries win, so a model can pin a version or override a header.
     for (const library of this.backend.declaredLibraries(this.project.system.libraries)) {
       this.libraries.set(library.name, library);
     }
+  }
+
+  /**
+   * Generate library includes, object declarations, and begin() calls for
+   * sensor device types defined in BUS_SENSOR_DEFS.
+   *
+   * PulseIR's contract: emit the glue (include + object + init); leave the
+   * wire-protocol implementation to the user's installed library. A
+   * "// Requires:" comment tells the user which package to install.
+   */
+  private indexBusSensors(): void {
+    for (const device of this.project.system.components || []) {
+      const def = BUS_SENSOR_DEFS[device.type || ''];
+      if (!def) continue;
+
+      const config  = device.config || {};
+      const sym     = this.sanitizeUpper(device.name);
+      const objVar  = this.sanitize(device.name);
+
+      const emission: InterfaceEmission = {
+        defines:   [],
+        globals:   [],
+        init:      [],
+        libraries: [{ name: def.library, include: def.include, source: 'registry', reason: def.reason }],
+        todos:     [],
+      };
+
+      if (def.mountedOn === 'onewire_ref') {
+        // DS18B20 — sits on a declared OneWire bus.
+        // The bus resource already generates the OneWire object; we just
+        // construct a DallasTemperature on top of it.
+        const busVar = device.bus ? this.busObjVar(device.bus) : 'oneWireBus';
+        emission.globals.push(
+          `// Requires: ${def.library} — install via Arduino Library Manager`,
+          `${def.objectClass} ${objVar}(&${busVar});`
+        );
+        emission.init.push(`${objVar}.begin();`);
+
+        if (!device.bus) {
+          emission.todos.push(`${device.name}: declare a OneWire bus and reference it with "bus:"`);
+        }
+
+      } else if (def.mountedOn === 'pin') {
+        // DHT22/DHT11 — has its own data pin.
+        const pinRaw   = String(config.pin ?? '');
+        const gpioMat  = /^(?:GPIO|IO)[_-]?(\d+)$/i.exec(pinRaw);
+        const pinLit   = gpioMat ? `${gpioMat[1]}  // ${pinRaw}` : (pinRaw || '/* pin */');
+        const pinMacro = `${sym}_PIN`;
+
+        emission.defines.push(`#define ${pinMacro} ${pinLit}`);
+        emission.globals.push(
+          `// Requires: ${def.library} — install via Arduino Library Manager`,
+          `${def.objectClass} ${objVar}(${pinMacro}${def.typeArg ? `, ${def.typeArg}` : ''});`
+        );
+        emission.init.push(`${objVar}.begin();`);
+
+        if (!config.pin) {
+          emission.todos.push(`${device.name}: add "pin: GPIO<N>" to specify the data pin`);
+        }
+
+      } else if (def.mountedOn === 'i2c') {
+        // BME280 — I2C sensor, address in config.
+        const addrRaw = config.address !== undefined
+          ? `0x${Number(config.address).toString(16).toUpperCase()}`
+          : '0x76';
+
+        emission.globals.push(
+          `// Requires: ${def.library} — install via Arduino Library Manager`,
+          `${def.objectClass} ${objVar};`
+        );
+        emission.init.push(`${objVar}.begin(${addrRaw});`);
+
+        if (config.address === undefined) {
+          emission.todos.push(`${device.name}: default I2C address 0x76 — change to 0x77 if SDO is pulled HIGH`);
+        }
+      }
+
+      this.addEmission(device.name, emission);
+    }
+  }
+
+  /** Convert a bus resource name to the camelCase variable the interface backend generates. */
+  private busObjVar(busName: string): string {
+    return this.sanitizeUpper(busName)
+      .toLowerCase()
+      .replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
   }
 
   private addEmission(name: string, emission: InterfaceEmission): void {
@@ -535,7 +677,14 @@ ${this.defInterfaces()}`;
         interface: DEVICE_INTERFACE[d.type!].interface,
         description: d.description,
       }));
-    return [...buses, ...devices];
+    const busSensors = (this.project.system.components || [])
+      .filter(d => BUS_SENSOR_DEFS[d.type || ''])
+      .map(d => ({
+        name: d.name,
+        interface: d.type!,
+        description: d.description,
+      }));
+    return [...buses, ...devices, ...busSensors];
   }
 
   private declInterfaces(): string {
@@ -1734,6 +1883,50 @@ static void pollCommands() {
           const pin   = `${this.sanitizeUpper(deviceName)}_PIN`;
           const field = `systemSensors.${this.sanitize(deviceName)}`;
           return `  ${field} = (float)${this.backend.digitalReadExpr(pin)};\n  (void)ctx;`;
+        }
+        break;
+      }
+
+      case 'ds18b20': {
+        const deviceName = String(params.device ?? '');
+        if (this.isSensorComponent(deviceName)) {
+          const objVar = this.sanitize(deviceName);
+          const field  = `systemSensors.${objVar}`;
+          return `  ${objVar}.requestTemperatures();\n  ${field} = ${objVar}.getTempCByIndex(0);\n  (void)ctx;`;
+        }
+        break;
+      }
+
+      case 'dht22':
+      case 'dht11': {
+        const deviceName = String(params.device ?? '');
+        const component  = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (component && this.isSensorComponent(deviceName)) {
+          const objVar  = this.sanitize(deviceName);
+          const field   = `systemSensors.${objVar}`;
+          const measure = String(component.config?.measure ?? 'temperature');
+          const readCall = measure === 'humidity'
+            ? `${objVar}.readHumidity()`
+            : `${objVar}.readTemperature()`;
+          return `  ${field} = ${readCall};\n  if (isnan(${field})) { /* read failed */ }\n  (void)ctx;`;
+        }
+        break;
+      }
+
+      case 'bme280': {
+        const deviceName = String(params.device ?? '');
+        const component  = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (component && this.isSensorComponent(deviceName)) {
+          const objVar  = this.sanitize(deviceName);
+          const field   = `systemSensors.${objVar}`;
+          const measure = String(component.config?.measure ?? 'temperature');
+          let readCall: string;
+          switch (measure) {
+            case 'humidity': readCall = `${objVar}.readHumidity()`; break;
+            case 'pressure': readCall = `${objVar}.readPressure() / 100.0F`; break;
+            default:         readCall = `${objVar}.readTemperature()`; break;
+          }
+          return `  ${field} = ${readCall};\n  (void)ctx;`;
         }
         break;
       }

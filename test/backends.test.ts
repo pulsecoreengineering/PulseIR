@@ -607,6 +607,163 @@ test('adc_read action stub without conversion uses plain analogRead', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bus sensor tests: DS18B20, DHT22, BME280
+// ---------------------------------------------------------------------------
+
+const DS18B20_YAML = `
+pulseir: "1"
+project:
+  name: ds18b20_test
+  version: "1.0"
+
+hardware:
+  buses:
+    probe_bus: { interface: onewire, pin: GPIO4 }
+  devices:
+    water_temp:
+      type: ds18b20
+      bus: probe_bus
+      unit: degC
+
+actions:
+  read_temp: { driver: ds18b20, params: { device: water_temp } }
+
+tasks:
+  poll: { every: 2000, do: read_temp }
+`;
+
+const DHT22_YAML = `
+pulseir: "1"
+project:
+  name: dht22_test
+  version: "1.0"
+
+hardware:
+  devices:
+    air_temp:
+      type: dht22
+      pin: GPIO4
+      measure: temperature
+      unit: degC
+    air_rh:
+      type: dht22
+      pin: GPIO5
+      measure: humidity
+      unit: percent
+
+actions:
+  read_temp: { driver: dht22, params: { device: air_temp } }
+  read_rh:   { driver: dht22, params: { device: air_rh } }
+
+tasks:
+  poll: { every: 2000, do: [read_temp, read_rh] }
+`;
+
+const BME280_YAML = `
+pulseir: "1"
+project:
+  name: bme280_test
+  version: "1.0"
+
+hardware:
+  buses:
+    sensor_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    air_temp:
+      type: bme280
+      bus: sensor_bus
+      address: 0x76
+      measure: temperature
+      unit: degC
+    air_pressure:
+      type: bme280
+      bus: sensor_bus
+      address: 0x76
+      measure: pressure
+      unit: hPa
+
+actions:
+  read_temp:     { driver: bme280, params: { device: air_temp } }
+  read_pressure: { driver: bme280, params: { device: air_pressure } }
+
+tasks:
+  poll: { every: 2000, do: [read_temp, read_pressure] }
+`;
+
+test('ds18b20: includes DallasTemperature library', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, '#include <DallasTemperature.h>');
+});
+
+test('ds18b20: includes OneWire library (from bus)', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, '#include <OneWire.h>');
+});
+
+test('ds18b20: declares object using bus reference', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, 'DallasTemperature water_temp(&probeBus);');
+});
+
+test('ds18b20: calls begin() in setupInterfaces()', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, 'water_temp.begin();');
+});
+
+test('ds18b20: action stub calls requestTemperatures and getTempCByIndex', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, 'water_temp.requestTemperatures();');
+  has(code, 'systemSensors.water_temp = water_temp.getTempCByIndex(0);');
+});
+
+test('ds18b20: has Requires comment', () => {
+  const code = new Codegen().generate(parse(DS18B20_YAML));
+  has(code, 'Requires: DallasTemperature');
+});
+
+test('dht22: includes DHT library', () => {
+  const code = new Codegen().generate(parse(DHT22_YAML));
+  has(code, '#include <DHT.h>');
+});
+
+test('dht22: declares object with pin macro and DHT22 type', () => {
+  const code = new Codegen().generate(parse(DHT22_YAML));
+  has(code, 'DHT air_temp(AIR_TEMP_PIN, DHT22);');
+  has(code, '#define AIR_TEMP_PIN');
+});
+
+test('dht22: temperature action calls readTemperature', () => {
+  const code = new Codegen().generate(parse(DHT22_YAML));
+  has(code, 'systemSensors.air_temp = air_temp.readTemperature();');
+});
+
+test('dht22: humidity action calls readHumidity', () => {
+  const code = new Codegen().generate(parse(DHT22_YAML));
+  has(code, 'systemSensors.air_rh = air_rh.readHumidity();');
+});
+
+test('bme280: includes Adafruit_BME280 library', () => {
+  const code = new Codegen().generate(parse(BME280_YAML));
+  has(code, '#include <Adafruit_BME280.h>');
+});
+
+test('bme280: declares object and calls begin with address', () => {
+  const code = new Codegen().generate(parse(BME280_YAML));
+  has(code, 'Adafruit_BME280 air_temp;');
+  has(code, 'air_temp.begin(0x76);');
+});
+
+test('bme280: temperature action calls readTemperature', () => {
+  const code = new Codegen().generate(parse(BME280_YAML));
+  has(code, 'systemSensors.air_temp = air_temp.readTemperature();');
+});
+
+test('bme280: pressure action calls readPressure and converts to hPa', () => {
+  const code = new Codegen().generate(parse(BME280_YAML));
+  has(code, 'systemSensors.air_pressure = air_pressure.readPressure() / 100.0F;');
+});
+
+// ---------------------------------------------------------------------------
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} backend test(s) failed`);
