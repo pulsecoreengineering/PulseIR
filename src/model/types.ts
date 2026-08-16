@@ -398,6 +398,42 @@ export interface Telemetry {
   channels: TelemetryChannel[];
 }
 
+/** One sensor to publish in the `communication.publish` list. */
+export interface CommunicationPublishItem {
+  /** Name of a declared sensor component. */
+  sensor: string;
+  /** Stable MQTT topic segment. Defaults to the sensor name. */
+  topic?: string;
+}
+
+/** One entry in the `communication.subscribe` list — either a parameter setpoint or an event trigger. */
+export interface CommunicationSubscribeItem {
+  /** Name of a declared parameter to expose as a remotely-settable setpoint. */
+  parameter?: string;
+  /** Name of a declared event to allow triggering via MQTT. */
+  event?: string;
+  /** Stable MQTT topic segment. Defaults to the parameter/event name. */
+  topic?: string;
+}
+
+/**
+ * Explicit MQTT communication contract.
+ *
+ * Without this block the codegen publishes every sensor and subscribes every
+ * parameter and every mqtt-sourced event. With it only the listed items are
+ * wired, and each carries an optional stable `topic:` segment so renaming the
+ * underlying sensor or parameter never silently breaks a dashboard.
+ *
+ * Machine state is always published when a state machine is declared — it does
+ * not need to appear in `publish`.
+ */
+export interface Communication {
+  /** Sensor readings to publish over MQTT. */
+  publish?: CommunicationPublishItem[];
+  /** Setpoints (parameters) and event triggers to subscribe. */
+  subscribe?: CommunicationSubscribeItem[];
+}
+
 export interface PulseSystem {
   name: string;
   version?: string;
@@ -424,6 +460,8 @@ export interface PulseSystem {
   diagnostics?: Diagnostics;
   /** Selective MQTT publishing per sensor, each with its own interval. */
   telemetry?: Telemetry;
+  /** Explicit MQTT publish/subscribe contract with stable topic names. */
+  communication?: Communication;
 
   metadata?: Metadata;
 }

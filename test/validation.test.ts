@@ -606,6 +606,111 @@ test('rejects telemetry when a channel has no interval and there is no default',
 });
 
 // ============================================================================
+// COMMUNICATION
+// ============================================================================
+
+function withComm(body: string): string {
+  return `
+project: {name: c, version: "1.0"}
+hardware:
+  buses:
+    broker: {interface: mqtt, host: mqtt.example.com}
+  devices:
+    temperature: {class: sensor, type: analog_input, pin: GPIO34}
+    pressure:    {class: sensor, type: analog_input, pin: GPIO35}
+events:
+  START: {source: external}
+  RESET: {source: external}
+parameters:
+  setpoint: {type: float, default: 25.0}
+machine:
+  states:
+    idle:
+    running:
+  transitions:
+    - {from: idle, on: START, to: running}
+    - {from: running, on: RESET, to: idle}
+${body}
+`;
+}
+
+test('accepts communication with publish and subscribe', () => {
+  const project = expectAccept(withComm(`communication:
+  publish:
+    - sensor: temperature
+      topic: temp
+  subscribe:
+    - parameter: setpoint
+    - event: RESET`), 'full communication block');
+
+  const comm = project.system.communication;
+  if (!comm) throw new Error('communication not parsed');
+  if (comm.publish?.length !== 1 || comm.publish[0].sensor !== 'temperature')
+    throw new Error('publish item not preserved');
+  if (comm.publish[0].topic !== 'temp')
+    throw new Error('stable topic not preserved');
+  if (comm.subscribe?.length !== 2)
+    throw new Error('subscribe items not preserved');
+});
+
+test('rejects communication publish referencing an unknown sensor', () => {
+  expectReject(
+    withComm(`communication:\n  publish:\n    - sensor: humidity`),
+    'not a declared sensor',
+    'unknown sensor'
+  );
+});
+
+test('rejects communication subscribe referencing an unknown parameter', () => {
+  expectReject(
+    withComm(`communication:\n  subscribe:\n    - parameter: target`),
+    'not a declared parameter',
+    'unknown parameter'
+  );
+});
+
+test('rejects communication subscribe referencing an unknown event', () => {
+  expectReject(
+    withComm(`communication:\n  subscribe:\n    - event: STOP`),
+    'not a declared event',
+    'unknown event'
+  );
+});
+
+test('rejects communication subscribe item with neither parameter nor event', () => {
+  expectReject(
+    withComm(`communication:\n  subscribe:\n    - topic: orphan`),
+    'must have "parameter:" or "event:"',
+    'empty subscribe item'
+  );
+});
+
+test('rejects communication subscribe item with both parameter and event', () => {
+  expectReject(
+    withComm(`communication:\n  subscribe:\n    - parameter: setpoint\n      event: RESET`),
+    'cannot have both',
+    'ambiguous subscribe item'
+  );
+});
+
+test('rejects a communication topic segment with illegal characters', () => {
+  expectReject(
+    withComm(`communication:\n  publish:\n    - sensor: temperature\n      topic: "temp/sensor"`),
+    'not allowed in an MQTT segment',
+    'topic with slash'
+  );
+});
+
+test('communication: event can be subscribed regardless of its source field', () => {
+  // RESET has source: external, but listing it in communication.subscribe is valid —
+  // the communication block is the declaration of MQTT access, not the event's source.
+  expectAccept(
+    withComm(`communication:\n  subscribe:\n    - event: RESET`),
+    'external-sourced event in subscribe'
+  );
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} validation test(s) failed`);

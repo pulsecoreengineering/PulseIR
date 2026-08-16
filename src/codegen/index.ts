@@ -34,6 +34,7 @@ import type {
   State,
   Transition,
   Parameter,
+  Event,
   Resource,
   StateRef,
   Action,
@@ -1850,23 +1851,60 @@ ${reads.join('\n')}
     const mqtt = this.mqttResource();
     if (!mqtt) return '';
 
-    const parameters  = this.project.system.parameters || [];
-    const mqttEvents  = (this.project.system.events || []).filter(
-      e => String(e.source) === 'mqtt'
-    );
-    const sensors = (this.project.system.components || []).filter(
-      c => String(c.class) === 'sensor'
-    );
+    const allComponents = this.project.system.components || [];
+    const allParameters = this.project.system.parameters || [];
+    const allEvents     = this.project.system.events || [];
+    const comm          = this.project.system.communication;
 
-    const hasSubscriptions = parameters.length > 0 || mqttEvents.length > 0;
+    // Build wiring lists. When communication: is declared, only listed items
+    // are wired; each can carry a stable topic segment that overrides the name.
+    // Without it, the implicit behaviour holds: all sensors publish, all
+    // parameters and mqtt-sourced events subscribe.
+    interface SensorWire { name: string; seg: string }
+    interface ParamWire  { parameter: Parameter; seg: string }
+    interface EventWire  { event: Event; seg: string }
+
+    let sensorWires: SensorWire[];
+    let paramWires:  ParamWire[];
+    let eventWires:  EventWire[];
+
+    if (comm) {
+      sensorWires = (comm.publish || []).map(item => ({
+        name: item.sensor,
+        seg:  this.topicSegment(item.topic ?? item.sensor),
+      }));
+      const subItems = comm.subscribe || [];
+      paramWires = subItems
+        .filter(item => item.parameter !== undefined)
+        .map(item => {
+          const parameter = allParameters.find(p => p.name === item.parameter)!;
+          return { parameter, seg: this.topicSegment(item.topic ?? item.parameter!) };
+        });
+      eventWires = subItems
+        .filter(item => item.event !== undefined)
+        .map(item => {
+          const event = allEvents.find(e => e.name === item.event)!;
+          return { event, seg: this.topicSegment(item.topic ?? item.event!) };
+        });
+    } else {
+      sensorWires = allComponents
+        .filter(c => String(c.class) === 'sensor')
+        .map(c => ({ name: c.name, seg: this.topicSegment(c.name) }));
+      paramWires = allParameters.map(p => ({ parameter: p, seg: this.topicSegment(p.name) }));
+      eventWires = allEvents
+        .filter(e => String(e.source) === 'mqtt')
+        .map(e => ({ event: e, seg: this.topicSegment(e.name) }));
+    }
+
+    const hasSubscriptions = paramWires.length > 0 || eventWires.length > 0;
     // When telemetry: is declared, sensor publishing moves to runTelemetry(),
     // so publishMqtt() only needs to exist for machine-state publishing.
     const telemetryDeclared = !!this.project.system.telemetry;
-    const hasPublications  = (!telemetryDeclared && sensors.length > 0) || this.hasMachine;
+    const hasPublications   = (!telemetryDeclared && sensorWires.length > 0) || this.hasMachine;
 
     if (!hasSubscriptions && !hasPublications) return '';
 
-    const client = this.mqttClientVar(mqtt);
+    const client  = this.mqttClientVar(mqtt);
     const binding = mqtt.binding || {};
 
     // The topic namespace — the project name by default, overridable in the model.
@@ -1876,10 +1914,9 @@ ${reads.join('\n')}
 
     // ── onMqttMessage ──────────────────────────────────────────────────────
 
-    const hasPersistAndMqtt = parameters.some(p => p.persist) && hasSubscriptions;
+    const hasPersistAndMqtt = paramWires.some(w => w.parameter.persist) && hasSubscriptions;
 
-    const setpointCases = parameters.map(p => {
-      const seg = this.topicSegment(p.name);
+    const setpointCases = paramWires.map(({ parameter: p, seg }) => {
       const field = `systemParameters.${this.sanitize(p.name)}`;
       let conv: string;
       switch (p.type) {
@@ -1887,13 +1924,11 @@ ${reads.join('\n')}
         case 'bool':   conv = `${field} = buf[0] == '1' || strcmp(buf, "true") == 0;`; break;
         default:       conv = `${field} = (int)atol(buf);`;                             break;
       }
-      // If any parameter is persisted, save after every setpoint update.
       const save = hasPersistAndMqtt ? ' saveParameters();' : '';
       return `  if (strcmp(suffix, "/setpoint/${seg}") == 0) { ${conv}${save} return; }`;
     });
 
-    const eventCases = mqttEvents.map(e => {
-      const seg   = this.topicSegment(e.name);
+    const eventCases = eventWires.map(({ event: e, seg }) => {
       const evSym = `EVENT_${this.sanitizeUpper(e.name)}`;
       const dispatch = this.hasMachine
         ? `fsm.sendEvent(${evSym})`
@@ -1918,14 +1953,12 @@ ${reads.join('\n')}
     // ── connectMqtt ────────────────────────────────────────────────────────
 
     const subscribeLines = [
-      ...parameters.map(p => {
-        const seg = this.topicSegment(p.name);
-        return `  snprintf(_t, sizeof(_t), "%s/setpoint/${seg}", _mqttPrefix);\n  ${client}.subscribe(_t);`;
-      }),
-      ...mqttEvents.map(e => {
-        const seg = this.topicSegment(e.name);
-        return `  snprintf(_t, sizeof(_t), "%s/event/${seg}", _mqttPrefix);\n  ${client}.subscribe(_t);`;
-      }),
+      ...paramWires.map(({ seg }) =>
+        `  snprintf(_t, sizeof(_t), "%s/setpoint/${seg}", _mqttPrefix);\n  ${client}.subscribe(_t);`
+      ),
+      ...eventWires.map(({ seg }) =>
+        `  snprintf(_t, sizeof(_t), "%s/event/${seg}", _mqttPrefix);\n  ${client}.subscribe(_t);`
+      ),
     ];
 
     // client_id binding overrides MQTT_DEVICE_ID for the broker connection.
@@ -1946,12 +1979,11 @@ ${reads.join('\n')}
     // ── publishMqtt ────────────────────────────────────────────────────────
 
     const publishLines: string[] = [];
-    // Sensors move to runTelemetry() when telemetry: is declared.
-    if (!telemetryDeclared && sensors.length > 0) {
+    const effectiveSensorWires = telemetryDeclared ? [] : sensorWires;
+    if (effectiveSensorWires.length > 0) {
       publishLines.push('  // Sensor readings.');
-      for (const s of sensors) {
-        const seg   = this.topicSegment(s.name);
-        const field = `systemSensors.${this.sanitize(s.name)}`;
+      for (const { name, seg } of effectiveSensorWires) {
+        const field = `systemSensors.${this.sanitize(name)}`;
         publishLines.push(
           `  snprintf(_t, sizeof(_t), "%s/${seg}", _mqttPrefix);`,
           `  snprintf(_v, sizeof(_v), "%.4g", ${field});`,
@@ -1965,11 +1997,10 @@ ${reads.join('\n')}
       publishLines.push(`  ${client}.publish(_t, fsm.getCurrentName());`);
     }
 
-    const effectiveSensors = telemetryDeclared ? [] : sensors;
     const publishBody = [
       `  if (!${client}.connected()) return;`,
       '  char _t[128];',
-      ...(effectiveSensors.length > 0 ? ['  char _v[32];'] : []),
+      ...(effectiveSensorWires.length > 0 ? ['  char _v[32];'] : []),
       '',
       ...publishLines,
     ].join('\n');

@@ -26,6 +26,9 @@ import type {
   Diagnostics,
   Telemetry,
   TelemetryChannel,
+  Communication,
+  CommunicationPublishItem,
+  CommunicationSubscribeItem,
 } from '../model/index.js';
 import type { SourceResolver } from './resolver.js';
 import { findPinConflicts, describePinConflict } from '../analysis/pins.js';
@@ -532,8 +535,9 @@ export class Parser {
       }
     }
 
-    const diagnostics = this.parseDiagnostics(raw.diagnostics, parameters || []);
-    const telemetry   = this.parseTelemetry(raw.telemetry, components || [], parameters || []);
+    const diagnostics    = this.parseDiagnostics(raw.diagnostics, parameters || []);
+    const telemetry      = this.parseTelemetry(raw.telemetry, components || [], parameters || []);
+    const communication  = this.parseCommunication(raw.communication, components || [], events, parameters || []);
 
     return {
       name: (raw.name as string) || ((raw.project as Record<string, unknown>)?.name as string) || 'unnamed',
@@ -549,6 +553,7 @@ export class Parser {
       libraries,
       diagnostics,
       telemetry,
+      communication,
     };
   }
 
@@ -1038,6 +1043,119 @@ export class Parser {
 
     this.assertTelemetryIntervals({ interval_ms, topic_prefix, channels }, parameters);
     return { interval_ms, topic_prefix, channels };
+  }
+
+  private parseCommunication(
+    raw: unknown,
+    components: Component[],
+    events: Event[],
+    parameters: Parameter[]
+  ): Communication | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (!isPlainObject(raw)) {
+      throw new ParseError('communication: must be a mapping (publish:, subscribe:)');
+    }
+
+    const sensorNames = new Set(
+      components.filter(c => String(c.class) === 'sensor').map(c => c.name)
+    );
+    const paramNames  = new Set(parameters.map(p => p.name));
+    const eventNames  = new Set(events.map(e => e.name));
+
+    const validTopicSeg = (topic: string, where: string): void => {
+      if (!/^[A-Za-z0-9_.-]+$/.test(topic)) {
+        throw new ParseError(
+          `${where} topic "${topic}" contains characters not allowed in an MQTT segment ` +
+          '(use only A-Z a-z 0-9 _ . -)'
+        );
+      }
+    };
+
+    let publish: CommunicationPublishItem[] | undefined;
+    if (raw.publish !== undefined) {
+      const rawList = this.asList(raw.publish, 'communication.publish');
+      if (!rawList) throw new ParseError('communication.publish must be a list');
+      publish = rawList.map((item, i) => {
+        if (!isPlainObject(item)) {
+          throw new ParseError(`communication.publish[${i}] must be a mapping with "sensor:"`);
+        }
+        const d = item as Record<string, unknown>;
+        if (typeof d.sensor !== 'string' || !d.sensor) {
+          throw new ParseError(`communication.publish[${i}] must have a "sensor:" field`);
+        }
+        if (!sensorNames.has(d.sensor)) {
+          const avail = [...sensorNames].join(', ') || '(none declared)';
+          throw new ParseError(
+            `communication.publish sensor "${d.sensor}" is not a declared sensor component. ` +
+            `Available: ${avail}`
+          );
+        }
+        const out: CommunicationPublishItem = { sensor: d.sensor };
+        if (d.topic !== undefined) {
+          const t = String(d.topic);
+          validTopicSeg(t, `communication.publish[${i}]`);
+          out.topic = t;
+        }
+        return out;
+      });
+    }
+
+    let subscribe: CommunicationSubscribeItem[] | undefined;
+    if (raw.subscribe !== undefined) {
+      const rawList = this.asList(raw.subscribe, 'communication.subscribe');
+      if (!rawList) throw new ParseError('communication.subscribe must be a list');
+      subscribe = rawList.map((item, i) => {
+        if (!isPlainObject(item)) {
+          throw new ParseError(
+            `communication.subscribe[${i}] must be a mapping with "parameter:" or "event:"`
+          );
+        }
+        const d = item as Record<string, unknown>;
+        const param = d.parameter !== undefined ? String(d.parameter) : undefined;
+        const event = d.event !== undefined ? String(d.event) : undefined;
+        if (!param && !event) {
+          throw new ParseError(
+            `communication.subscribe[${i}] must have "parameter:" or "event:"`
+          );
+        }
+        if (param && event) {
+          throw new ParseError(
+            `communication.subscribe[${i}] cannot have both "parameter:" and "event:" — split into two items`
+          );
+        }
+        if (param !== undefined && !paramNames.has(param)) {
+          const avail = [...paramNames].join(', ') || '(none declared)';
+          throw new ParseError(
+            `communication.subscribe parameter "${param}" is not a declared parameter. Available: ${avail}`
+          );
+        }
+        if (event !== undefined && !eventNames.has(event)) {
+          const avail = [...eventNames].join(', ') || '(none declared)';
+          throw new ParseError(
+            `communication.subscribe event "${event}" is not a declared event. Available: ${avail}`
+          );
+        }
+        const out: CommunicationSubscribeItem = {};
+        if (param !== undefined) out.parameter = param;
+        if (event !== undefined) out.event = event;
+        if (d.topic !== undefined) {
+          const t = String(d.topic);
+          validTopicSeg(t, `communication.subscribe[${i}]`);
+          out.topic = t;
+        }
+        return out;
+      });
+    }
+
+    if (!publish?.length && !subscribe?.length) {
+      this.warnings.push('communication: declared with no publish: or subscribe: — has no effect');
+      return undefined;
+    }
+
+    return {
+      ...(publish?.length ? { publish } : {}),
+      ...(subscribe?.length ? { subscribe } : {}),
+    };
   }
 
   /** Validate that heartbeat interval references a declared int parameter. */
