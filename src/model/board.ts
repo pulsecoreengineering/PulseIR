@@ -35,6 +35,25 @@ export interface BoardDefinition {
   pins: Record<string, string>;
 
   /**
+   * Per-pin capability tags, keyed by the physical identifier (GPIO34, …).
+   *
+   * Tags:
+   *   "input_only"  — the pin cannot drive output; wiring an output here is an error.
+   *   "reserved"    — the pin is wired internally (SPI flash, PSRAM); any use is an error.
+   *   "strapping"   — boot-mode sensitive; driving it LOW at reset may block startup (warning).
+   *   "internal"    — connected to an on-board component; use with care (warning).
+   */
+  pinCaps?: Record<string, string[]>;
+
+  /**
+   * Physical GPIO identifiers that belong to ADC unit 2 on this MCU.
+   * On the ESP32 family ADC2 is unavailable while Wi-Fi is active.
+   * The checker emits a warning when any of these are used as analog_input
+   * alongside an MQTT or Wi-Fi bus.
+   */
+  adc2Pins?: string[];
+
+  /**
    * Board-level defaults for interface parameters, e.g. i2c_frequency.
    * These are informational; the codegen uses explicit values from the model.
    */

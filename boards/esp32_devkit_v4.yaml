@@ -68,6 +68,41 @@ pins:
   TX2: GPIO17
   RX2: GPIO16
 
+pin_caps:
+  # Input-only — no output driver, no internal pull-up/down (ESP32 TRM §4.2)
+  GPIO34: [input_only]
+  GPIO35: [input_only]
+  GPIO36: [input_only]
+  GPIO39: [input_only]
+
+  # Reserved — routed to internal SPI flash; driving these crashes the chip
+  GPIO6:  [reserved]
+  GPIO7:  [reserved]
+  GPIO8:  [reserved]
+  GPIO9:  [reserved]
+  GPIO10: [reserved]
+  GPIO11: [reserved]
+
+  # Strapping pins — state at reset selects boot mode (ESP32 TRM §2.4)
+  GPIO0:  [strapping]
+  GPIO2:  [strapping]
+  GPIO5:  [strapping]
+  GPIO12: [strapping]
+  GPIO15: [strapping]
+
+# ADC2 shares its SAR with the Wi-Fi RF subsystem; unavailable while Wi-Fi is active
+adc2_pins:
+  - GPIO0
+  - GPIO2
+  - GPIO4
+  - GPIO12
+  - GPIO13
+  - GPIO14
+  - GPIO15
+  - GPIO25
+  - GPIO26
+  - GPIO27
+
 defaults:
   i2c_frequency: 100000
   spi_frequency: 1000000
