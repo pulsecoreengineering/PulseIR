@@ -12,7 +12,10 @@ hardware:
   buses:
     console: { interface: uart, port: 0, baud: 115200 }
   devices:
-    led: { type: digital_output, pin: LED_BUILTIN }
+    led:       { type: digital_output, pin: LED_BUILTIN }
+    motor_en:  { type: pwm_output,     pin: GPIO25 }
+    motor_in1: { type: digital_output, pin: GPIO26 }
+    motor_in2: { type: digital_output, pin: GPIO27 }
 
 parameters:
   blink_ms: { type: int, default: 500, range: [100, 5000], unit: ms }
