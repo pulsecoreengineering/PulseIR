@@ -3,6 +3,8 @@ dist/
 .DS_Store
 *.log
 .vscode/
+!.vscode/launch.json
+!.vscode/tasks.json
 .idea/
 *.swp
 *.swo
