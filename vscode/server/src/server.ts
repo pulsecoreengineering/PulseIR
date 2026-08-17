@@ -7,7 +7,10 @@ import {
   InitializeParams,
   TextDocumentSyncKind,
   InitializeResult,
+  TextDocumentPositionParams,
+  CodeActionParams,
 } from 'vscode-languageserver/node';
+import { getCompletions, getHover, getCodeActions, EMPTY_MODEL, type ModelNames } from './providers.js';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -21,6 +24,7 @@ import { EspIdfBackend } from '../../../src/codegen/espidf.js';
 import { ZephyrBackend } from '../../../src/codegen/zephyr.js';
 import { DiagramEmitter } from '../../../src/emit/diagram.js';
 import type { PlatformBackend } from '../../../src/codegen/backend.js';
+import type { State } from '../../../src/model/types.js';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents  = new TextDocuments(TextDocument);
@@ -28,6 +32,9 @@ const documents  = new TextDocuments(TextDocument);
 connection.onInitialize((_params: InitializeParams): InitializeResult => ({
   capabilities: {
     textDocumentSync: TextDocumentSyncKind.Incremental,
+    completionProvider: { resolveProvider: false, triggerCharacters: [' ', ':'] },
+    hoverProvider: true,
+    codeActionProvider: true,
   },
 }));
 
@@ -92,6 +99,71 @@ function validateDocument(textDocument: TextDocument): void {
 
   connection.sendDiagnostics({ uri, diagnostics });
 }
+
+// ---------------------------------------------------------------------------
+// Intelligence providers — completions, hover, code actions
+// ---------------------------------------------------------------------------
+
+function tryGetModelNames(doc: ReturnType<typeof documents.get>): ModelNames {
+  if (!doc) return EMPTY_MODEL;
+  const text   = doc.getText();
+  const uri    = doc.uri;
+  const fsPath = uriToFsPath(uri);
+  try {
+    const parser   = new Parser();
+    const resolver = fsPath ? new FileResolver(path.dirname(fsPath)) : undefined;
+    const project  = resolver
+      ? parser.parse(text, { origin: fsPath, resolver })
+      : parser.parse(text);
+    const params = project.system.parameters ?? [];
+    return {
+      states:      getAllStateLeafNames(project.system.states),
+      events:      project.system.events.map(e => e.name),
+      allParams:   params.map(p => p.name),
+      intParams:   params.filter(p => p.type === 'int').map(p => p.name),
+      busNames:    (project.system.resources ?? []).map(r => r.name),
+      actionNames: [...new Map(
+        (project.system.transitions ?? [])
+          .flatMap(t => t.actions ?? [])
+          .map(a => [a.name, a.name])
+      ).values()],
+    };
+  } catch {
+    return EMPTY_MODEL;
+  }
+}
+
+function getAllStateLeafNames(states: State[], prefix = ''): string[] {
+  const names: string[] = [];
+  for (const s of states) {
+    const fullPath = prefix ? `${prefix}/${s.name}` : s.name;
+    names.push(s.name);
+    if (fullPath !== s.name) names.push(fullPath);
+    for (const r of s.regions ?? []) {
+      names.push(...getAllStateLeafNames(r.states, fullPath));
+    }
+  }
+  return [...new Set(names)];
+}
+
+connection.onCompletion((params: TextDocumentPositionParams) => {
+  const doc   = documents.get(params.textDocument.uri);
+  if (!doc) return [];
+  const model = tryGetModelNames(doc);
+  return getCompletions(doc, params.position, model);
+});
+
+connection.onHover((params: TextDocumentPositionParams) => {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return null;
+  return getHover(doc, params.position);
+});
+
+connection.onCodeAction((params: CodeActionParams) => {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return [];
+  return getCodeActions(doc, params.range, params.context.diagnostics);
+});
 
 // ---------------------------------------------------------------------------
 // Custom request: generate code
