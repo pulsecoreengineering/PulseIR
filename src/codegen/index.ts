@@ -2221,7 +2221,6 @@ static void pollCommands() {
         const device = (this.project.system.components || []).find(c => c.name === deviceName);
         if (!device) break;
         const objVar  = this.sanitize(deviceName);
-        const bufSize = (typeof device.config?.cols === 'number' ? device.config.cols : 16) + 1;
         const lines: string[] = [];
 
         if (params.clear) lines.push(`  ${objVar}.clear();`);
@@ -2233,13 +2232,13 @@ static void pollCommands() {
             const row = (typeof item === 'object' && item && !Array.isArray(item) ? (item as Record<string, unknown>).row : undefined) ?? idx;
             const col = (typeof item === 'object' && item && !Array.isArray(item) ? (item as Record<string, unknown>).col : undefined) ?? 0;
             const fmt = typeof item === 'string' ? item : (typeof (item as Record<string, unknown>).format === 'string' ? (item as Record<string, unknown>).format as string : undefined);
-            lines.push(...this.renderLcdLine(String(fmt ?? ''), Number(row), Number(col), objVar, bufSize));
+            lines.push(...this.renderLcdLine(String(fmt ?? ''), Number(row), Number(col), objVar, 0));
           });
         } else if (typeof params.format === 'string') {
           // Single-line form: format, row, col
           const row = params.row ?? 0;
           const col = params.col ?? 0;
-          lines.push(...this.renderLcdLine(params.format, Number(row), Number(col), objVar, bufSize));
+          lines.push(...this.renderLcdLine(params.format, Number(row), Number(col), objVar, 0));
         } else {
           // No format — legacy stub
           const col = params.col ?? 0;
@@ -3708,50 +3707,47 @@ ${implementations.join('\n\n')}`;
    * A literal % in the template is doubled for snprintf.
    * If the template has no {name} refs, print() is used directly.
    */
-  private renderLcdLine(fmt: string, row: number, col: number, objVar: string, bufSize: number): string[] {
-    const refs: string[] = [];
-    // Accept both {name} and {device.channel} refs.
-    const refPattern = /\{([A-Za-z_][A-Za-z0-9_.]*)\}/g;
+  private renderLcdLine(fmt: string, row: number, col: number, objVar: string, _bufSize: number): string[] {
+    // Split the format string into alternating literal-text and {ref} segments.
+    // Using display.print(value, decimals) instead of snprintf avoids the AVR
+    // limitation where snprintf("%.1f") silently outputs nothing without the
+    // -lprintf_flt linker flag.
+    type Seg = { kind: 'text'; value: string } | { kind: 'ref'; name: string };
+    const segments: Seg[] = [];
+    const re = /\{([A-Za-z_][A-Za-z0-9_.]*)\}/g;
+    let last = 0;
     let m: RegExpExecArray | null;
     // eslint-disable-next-line no-cond-assign
-    while ((m = refPattern.exec(fmt)) !== null) refs.push(m[1]);
-
-    if (refs.length === 0) {
-      // Pure literal — no snprintf needed.
-      const escaped = fmt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      return [
-        `  ${objVar}.setCursor(${col}, ${row});`,
-        `  ${objVar}.print("${escaped}");`,
-      ];
+    while ((m = re.exec(fmt)) !== null) {
+      if (m.index > last) segments.push({ kind: 'text', value: fmt.slice(last, m.index) });
+      segments.push({ kind: 'ref', name: m[1] });
+      last = m.index + m[0].length;
     }
+    if (last < fmt.length) segments.push({ kind: 'text', value: fmt.slice(last) });
 
-    // Strip device prefix from a ref to get the bare channel/field name.
-    const fieldOf = (ref: string) =>
-      ref.includes('.') ? ref.slice(ref.indexOf('.') + 1) : ref;
+    // Strip device prefix: {clock.hour} → hour field name.
+    const fieldOf = (name: string) =>
+      name.includes('.') ? name.slice(name.indexOf('.') + 1) : name;
 
-    // Build the snprintf format string and argument list.
-    const snprintfFmt = fmt
-      .replace(/%/g, '%%')   // escape literal % before we add our own
-      .replace(/\{([A-Za-z_][A-Za-z0-9_.]*)\}/g, (_, name: string) => {
-        return this.isRtcChannel(name) ? '%02d' : '%.1f';
-      });
-
-    const args = refs.map(name =>
-      this.isRtcChannel(name)
-        ? `(int)systemSensors.${this.sanitize(fieldOf(name))}`
-        : `systemSensors.${this.sanitize(fieldOf(name))}`
-    );
-
-    const escaped = snprintfFmt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    // Wrap in a block so multiple lines in one action don't redeclare _lcd_buf.
-    return [
-      `  {`,
-      `    char _lcd_buf[${bufSize}];`,
-      `    snprintf(_lcd_buf, sizeof(_lcd_buf), "${escaped}", ${args.join(', ')});`,
-      `    ${objVar}.setCursor(${col}, ${row});`,
-      `    ${objVar}.print(_lcd_buf);`,
-      `  }`,
-    ];
+    const lines: string[] = [`  ${objVar}.setCursor(${col}, ${row});`];
+    for (const seg of segments) {
+      if (seg.kind === 'text') {
+        if (!seg.value) continue;
+        const esc = seg.value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        lines.push(`  ${objVar}.print("${esc}");`);
+      } else {
+        const field = `systemSensors.${this.sanitize(fieldOf(seg.name))}`;
+        if (this.isRtcChannel(seg.name)) {
+          // Zero-pad single-digit RTC values (hours, minutes, seconds).
+          lines.push(`  if ((int)${field} < 10) ${objVar}.print('0');`);
+          lines.push(`  ${objVar}.print((int)${field});`);
+        } else {
+          // display.print(float, digits) works on AVR and ESP32.
+          lines.push(`  ${objVar}.print(${field}, 1);`);
+        }
+      }
+    }
+    return lines;
   }
 }
 
