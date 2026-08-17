@@ -1493,11 +1493,11 @@ ${libSection}
 /**
  * Package the split project output as a zip.
  *
- * Files from `generated` are rewritten on every run and live at the sketch
- * root. Files from `scaffolds` contain the guard and action stubs the user
- * fills in; the CLI writes them only when absent. In the zip they sit under
- * `src/` (the paths from `generateFiles()` already include the prefix), so
- * unzipping gives a folder ready to open in PlatformIO or the Arduino IDE.
+ * All source files (generated and scaffolds) go under `src/` so unzipping
+ * gives a single coherent PlatformIO project. `platformio.ini` is placed at
+ * the folder root so the IDE can open it directly. Scaffold paths from
+ * `generateFiles()` already include the `src/` prefix; generated file paths
+ * do not, so we add it here without touching codegen.
  */
 function downloadProjectZip(): void {
   if (!current) return;
@@ -1505,17 +1505,21 @@ function downloadProjectZip(): void {
   const folder = safeFolderName(project.name);
   const entries: Record<string, string> = {};
 
+  // platformio.ini at the root so the folder opens directly in PlatformIO.
+  entries[`${folder}/platformio.ini`] = generatePlatformioIni(project);
+
+  // Generated files (e.g. uart_sample.ino, uart_sample_generated.h) — place
+  // under src/ to sit beside the scaffold files.
   for (const file of generatedProject.generated) {
-    entries[`${folder}/${file.path}`] = file.contents;
+    entries[`${folder}/src/${file.path}`] = file.contents;
   }
+
+  // Scaffold paths already include the src/ prefix (e.g. src/actions.cpp).
   for (const file of generatedProject.scaffolds) {
-    // Scaffolds are "write once" — label them so the user knows not to
-    // delete them and expect the generator to regenerate them.
     entries[`${folder}/${file.path}`] = file.contents;
   }
 
-  // Include user-authored C++ files alongside the generated sketch.
-  // They go into src/ so unzipping gives a single coherent PlatformIO folder.
+  // User-authored C++ files also belong in src/.
   for (const [name, contents] of Object.entries(workspace.files)) {
     if (/\.(cpp|h|c)$/i.test(name)) {
       const dest = `${folder}/src/${name}`;
