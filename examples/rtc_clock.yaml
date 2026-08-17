@@ -21,27 +21,27 @@ target: esp32
 
 hardware:
   buses:
-    - name: i2c_bus
+    # Bus settings are flat — no `binding:` wrapper.
+    i2c_bus:
       interface: i2c
-      binding:
-        sda: 21
-        scl: 22
-        frequency: 400000
+      sda: GPIO21
+      scl: GPIO22
+      frequency: 400000
 
   devices:
     # DS3231 RTC: auto-populates hour, minute, second as sensor channels.
-    - name: clock
+    clock:
       type: ds3231
       bus: i2c_bus
 
     # 16×2 I2C character LCD (PCF8574 backpack at 0x27).
-    - name: display
+    # Device config fields sit flat on the device — no `config:` wrapper.
+    display:
       type: lcd_i2c
       bus: i2c_bus
-      config:
-        address: 0x27
-        cols: 16
-        rows: 2
+      address: 0x27
+      cols: 16
+      rows: 2
 
 actions:
   read_time:
@@ -60,8 +60,9 @@ actions:
           row: 0
           col: 0
 
+# Tasks are a map keyed by name, not a list.
 tasks:
-  - name: clock_tick
+  clock_tick:
     every: 1000
-    actions: [read_time, show_time]
+    do: [read_time, show_time]
     description: Read the RTC and refresh the display every second
