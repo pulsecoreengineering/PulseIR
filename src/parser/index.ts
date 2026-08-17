@@ -101,8 +101,9 @@ const BUILTIN_DEVICE_TYPES: Record<string, { class: string; driver: string }> = 
   // Display and peripheral devices.
   lcd_i2c:        { class: 'actuator', driver: 'lcd_print' },
   oled_i2c:       { class: 'actuator', driver: 'oled_print' },
-  ds3231:         { class: 'service',  driver: 'rtc_read' },
-  ds1307:         { class: 'service',  driver: 'rtc_read' },
+  // RTC modules expose time channels into systemSensors.
+  ds3231:         { class: 'sensor',   driver: 'rtc_read' },
+  ds1307:         { class: 'sensor',   driver: 'rtc_read' },
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -530,7 +531,7 @@ export class Parser {
     this.assertTimedTransitions(transitions, parameters || []);
     this.assertPeriodicTransitions(transitions, parameters || []);
     this.assertTaskIntervals(tasks, parameters || []);
-    this.assertLogRefs(tasks, commands, parameters || [], components || []);
+    this.assertLogRefs(tasks, commands, parameters || [], components || [], actionCatalogue);
     this.assertUsable(states, tasks, commands);
 
     // Buses and devices generate macros from the same name, so a collision
@@ -1565,14 +1566,28 @@ export class Parser {
         );
       }
 
+      const resolvedDriver = (def.driver as string) || builtin?.driver || type;
+
+      // RTC devices get a default channel set when the user doesn't declare any.
+      // The common case (hour/minute/second) is auto-populated; the user can
+      // override with an explicit channels: list to add day, month, year, etc.
+      let resolvedChannels = channels;
+      if (!resolvedChannels && resolvedDriver === 'rtc_read') {
+        resolvedChannels = [
+          { name: 'hour' },
+          { name: 'minute' },
+          { name: 'second' },
+        ];
+      }
+
       return {
         name,
         class: (declaredClass || builtin.class) as any,
-        driver: (def.driver as string) || builtin?.driver || type,
+        driver: resolvedDriver,
         type,
         bus: bus as string | undefined,
         config: Object.keys(config).length > 0 ? config : undefined,
-        channels,
+        channels: resolvedChannels,
         description: description as string | undefined,
       };
     });
@@ -2038,7 +2053,8 @@ export class Parser {
     tasks: Task[],
     commands: CommandSet | undefined,
     parameters: Parameter[],
-    components: Component[]
+    components: Component[],
+    actions?: Map<string, Action>
   ): void {
     const known = new Map<string, string>();
     for (const parameter of parameters) known.set(parameter.name, 'parameter');
@@ -2069,6 +2085,25 @@ export class Parser {
     for (const task of tasks) check(task.log, `Task "${task.name}"`);
     for (const command of commands?.commands || []) {
       check(command.log, `Command "${command.match}"`);
+    }
+
+    // Validate {name} refs in lcd_display / lcd_print action format strings.
+    if (actions) {
+      for (const [actionName, action] of actions) {
+        if (action.driver !== 'lcd_display' && action.driver !== 'lcd_print') continue;
+        const params = action.params ?? {};
+        const checkFmt = (fmt: unknown, hint: string) => {
+          if (typeof fmt !== 'string') return;
+          check(fmt, `Action "${actionName}" ${hint}`);
+        };
+        checkFmt(params.format, 'display format');
+        if (Array.isArray(params.lines)) {
+          params.lines.forEach((line, i) => {
+            if (typeof line === 'string') checkFmt(line, `display line ${i}`);
+            else if (isPlainObject(line)) checkFmt(line.format, `display line ${i}`);
+          });
+        }
+      }
     }
   }
 

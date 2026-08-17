@@ -852,6 +852,118 @@ test('bme280 channels: action reads all three channels', () => {
 });
 
 // ---------------------------------------------------------------------------
+// RTC + LCD display pipeline
+// ---------------------------------------------------------------------------
+
+const RTC_LCD_YAML = `
+pulseir: "1"
+project: {name: clock_display, version: "1.0"}
+target: {board: esp32}
+events: {TICK: {source: timer}}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock: {type: ds3231, bus: i2c_bus}
+    screen: {type: lcd_i2c, bus: i2c_bus, address: 0x27, cols: 16, rows: 2}
+actions:
+  read_clock: {driver: rtc_read, params: {device: clock}}
+  show_time:
+    driver: lcd_display
+    params:
+      device: screen
+      row: 0
+      col: 0
+      format: "{hour}:{minute}:{second}"
+tasks:
+  clock_task:
+    every: 1000
+    do: [read_clock, show_time]
+machine: {states: {idle: {}}, transitions: []}
+`;
+
+const RTC_LCD_MULTILINE_YAML = `
+pulseir: "1"
+project: {name: clock_temp, version: "1.0"}
+target: {board: esp32}
+events: {TICK: {source: timer}}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock: {type: ds3231, bus: i2c_bus}
+    env:
+      type: bme280
+      bus: i2c_bus
+      channels: [temperature]
+    screen: {type: lcd_i2c, bus: i2c_bus, address: 0x27, cols: 16, rows: 2}
+actions:
+  read_clock: {driver: rtc_read, params: {device: clock}}
+  read_env:   {driver: bme280,   params: {device: env}}
+  show_all:
+    driver: lcd_display
+    params:
+      device: screen
+      clear: true
+      lines:
+        - "{hour}:{minute}:{second}"
+        - {row: 1, col: 0, format: "T={temperature}C"}
+tasks:
+  display_task:
+    every: 1000
+    do: [read_clock, read_env, show_all]
+machine: {states: {idle: {}}, transitions: []}
+`;
+
+test('RTC: ds3231 auto-populates hour/minute/second channels', () => {
+  const project = parse(RTC_LCD_YAML);
+  const clock = project.system.components!.find(c => c.name === 'clock')!;
+  const code  = new Codegen().generate(project);
+  has(code, 'float hour;');
+  has(code, 'float minute;');
+  has(code, 'float second;');
+  hasNot(code, 'float clock;');
+});
+
+test('RTC: rtc_read action generates real RTClib code', () => {
+  const code = new Codegen().generate(parse(RTC_LCD_YAML));
+  has(code, 'DateTime _now = clock.now();');
+  has(code, 'systemSensors.hour = (float)_now.hour();');
+  has(code, 'systemSensors.minute = (float)_now.minute();');
+  has(code, 'systemSensors.second = (float)_now.second();');
+});
+
+test('LCD display: single-line format generates snprintf + setCursor + print', () => {
+  const code = new Codegen().generate(parse(RTC_LCD_YAML));
+  has(code, 'snprintf(_lcd_buf, sizeof(_lcd_buf), "%02d:%02d:%02d",');
+  has(code, '(int)systemSensors.hour');
+  has(code, '(int)systemSensors.minute');
+  has(code, '(int)systemSensors.second');
+  has(code, 'screen.setCursor(0, 0);');
+  has(code, 'screen.print(_lcd_buf);');
+});
+
+test('LCD display: multi-line with clear: true emits lcd.clear() + two writes', () => {
+  const code = new Codegen().generate(parse(RTC_LCD_MULTILINE_YAML));
+  has(code, 'screen.clear();');
+  // Row 0: RTC time — integer format
+  has(code, '"%02d:%02d:%02d"');
+  // Row 1: temperature — float format
+  has(code, '"T=%.1fC"');
+  has(code, 'screen.setCursor(0, 0);');
+  has(code, 'screen.setCursor(0, 1);');
+});
+
+test('LCD display: RTC channels use %02d, float sensors use %.1f', () => {
+  const code = new Codegen().generate(parse(RTC_LCD_MULTILINE_YAML));
+  // RTC values are integer-cast
+  has(code, '(int)systemSensors.hour');
+  // Sensor values are float
+  has(code, 'systemSensors.temperature');
+  hasNot(code, '(int)systemSensors.temperature');
+});
+
+// ---------------------------------------------------------------------------
 // Gap 2: Interrupt / ISR wiring
 // ---------------------------------------------------------------------------
 
@@ -1060,9 +1172,12 @@ test('ds3231: calls begin() in setupInterfaces()', () => {
   has(code, 'clock.begin();');
 });
 
-test('ds3231: rtc_read action stub generates commented DateTime example', () => {
+test('ds3231: rtc_read action generates real RTClib code for auto-populated channels', () => {
   const code = new Codegen().generate(parse(DS3231_YAML));
-  has(code, '// DateTime now = clock.now();');
+  has(code, 'DateTime _now = clock.now();');
+  has(code, 'systemSensors.hour = (float)_now.hour();');
+  has(code, 'systemSensors.minute = (float)_now.minute();');
+  has(code, 'systemSensors.second = (float)_now.second();');
 });
 
 // ---------------------------------------------------------------------------

@@ -436,6 +436,93 @@ machine: {states: {idle: {}}, transitions: []}
 });
 
 // ============================================================================
+// RTC + LCD integration schema tests
+// ============================================================================
+
+test('ds3231 auto-populates hour/minute/second channels when none declared', () => {
+  const project = parse(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock: {type: ds3231, bus: i2c_bus}
+machine: {states: {idle: {}}, transitions: []}
+`);
+  const clock = project.system.components!.find(c => c.name === 'clock')!;
+  equal(String(clock.class), 'sensor', 'ds3231 is a sensor');
+  equal(clock.driver, 'rtc_read', 'driver is rtc_read');
+  equal(clock.channels?.map(c => c.name), ['hour', 'minute', 'second'], 'default channels auto-populated');
+});
+
+test('ds3231 accepts explicit channel override (e.g. adding day/month/year)', () => {
+  const project = parse(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock:
+      type: ds3231
+      bus: i2c_bus
+      channels: [hour, minute, second, day, month, year]
+machine: {states: {idle: {}}, transitions: []}
+`);
+  const clock = project.system.components!.find(c => c.name === 'clock')!;
+  equal(clock.channels?.length, 6, 'six explicit channels');
+  equal(clock.channels?.map(c => c.name), ['hour', 'minute', 'second', 'day', 'month', 'year'], 'all six names');
+});
+
+test('lcd_display format refs are validated against sensors and parameters', () => {
+  // Valid: references declared RTC channels
+  const project = parse(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock: {type: ds3231, bus: i2c_bus}
+    screen: {type: lcd_i2c, bus: i2c_bus, address: 0x27, cols: 16, rows: 2}
+actions:
+  read_clock: {driver: rtc_read, params: {device: clock}}
+  show_time:  {driver: lcd_display, params: {device: screen, row: 0, format: "{hour}:{minute}:{second}"}}
+machine: {states: {idle: {}}, transitions: []}
+`);
+  equal(project.system.components!.find(c => c.name === 'clock')!.channels!.length, 3, 'clock has channels');
+});
+
+test('lcd_display format with unknown ref is rejected', () => {
+  expectReject(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock: {type: ds3231, bus: i2c_bus}
+    screen: {type: lcd_i2c, bus: i2c_bus, address: 0x27, cols: 16, rows: 2}
+actions:
+  show_time: {driver: lcd_display, params: {device: screen, row: 0, format: "{typo}"}}
+machine: {states: {idle: {}}, transitions: []}
+`, 'not a declared parameter or sensor', 'typo in lcd format rejected');
+});
+
+test('lcd_display multi-line form validates each line format string', () => {
+  expectReject(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock: {type: ds3231, bus: i2c_bus}
+    screen: {type: lcd_i2c, bus: i2c_bus, address: 0x27, cols: 16, rows: 2}
+actions:
+  show_all:
+    driver: lcd_display
+    params:
+      device: screen
+      lines:
+        - "{hour}:{minute}:{second}"
+        - {row: 1, col: 0, format: "{bad_ref}"}
+machine: {states: {idle: {}}, transitions: []}
+`, 'not a declared parameter or sensor', 'bad ref in multi-line lcd format rejected');
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} schema test(s) failed`);
