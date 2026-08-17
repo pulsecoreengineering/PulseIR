@@ -3235,8 +3235,9 @@ ${lines.join("\n")}${hint}`;
     // Display and peripheral devices.
     lcd_i2c: { class: "actuator", driver: "lcd_print" },
     oled_i2c: { class: "actuator", driver: "oled_print" },
-    ds3231: { class: "service", driver: "rtc_read" },
-    ds1307: { class: "service", driver: "rtc_read" }
+    // RTC modules expose time channels into systemSensors.
+    ds3231: { class: "sensor", driver: "rtc_read" },
+    ds1307: { class: "sensor", driver: "rtc_read" }
   };
   function isPlainObject(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -3524,7 +3525,7 @@ ${lines.join("\n")}${hint}`;
       this.assertTimedTransitions(transitions, parameters || []);
       this.assertPeriodicTransitions(transitions, parameters || []);
       this.assertTaskIntervals(tasks, parameters || []);
-      this.assertLogRefs(tasks, commands, parameters || [], components || []);
+      this.assertLogRefs(tasks, commands, parameters || [], components || [], actionCatalogue);
       this.assertUsable(states, tasks, commands);
       const busNames = new Set((resources || []).map((r) => r.name));
       for (const device of components || []) {
@@ -4032,7 +4033,17 @@ For a repeating cycle, alternate between two states.`);
       if (!isPlainObject(rawChannels)) {
         throw new ParseError("telemetry.channels must be a mapping of sensor name to channel options:\n  channels:\n    temperature:\n    humidity:\n      interval_ms: 10000");
       }
-      const sensorNames = new Set(components.filter((c) => String(c.class) === "sensor").map((c) => c.name));
+      const sensorNames = /* @__PURE__ */ new Set();
+      for (const c of components) {
+        if (String(c.class) !== "sensor")
+          continue;
+        if (c.channels?.length) {
+          for (const ch of c.channels)
+            sensorNames.add(ch.name);
+        } else {
+          sensorNames.add(c.name);
+        }
+      }
       const channels = Object.entries(rawChannels).map(([sensor, def]) => {
         if (!sensorNames.has(sensor)) {
           const available = [...sensorNames].join(", ") || "(none declared)";
@@ -4065,7 +4076,17 @@ For a repeating cycle, alternate between two states.`);
       if (!isPlainObject(raw)) {
         throw new ParseError("communication: must be a mapping (publish:, subscribe:)");
       }
-      const sensorNames = new Set(components.filter((c) => String(c.class) === "sensor").map((c) => c.name));
+      const sensorNames = /* @__PURE__ */ new Set();
+      for (const c of components) {
+        if (String(c.class) !== "sensor")
+          continue;
+        if (c.channels?.length) {
+          for (const ch of c.channels)
+            sensorNames.add(ch.name);
+        } else {
+          sensorNames.add(c.name);
+        }
+      }
       const paramNames = new Set(parameters.map((p) => p.name));
       const eventNames = new Set(events.map((e) => e.name));
       const validTopicSeg = (topic, where) => {
@@ -4273,7 +4294,14 @@ For a repeating cycle, alternate between two states.`);
       return entries.map(([name, def]) => {
         const type2 = def.type;
         if (!type2) {
-          throw new ParseError(`Device "${name}" has no "type"`);
+          throw new ParseError(`Device "${name}" has no "type". Every device must declare what it is:
+  hardware:
+    devices:
+      ${name}:
+        type: dht22   # or another type
+
+Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.
+For custom hardware, also add: class: sensor  # or actuator, service`);
         }
         const builtin = BUILTIN_DEVICE_TYPES[type2];
         const declaredClass = def.class;
@@ -4281,17 +4309,77 @@ For a repeating cycle, alternate between two states.`);
           throw new ParseError(`Device "${name}" has type "${type2}", which is not built in, so it needs an explicit "class" (sensor, actuator or service). Guessing would risk publishing an actuator as if it were a reading.
 Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         }
-        const { type: _t, class: _c, bus, description, ...config } = def;
+        const { type: _t, class: _c, bus, description, channels: rawChannels, ...config } = def;
+        const channels = this.parseSensorChannels(rawChannels, name);
+        if (channels && (declaredClass ?? builtin?.class) !== "sensor") {
+          throw new ParseError(`Device "${name}" declares "channels" but is not a sensor. Channels are only valid on sensor devices (class: sensor).`);
+        }
+        const resolvedDriver = def.driver || builtin?.driver || type2;
+        let resolvedChannels = channels;
+        if (!resolvedChannels && resolvedDriver === "rtc_read") {
+          resolvedChannels = [
+            { name: "hour" },
+            { name: "minute" },
+            { name: "second" }
+          ];
+        }
         return {
           name,
           class: declaredClass || builtin.class,
-          driver: def.driver || builtin?.driver || type2,
+          driver: resolvedDriver,
           type: type2,
           bus,
           config: Object.keys(config).length > 0 ? config : void 0,
+          channels: resolvedChannels,
           description
         };
       });
+    }
+    /**
+     * Parse the optional `channels:` field on a device.
+     *
+     * Accepts two forms:
+     *   channels: [temperature, humidity]          # list of bare names
+     *   channels:                                  # map of name to config
+     *     temperature:
+     *     humidity:
+     *       description: Relative humidity %
+     */
+    parseSensorChannels(raw, deviceName) {
+      if (raw === void 0 || raw === null)
+        return void 0;
+      if (Array.isArray(raw)) {
+        return raw.map((entry, i) => {
+          if (typeof entry !== "string" || !entry.trim()) {
+            throw new ParseError(`Device "${deviceName}" channels[${i}] must be a string name`);
+          }
+          const n = entry.trim();
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n)) {
+            throw new ParseError(`Device "${deviceName}" channel name "${n}" is not a valid C identifier`);
+          }
+          return { name: n };
+        });
+      }
+      if (isPlainObject(raw)) {
+        return Object.entries(raw).map(([chName, chDef]) => {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(chName)) {
+            throw new ParseError(`Device "${deviceName}" channel name "${chName}" is not a valid C identifier`);
+          }
+          const ch = { name: chName };
+          if (chDef !== null && isPlainObject(chDef)) {
+            const d = chDef;
+            if (d.measure !== void 0)
+              ch.measure = String(d.measure);
+            if (d.description !== void 0)
+              ch.description = String(d.description);
+            const { measure: _m, description: _d, ...extra } = d;
+            if (Object.keys(extra).length > 0)
+              ch.config = extra;
+          }
+          return ch;
+        });
+      }
+      throw new ParseError(`Device "${deviceName}" channels must be a list or a map, got ${typeof raw}`);
     }
     assertKnownInterface(name, iface) {
       const known = [
@@ -4627,13 +4715,19 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
      * Checked here rather than in the backend, so a typo is a model error with
      * the alternatives listed - not a C++ compile error in generated code.
      */
-    assertLogRefs(tasks, commands, parameters, components) {
+    assertLogRefs(tasks, commands, parameters, components, actions) {
       const known = /* @__PURE__ */ new Map();
       for (const parameter of parameters)
         known.set(parameter.name, "parameter");
       for (const device of components) {
-        if (device.class === "sensor")
+        if (device.class !== "sensor")
+          continue;
+        if (device.channels?.length) {
+          for (const ch of device.channels)
+            known.set(ch.name, `sensor channel (${device.name})`);
+        } else {
           known.set(device.name, "sensor");
+        }
       }
       const check = (template, where) => {
         if (template === void 0)
@@ -4649,6 +4743,27 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         check(task.log, `Task "${task.name}"`);
       for (const command of commands?.commands || []) {
         check(command.log, `Command "${command.match}"`);
+      }
+      if (actions) {
+        for (const [actionName, action] of actions) {
+          if (action.driver !== "lcd_display" && action.driver !== "lcd_print")
+            continue;
+          const params = action.params ?? {};
+          const checkFmt = (fmt, hint) => {
+            if (typeof fmt !== "string")
+              return;
+            check(fmt, `Action "${actionName}" ${hint}`);
+          };
+          checkFmt(params.format, "display format");
+          if (Array.isArray(params.lines)) {
+            params.lines.forEach((line, i) => {
+              if (typeof line === "string")
+                checkFmt(line, `display line ${i}`);
+              else if (isPlainObject(line))
+                checkFmt(line.format, `display line ${i}`);
+            });
+          }
+        }
       }
     }
     /** An `every:` transition naming a parameter must name a real int parameter. */
@@ -5107,6 +5222,12 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
     timestampType() {
       return "unsigned long";
     }
+    durationLiteral(ms) {
+      return `${ms}UL`;
+    }
+    gpioPinVar(sym) {
+      return `${sym}_PIN`;
+    }
     consoleStreamName(port) {
       return port === 0 ? "Serial" : `Serial${port}`;
     }
@@ -5148,6 +5269,59 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         "#else",
         `  analogWrite(${pin}, ${duty});`,
         "#endif"
+      ].join("\n");
+    }
+    pwmWriteLines(sym, _freqMacro, _resMacro, dutyExpr, board) {
+      const pin = `${sym}_PIN`;
+      const channel = `${sym}_CHANNEL`;
+      const isAvr = /avr|uno|mega|nano|atmega|leonardo/.test(board);
+      const isRp = /rp2040|pico/.test(board);
+      if (isAvr || isRp) {
+        return `  ${this.analogWriteExpr(pin, dutyExpr)};`;
+      }
+      return this.ledcWriteLines(pin, channel, dutyExpr, board);
+    }
+    httpGetLines(url, _board) {
+      return [
+        "  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)",
+        "  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)",
+        "  {",
+        "    HTTPClient http;",
+        `    http.begin(${url});`,
+        "    int httpCode = http.GET();",
+        "    if (httpCode == HTTP_CODE_OK) {",
+        "      String payload = http.getString();",
+        "      // TODO: parse payload",
+        "      (void)payload;",
+        "    }",
+        "    http.end();",
+        "  }",
+        "  #else",
+        "    // TODO: http_get is only available on ESP32/ESP8266.",
+        "  #endif",
+        "  (void)ctx;"
+      ].join("\n");
+    }
+    httpPostLines(url, body, contentType, _board) {
+      return [
+        "  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)",
+        "  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)",
+        "  {",
+        "    HTTPClient http;",
+        `    http.begin(${url});`,
+        `    http.addHeader("Content-Type", ${contentType});`,
+        `    int httpCode = http.POST(${body});`,
+        "    if (httpCode == HTTP_CODE_OK) {",
+        "      String payload = http.getString();",
+        "      // TODO: parse response",
+        "      (void)payload;",
+        "    }",
+        "    http.end();",
+        "  }",
+        "  #else",
+        "    // TODO: http_post is only available on ESP32/ESP8266.",
+        "  #endif",
+        "  (void)ctx;"
       ].join("\n");
     }
     emitInterface(resource, symbol) {
@@ -5291,6 +5465,8 @@ ${body}
       this.periodicBySource = /* @__PURE__ */ new Map();
       this.emissions = /* @__PURE__ */ new Map();
       this.libraries = /* @__PURE__ */ new Map();
+      this.nativeTimerBases = /* @__PURE__ */ new Set();
+      this.nativeTimerSetupLines = [];
       this.backend = backend;
     }
     /**
@@ -5981,10 +6157,18 @@ SystemSensors systemSensors = {};`;
     }
     declSensorStruct() {
       const sensors = (this.project.system.components || []).filter((c) => String(c.class) === "sensor");
-      const fields = sensors.length > 0 ? sensors.map((c) => {
-        const unitNote = c.config?.unit ? `, unit: ${c.config.unit}` : "";
-        return `  float ${this.sanitize(c.name)};  // driver: ${c.driver}${unitNote}`;
-      }).join("\n") : "  // TODO: Add your sensor readings here (e.g. float temperature;)";
+      const fieldLines = [];
+      for (const c of sensors) {
+        if (c.channels?.length) {
+          for (const ch of c.channels) {
+            fieldLines.push(`  float ${this.sanitize(ch.name)};  // ${c.driver}.${ch.measure ?? ch.name}`);
+          }
+        } else {
+          const unitNote = c.config?.unit ? `, unit: ${c.config.unit}` : "";
+          fieldLines.push(`  float ${this.sanitize(c.name)};  // driver: ${c.driver}${unitNote}`);
+        }
+      }
+      const fields = fieldLines.length > 0 ? fieldLines.join("\n") : "  // TODO: Add your sensor readings here (e.g. float temperature;)";
       return `// ============================================================================
 // SYSTEM SENSORS
 // ============================================================================
@@ -6279,7 +6463,7 @@ ${body}
         const pin = diag.heartbeat.pin ?? 2;
         const pinExpr = typeof pin === "number" ? String(pin) : `HEARTBEAT_PIN`;
         const ivRaw = diag.heartbeat.interval_ms ?? 1e3;
-        const ivExpr = typeof ivRaw === "number" ? `${ivRaw}UL` : `(unsigned long)systemParameters.${this.sanitize(String(ivRaw))}`;
+        const ivExpr = typeof ivRaw === "number" ? this.backend.durationLiteral(ivRaw) : `(${this.backend.timestampType()})systemParameters.${this.sanitize(String(ivRaw))}`;
         if (typeof pin !== "number") {
           setupLines.unshift(`  // Heartbeat pin \u2014 override HEARTBEAT_PIN if needed.`);
           includeLines.push(`#ifndef HEARTBEAT_PIN
@@ -6328,7 +6512,7 @@ ${loopLines.join("\n")}
       const channelBlocks = [];
       for (const ch of tel.channels) {
         const ivRaw = ch.interval_ms ?? tel.interval_ms;
-        const ivExpr = typeof ivRaw === "number" ? `${ivRaw}UL` : `(unsigned long)systemParameters.${this.sanitize(String(ivRaw))}`;
+        const ivExpr = typeof ivRaw === "number" ? this.backend.durationLiteral(ivRaw) : `(${this.backend.timestampType()})systemParameters.${this.sanitize(String(ivRaw))}`;
         const field = `systemSensors.${this.sanitize(ch.sensor)}`;
         const topicPart = ch.topic ? `"${ch.topic}"` : `"%s/${this.topicSegment(ch.sensor)}", _mqttPrefix`;
         const publishCall = ch.topic ? `snprintf(_t, sizeof(_t), ${topicPart});` : `snprintf(_t, sizeof(_t), "${this.topicSegment(ch.sensor)}", _mqttPrefix);`;
@@ -6401,10 +6585,11 @@ ${this.hasConsole && this.isVerbose ? `
 ` : ""}`;
       const loadCall = this.persistedParameters().length > 0 ? "\n  // Restore persisted parameters from NVS.\n  loadParameters();\n" : "";
       const diagSetup = this.project.system.diagnostics ? "\n  setupDiagnostics();\n" : "";
+      const timerStarts = this.nativeTimerSetupLines.length > 0 ? "\n  // Start platform-native task timers.\n" + this.nativeTimerSetupLines.map((l) => `  ${l}`).join("\n") + "\n" : "";
       const setupBody = `  // Buses and peripherals declared as resources. Nothing else is opened: a
   // peripheral the model did not declare has no business appearing here.
   setupInterfaces();
-${diagSetup}${loadCall}
+${timerStarts}${diagSetup}${loadCall}
   // Wire up the context handed to every action
   systemContext.parameters = &systemParameters;
   systemContext.sensors = &systemSensors;
@@ -6464,9 +6649,11 @@ ${this.backend.renderSetup(setupBody)}`;
         return "";
       const tsType = this.backend.timestampType();
       const now = this.backend.nowExpr();
+      this.nativeTimerBases.clear();
+      this.nativeTimerSetupLines = [];
       const blocks = tasks.map((task) => {
         const base = this.sanitize(task.name);
-        const interval = typeof task.every === "string" ? `(${tsType})systemParameters.${this.sanitize(task.every)}` : `${task.every}UL`;
+        const interval = typeof task.every === "string" ? `(${tsType})systemParameters.${this.sanitize(task.every)}` : this.backend.durationLiteral(task.every);
         const source2 = typeof task.every === "string" ? `${task.every} (parameter)` : `every ${task.every}ms`;
         const calls = [
           ...task.actions.map((a) => `  action_${this.sanitize(a.name)}(&systemContext);`),
@@ -6474,6 +6661,14 @@ ${this.backend.renderSetup(setupBody)}`;
           // the reading it just took, not the one before it.
           ...task.log ? [this.logLines(task.log, "  ")] : []
         ].join("\n");
+        const nativeTimer = this.backend.timerTask?.(base, interval, calls);
+        if (nativeTimer !== void 0) {
+          this.nativeTimerBases.add(base);
+          this.nativeTimerSetupLines.push(nativeTimer.setup);
+          return `// Task "${task.name}" - ${source2} (k_timer/k_work workqueue).${task.description ? `
+// ${task.description}` : ""}
+${nativeTimer.decls}`;
+        }
         return `// Task "${task.name}" - ${source2}.${task.description ? `
 // ${task.description}` : ""}
 static ${tsType} dueAt_${base} = 0;
@@ -6496,13 +6691,21 @@ static void runTask_${base}() {
 ${calls}
 }`;
       });
-      return `// ============================================================================
+      const hasPolling = tasks.some((t) => !this.nativeTimerBases.has(this.sanitize(t.name)));
+      const hasNative = this.nativeTimerBases.size > 0;
+      const header = hasNative && !hasPolling ? `// ============================================================================
+// TASKS
+// ============================================================================
+//
+// Each task runs on the Zephyr system workqueue, fired by a k_timer.  The
+// timer's start() call is in _setup(); no polling is needed in main().` : `// ============================================================================
 // TASKS
 // ============================================================================
 //
 // Each runs on its own interval, checked every pass of loop(). An interval
 // naming a parameter is read every time, so retuning it takes effect at once.
-// Subtraction on unsigned long is correct across the millis() rollover.
+// Subtraction on unsigned long is correct across the millis() rollover.`;
+      return `${header}
 
 ${blocks.join("\n\n")}`;
     }
@@ -6676,14 +6879,14 @@ static void pollCommands() {
           const valueStr = String(value).toUpperCase();
           if (valueStr === "TOGGLE") {
             return targets.map((t) => {
-              const pin = `${this.sanitizeUpper(String(t))}_PIN`;
+              const pin = this.backend.gpioPinVar(this.sanitizeUpper(String(t)));
               return `  ${this.backend.digitalWriteExpr(pin, `!${this.backend.digitalReadExpr(pin)}`)};`;
             }).join("\n") + "\n  (void)ctx;";
           }
           const valueExpr = valueStr === "HIGH" || value === 1 ? "HIGH" : valueStr === "LOW" || value === 0 ? "LOW" : this.isParameter(String(value)) ? `systemParameters.${this.sanitize(String(value))} ? HIGH : LOW` : null;
           if (valueExpr === null)
             break;
-          return targets.map((t) => `  ${this.backend.digitalWriteExpr(`${this.sanitizeUpper(String(t))}_PIN`, valueExpr)};`).join("\n") + "\n  (void)ctx;";
+          return targets.map((t) => `  ${this.backend.digitalWriteExpr(this.backend.gpioPinVar(this.sanitizeUpper(String(t))), valueExpr)};`).join("\n") + "\n  (void)ctx;";
         }
         case "adc_read": {
           const deviceName = String(params.device ?? "");
@@ -6705,7 +6908,7 @@ static void pollCommands() {
         case "gpio_read": {
           const deviceName = String(params.device ?? "");
           if (this.isSensorComponent(deviceName)) {
-            const pin = `${this.sanitizeUpper(deviceName)}_PIN`;
+            const pin = this.backend.gpioPinVar(this.sanitizeUpper(deviceName));
             const field = `systemSensors.${this.sanitize(deviceName)}`;
             return `  ${field} = (float)${this.backend.digitalReadExpr(pin)};
   (void)ctx;`;
@@ -6729,6 +6932,16 @@ static void pollCommands() {
           const component = (this.project.system.components || []).find((c) => c.name === deviceName);
           if (component && this.isSensorComponent(deviceName)) {
             const objVar = this.sanitize(deviceName);
+            if (component.channels?.length) {
+              const lines = component.channels.map((ch) => {
+                const field2 = `systemSensors.${this.sanitize(ch.name)}`;
+                const measure2 = ch.measure ?? ch.name;
+                const readCall2 = measure2 === "humidity" ? `${objVar}.readHumidity()` : `${objVar}.readTemperature()`;
+                return `  ${field2} = ${readCall2};
+  if (isnan(${field2})) { /* read failed */ }`;
+              });
+              return lines.join("\n") + "\n  (void)ctx;";
+            }
             const field = `systemSensors.${objVar}`;
             const measure = String(component.config?.measure ?? "temperature");
             const readCall = measure === "humidity" ? `${objVar}.readHumidity()` : `${objVar}.readTemperature()`;
@@ -6743,6 +6956,26 @@ static void pollCommands() {
           const component = (this.project.system.components || []).find((c) => c.name === deviceName);
           if (component && this.isSensorComponent(deviceName)) {
             const objVar = this.sanitize(deviceName);
+            if (component.channels?.length) {
+              const lines = component.channels.map((ch) => {
+                const field2 = `systemSensors.${this.sanitize(ch.name)}`;
+                const measure2 = ch.measure ?? ch.name;
+                let readCall2;
+                switch (measure2) {
+                  case "humidity":
+                    readCall2 = `${objVar}.readHumidity()`;
+                    break;
+                  case "pressure":
+                    readCall2 = `${objVar}.readPressure() / 100.0F`;
+                    break;
+                  default:
+                    readCall2 = `${objVar}.readTemperature()`;
+                    break;
+                }
+                return `  ${field2} = ${readCall2};`;
+              });
+              return lines.join("\n") + "\n  (void)ctx;";
+            }
             const field = `systemSensors.${objVar}`;
             const measure = String(component.config?.measure ?? "temperature");
             let readCall;
@@ -6762,20 +6995,36 @@ static void pollCommands() {
           }
           break;
         }
+        case "lcd_display":
         case "lcd_print": {
           const deviceName = String(params.device ?? "");
           const device = (this.project.system.components || []).find((c) => c.name === deviceName);
           if (!device)
             break;
           const objVar = this.sanitize(deviceName);
-          const col = params.col ?? 0;
-          const row = params.row ?? 0;
-          return [
-            `  ${objVar}.setCursor(${col}, ${row});`,
-            `  // ${objVar}.print("your text");        // literal string`,
-            `  // ${objVar}.print(systemSensors.value); // sensor reading`,
-            `  (void)ctx;`
-          ].join("\n");
+          const bufSize = (typeof device.config?.cols === "number" ? device.config.cols : 16) + 1;
+          const lines = [];
+          if (params.clear)
+            lines.push(`  ${objVar}.clear();`);
+          if (params.lines !== void 0) {
+            const rawLines = Array.isArray(params.lines) ? params.lines : [];
+            rawLines.forEach((item2, idx) => {
+              const row = (typeof item2 === "object" && item2 && !Array.isArray(item2) ? item2.row : void 0) ?? idx;
+              const col = (typeof item2 === "object" && item2 && !Array.isArray(item2) ? item2.col : void 0) ?? 0;
+              const fmt = typeof item2 === "string" ? item2 : typeof item2.format === "string" ? item2.format : void 0;
+              lines.push(...this.renderLcdLine(String(fmt ?? ""), Number(row), Number(col), objVar, bufSize));
+            });
+          } else if (typeof params.format === "string") {
+            const row = params.row ?? 0;
+            const col = params.col ?? 0;
+            lines.push(...this.renderLcdLine(params.format, Number(row), Number(col), objVar, bufSize));
+          } else {
+            const col = params.col ?? 0;
+            const row = params.row ?? 0;
+            lines.push(`  ${objVar}.setCursor(${col}, ${row});`, `  // ${objVar}.print("your text");        // literal string`, `  // ${objVar}.print(systemSensors.value); // sensor reading`);
+          }
+          lines.push("  (void)ctx;");
+          return lines.join("\n");
         }
         case "lcd_clear": {
           const deviceName = String(params.device ?? "");
@@ -6807,34 +7056,62 @@ static void pollCommands() {
         }
         case "rtc_read": {
           const deviceName = String(params.device ?? "");
-          const device = (this.project.system.components || []).find((c) => c.name === deviceName);
-          if (!device)
+          const component = (this.project.system.components || []).find((c) => c.name === deviceName);
+          if (!component)
             break;
           const objVar = this.sanitize(deviceName);
-          return [
-            `  // DateTime now = ${objVar}.now();`,
-            `  // systemSensors.timestamp = (float)now.unixtime();  // Unix seconds`,
-            `  (void)ctx;`
-          ].join("\n");
+          const channels = component.channels ?? [];
+          if (channels.length === 0)
+            break;
+          const lines = [`  DateTime _now = ${objVar}.now();`];
+          for (const ch of channels) {
+            const field = `systemSensors.${this.sanitize(ch.name)}`;
+            const measure = ch.measure ?? ch.name;
+            let readExpr;
+            switch (measure) {
+              case "hour":
+                readExpr = "_now.hour()";
+                break;
+              case "minute":
+                readExpr = "_now.minute()";
+                break;
+              case "second":
+                readExpr = "_now.second()";
+                break;
+              case "day":
+                readExpr = "_now.day()";
+                break;
+              case "month":
+                readExpr = "_now.month()";
+                break;
+              case "year":
+                readExpr = "_now.year()";
+                break;
+              case "dayOfWeek":
+                readExpr = "_now.dayOfTheWeek()";
+                break;
+              default:
+                readExpr = `_now.${measure}()`;
+                break;
+            }
+            lines.push(`  ${field} = (float)${readExpr};`);
+          }
+          lines.push("  (void)ctx;");
+          return lines.join("\n");
         }
         case "pwm_control": {
           const deviceName = String(params.device ?? "");
           const device = (this.project.system.components || []).find((c) => c.name === deviceName);
           if (!device)
             break;
-          const pinMacro = `${this.sanitizeUpper(deviceName)}_PIN`;
-          const channelMacro = `${this.sanitizeUpper(deviceName)}_CHANNEL`;
+          const sym = this.sanitizeUpper(deviceName);
+          const freqMacro = `${sym}_FREQUENCY`;
+          const resMacro = `${sym}_RESOLUTION`;
           const dutyRaw = params.duty;
           const dutyParam = (this.project.system.parameters || []).find((p) => p.name === String(dutyRaw));
           const dutyExpr = dutyParam ? `ctx->parameters->${this.sanitize(String(dutyRaw))}` : dutyRaw !== void 0 ? String(dutyRaw) : "0";
           const board = (this.project.target?.board ?? "").toLowerCase();
-          const isAvr = /avr|uno|mega|nano|atmega|leonardo/.test(board);
-          const isRp = /rp2040|pico/.test(board);
-          if (isAvr || isRp) {
-            return `  ${this.backend.analogWriteExpr(pinMacro, dutyExpr)};
-  (void)ctx;`;
-          }
-          return this.backend.ledcWriteLines(pinMacro, channelMacro, dutyExpr, board) + "\n  (void)ctx;";
+          return this.backend.pwmWriteLines(sym, freqMacro, resMacro, dutyExpr, board) + "\n  (void)ctx;";
         }
         case "console_help": {
           if (!this.hasConsole)
@@ -6870,50 +7147,15 @@ static void pollCommands() {
         }
         case "http_get": {
           const url = params.url !== void 0 ? JSON.stringify(String(params.url)) : '"http://example.com/api"';
-          return [
-            "  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)",
-            "  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)",
-            "  {",
-            "    HTTPClient http;",
-            `    http.begin(${url});`,
-            "    int httpCode = http.GET();",
-            "    if (httpCode == HTTP_CODE_OK) {",
-            "      String payload = http.getString();",
-            "      // TODO: parse payload",
-            "      (void)payload;",
-            "    }",
-            "    http.end();",
-            "  }",
-            "  #else",
-            "    // TODO: http_get is only available on ESP32/ESP8266.",
-            "  #endif",
-            "  (void)ctx;"
-          ].join("\n");
+          const board = (this.project.target?.board ?? "").toLowerCase();
+          return this.backend.httpGetLines(url, board);
         }
         case "http_post": {
           const url = params.url !== void 0 ? JSON.stringify(String(params.url)) : '"http://example.com/api"';
           const body = params.body !== void 0 ? JSON.stringify(String(params.body)) : '"{}"';
           const contentType = params.content_type !== void 0 ? JSON.stringify(String(params.content_type)) : '"application/json"';
-          return [
-            "  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)",
-            "  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)",
-            "  {",
-            "    HTTPClient http;",
-            `    http.begin(${url});`,
-            `    http.addHeader("Content-Type", ${contentType});`,
-            `    int httpCode = http.POST(${body});`,
-            "    if (httpCode == HTTP_CODE_OK) {",
-            "      String payload = http.getString();",
-            "      // TODO: parse response",
-            "      (void)payload;",
-            "    }",
-            "    http.end();",
-            "  }",
-            "  #else",
-            "    // TODO: http_post is only available on ESP32/ESP8266.",
-            "  #endif",
-            "  (void)ctx;"
-          ].join("\n");
+          const board = (this.project.target?.board ?? "").toLowerCase();
+          return this.backend.httpPostLines(url, body, contentType, board);
         }
       }
       return "  // TODO: Implement the hardware calls for this action.\n  (void)ctx;";
@@ -7033,7 +7275,7 @@ ${saveBody}
           const unit = c.config?.unit ? `  // ${c.config.unit}` : "";
           return `  ${field} = (float)(${expr});${unit}`;
         }
-        return c.type === "analog_input" ? `  ${field} = ${this.backend.analogReadExpr(pinMacro)};` : `  ${field} = (float)${this.backend.digitalReadExpr(pinMacro)};`;
+        return c.type === "analog_input" ? `  ${field} = ${this.backend.analogReadExpr(pinMacro)};` : `  ${field} = (float)${this.backend.digitalReadExpr(this.backend.gpioPinVar(this.sanitizeUpper(c.name)))};`;
       });
       return `// Populate systemSensors before guards and actions read them.
 // Called at the top of every loop() pass.
@@ -7103,7 +7345,16 @@ ${reads.join("\n")}
           return { event, seg: this.topicSegment(item2.topic ?? item2.event) };
         });
       } else {
-        sensorWires = allComponents.filter((c) => String(c.class) === "sensor").map((c) => ({ name: c.name, seg: this.topicSegment(c.name) }));
+        sensorWires = [];
+        for (const c of allComponents.filter((c2) => String(c2.class) === "sensor")) {
+          if (c.channels?.length) {
+            for (const ch of c.channels) {
+              sensorWires.push({ name: ch.name, seg: this.topicSegment(ch.name) });
+            }
+          } else {
+            sensorWires.push({ name: c.name, seg: this.topicSegment(c.name) });
+          }
+        }
         paramWires = allParameters.map((p) => ({ parameter: p, seg: this.topicSegment(p.name) }));
         eventWires = allEvents.filter((e) => String(e.source) === "mqtt").map((e) => ({ event: e, seg: this.topicSegment(e.name) }));
       }
@@ -7397,7 +7648,7 @@ ${lines.join("\n")}
             const t = transitions[idx];
             const guard = this.guards.get(idx);
             const target = this.states[this.resolveEntry(this.resolveRef(t.target, "target"))];
-            const duration = typeof t.after === "string" ? `(${tsType})systemParameters.${this.sanitize(t.after)}` : `${t.after}UL`;
+            const duration = typeof t.after === "string" ? `(${tsType})systemParameters.${this.sanitize(t.after)}` : this.backend.durationLiteral(t.after ?? 0);
             const source2 = typeof t.after === "string" ? `${t.after} (parameter)` : `${t.after} ms`;
             const calls = (t.actions || []).map((a) => `    action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
             const fire = [
@@ -7418,7 +7669,7 @@ ${fire}
             const idx = periodicOwned[i];
             const t = transitions[idx];
             const guard = this.guards.get(idx);
-            const interval = typeof t.every === "string" ? `(${tsType})systemParameters.${this.sanitize(t.every)}` : `${t.every}UL`;
+            const interval = typeof t.every === "string" ? `(${tsType})systemParameters.${this.sanitize(t.every)}` : this.backend.durationLiteral(t.every ?? 0);
             const source2 = typeof t.every === "string" ? `${t.every} (parameter)` : `every ${t.every} ms`;
             const dueVar = `dueAt_${this.sanitize(flat.path)}_${i}`;
             const calls = (t.actions || []).map((a) => `    action_${this.sanitize(a.name)}(&systemContext);`).join("\n");
@@ -7570,9 +7821,9 @@ ${blocks.join("\n\n")}`;
         const sensors = (this.project.system.components || []).filter((c) => String(c.class) === "sensor");
         const telemetryDeclared = !!this.project.system.telemetry;
         const hasPublications = !telemetryDeclared && sensors.length > 0 || this.hasMachine;
-        body.push(`  // Maintain MQTT connection and pump incoming messages.`, `  {`, `    static unsigned long _mqttReconnectAt = 0;`, `    if (!${client}.connected() && ${this.backend.nowExpr()} - _mqttReconnectAt >= 5000UL) {`, `      _mqttReconnectAt = ${this.backend.nowExpr()};`, `      connectMqtt();`, `    }`, `    ${client}.loop();`, `  }`);
+        body.push(`  // Maintain MQTT connection and pump incoming messages.`, `  {`, `    static ${this.backend.timestampType()} _mqttReconnectAt = 0;`, `    if (!${client}.connected() && ${this.backend.nowExpr()} - _mqttReconnectAt >= ${this.backend.durationLiteral(5e3)}) {`, `      _mqttReconnectAt = ${this.backend.nowExpr()};`, `      connectMqtt();`, `    }`, `    ${client}.loop();`, `  }`);
         if (hasPublications) {
-          body.push(`  // Publish sensor readings and state periodically.`, `  {`, `    static unsigned long _mqttPublishAt = 0;`, `    if (${this.backend.nowExpr()} - _mqttPublishAt >= 5000UL) {`, `      _mqttPublishAt = ${this.backend.nowExpr()};`, `      publishMqtt();`, `    }`, `  }`);
+          body.push(`  // Publish sensor readings and state periodically.`, `  {`, `    static ${this.backend.timestampType()} _mqttPublishAt = 0;`, `    if (${this.backend.nowExpr()} - _mqttPublishAt >= ${this.backend.durationLiteral(5e3)}) {`, `      _mqttPublishAt = ${this.backend.nowExpr()};`, `      publishMqtt();`, `    }`, `  }`);
         }
         if (telemetryDeclared) {
           body.push(`  runTelemetry();`);
@@ -7584,7 +7835,10 @@ ${blocks.join("\n\n")}`;
       if (this.project.system.commands)
         body.push("  pollCommands();");
       for (const task of this.project.system.tasks || []) {
-        body.push(`  runTask_${this.sanitize(task.name)}();`);
+        const base = this.sanitize(task.name);
+        if (!this.nativeTimerBases.has(base)) {
+          body.push(`  runTask_${base}();`);
+        }
       }
       if (this.hasMachine) {
         const example = this.project.system.events[0];
@@ -7919,6 +8173,47 @@ ${implementations.join("\n\n")}`;
     }
     sanitizeUpper(name) {
       return this.sanitize(name).toUpperCase();
+    }
+    /** True when channelName comes from an RTC device (values are integers, not floats). */
+    isRtcChannel(channelName) {
+      for (const c of this.project.system.components ?? []) {
+        if (c.driver !== "rtc_read")
+          continue;
+        if (c.channels?.some((ch) => ch.name === channelName))
+          return true;
+      }
+      return false;
+    }
+    /**
+     * Convert an lcd format template (e.g. "{hour}:{minute}:{second}") into the
+     * lines of code that write it to the display.
+     *
+     * RTC channels use %02d + (int) cast; other sensors use %.1f.
+     * A literal % in the template is doubled for snprintf.
+     * If the template has no {name} refs, print() is used directly.
+     */
+    renderLcdLine(fmt, row, col, objVar, bufSize) {
+      const refs = [];
+      const refPattern = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+      let m;
+      while ((m = refPattern.exec(fmt)) !== null)
+        refs.push(m[1]);
+      const setCursor = `  ${objVar}.setCursor(${col}, ${row});`;
+      if (refs.length === 0) {
+        const escaped2 = fmt.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+        return [setCursor, `  ${objVar}.print("${escaped2}");`];
+      }
+      const snprintfFmt = fmt.replace(/%/g, "%%").replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => {
+        return this.isRtcChannel(name) ? "%02d" : "%.1f";
+      });
+      const args = refs.map((name) => this.isRtcChannel(name) ? `(int)systemSensors.${this.sanitize(name)}` : `systemSensors.${this.sanitize(name)}`);
+      const escaped = snprintfFmt.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      return [
+        `  char _lcd_buf[${bufSize}];`,
+        `  snprintf(_lcd_buf, sizeof(_lcd_buf), "${escaped}", ${args.join(", ")});`,
+        setCursor,
+        `  ${objVar}.print(_lcd_buf);`
+      ];
     }
   };
 
@@ -9322,6 +9617,12 @@ ${implementations.join("\n\n")}`;
         "machine.yaml": 'parameters:\n  poll_interval:  { type: int, default: 2000,  range: [200, 60000],  unit: ms }\n  publish_every:  { type: int, default: 5000,  range: [1000, 300000], unit: ms }\n  retry_backoff:  { type: int, default: 5000,  range: [1000, 120000], unit: ms }\n  max_retries:    { type: int, default: 5,     range: [1, 100] }\n\nevents:\n  LINK_UP:       { source: internal }\n  LINK_DOWN:     { source: internal }\n  BROKER_UP:     { source: internal }\n  BROKER_DOWN:   { source: internal }\n  POLL_DUE:      { source: timer }\n  PUBLISH_DUE:   { source: timer }\n  FIELD_TIMEOUT: { source: internal, description: A field device stopped answering }\n  RESET:         { source: mqtt, description: Remote reset from the dashboard }\n\nactions:\n  begin_wifi:      { driver: wifi_connect }\n  begin_broker:    { driver: mqtt_connect }\n  poll_field:      { driver: modbus_poll }\n  publish_batch:   { driver: mqtt_publish }\n  buffer_batch:    { driver: ring_buffer, params: {on_full: drop_oldest} }\n  drain_buffer:    { driver: ring_buffer, params: {drain: true} }\n  show_ok:         { driver: gpio_control, params: {device: status_led, value: HIGH} }\n  show_degraded:   { driver: gpio_control, params: {device: status_led, value: TOGGLE} }\n  trip_fault:      { driver: gpio_control, params: {device: fault_relay, value: HIGH} }\n  clear_fault:     { driver: gpio_control, params: {device: fault_relay, value: LOW} }\n\nmachine:\n  states:\n    starting:\n    connecting:\n      initial: joining_wifi\n      states:\n        joining_wifi:\n        joining_broker:\n        # An attempt that has timed out waits here before the next one. Two\n        # states, because a timer restarts on entry and so a state cannot\n        # usefully time out into itself.\n        backoff:\n    online:\n      initial: polling\n      states:\n        polling:\n        publishing:\n    # Keep sampling with no uplink: the point of a gateway is not to lose data.\n    degraded:\n    faulted:\n\n  transitions:\n    - from: starting\n      after: 250\n      to: connecting\n      do: begin_wifi\n\n    - from: connecting/joining_wifi\n      on: LINK_UP\n      to: connecting/joining_broker\n      do: begin_broker\n\n    - from: connecting/joining_broker\n      on: BROKER_UP\n      to: online\n      do: [show_ok, drain_buffer]\n\n    # Retry loop: an attempt that has not succeeded within retry_backoff drops\n    # into backoff, which starts the next one.\n    - from: connecting/joining_wifi\n      after: retry_backoff\n      to: connecting/backoff\n\n    - from: connecting/joining_broker\n      after: retry_backoff\n      to: connecting/backoff\n\n    - from: connecting/backoff\n      after: 250\n      to: connecting/joining_wifi\n      do: begin_wifi\n\n    - from: online/polling\n      on: POLL_DUE\n      to: online/polling\n      do: poll_field\n\n    - from: online\n      on: PUBLISH_DUE\n      to: online/publishing\n      do: publish_batch\n\n    - from: online/publishing\n      on: POLL_DUE\n      to: online/polling\n      do: poll_field\n\n    - from: online\n      on: BROKER_DOWN\n      to: degraded\n      do: show_degraded\n\n    - from: online\n      on: LINK_DOWN\n      to: degraded\n      do: show_degraded\n\n    # Degraded still samples; readings queue until the uplink returns.\n    - from: degraded\n      on: POLL_DUE\n      to: degraded\n      do: [poll_field, buffer_batch]\n\n    - from: degraded\n      after: retry_backoff\n      to: connecting\n      do: begin_wifi\n\n    - from: "*"\n      on: FIELD_TIMEOUT\n      guard:\n        name: retries_exhausted\n        description: a field device missed max_retries consecutive polls\n      to: faulted\n      do: trip_fault\n\n    - from: "*"\n      on: RESET\n      to: starting\n      do: clear_fault\n',
         "pulse.yaml": '# Industrial sensor gateway: read a field bus, publish upstream.\n#\n# Multi-file, because unlike the other three this one has enough hardware and\n# enough behaviour that one file would be hard to review.\n\nproject:\n  name: sensor_gateway\n  version: "1.0"\n  description: Reads field sensors and republishes them to a dashboard\n\ntarget:\n  board: esp32\n\nimports:\n  - hardware.yaml\n  - machine.yaml\n'
       }
+    },
+    "RTC clock \u2014 DS3231 time on an I2C LCD, no C required": {
+      entry: "rtc_clock.yaml",
+      files: {
+        "rtc_clock.yaml": '# Real-time clock on an I2C LCD \u2014 no manual C required.\n#\n# Both the DS3231 RTC and the LCD share the same I2C bus. The model:\n#   1. Declares the shared bus once, with SDA/SCL pins.\n#   2. Gives the RTC `type: ds3231`, which auto-populates hour, minute, second\n#      as sensor channels. No explicit `channels:` block needed.\n#   3. Uses `driver: lcd_display` with a format string \u2014 {hour}:{minute}:{second}\n#      becomes real snprintf code with %02d zero-padding for time values.\n#\n# A single task fires every second: read the clock, then update the display.\n# No guards, no state machine, no C to write.\n\npulseir: "1"\n\nproject:\n  name: rtc_clock\n  version: "1.0"\n  description: DS3231 RTC time displayed on a 16\xD72 I2C LCD\n\ntarget: esp32\n\nhardware:\n  buses:\n    # Bus settings are flat \u2014 no `binding:` wrapper.\n    i2c_bus:\n      interface: i2c\n      sda: GPIO21\n      scl: GPIO22\n      frequency: 400000\n\n  devices:\n    # DS3231 RTC: auto-populates hour, minute, second as sensor channels.\n    clock:\n      type: ds3231\n      bus: i2c_bus\n\n    # 16\xD72 I2C character LCD (PCF8574 backpack at 0x27).\n    # Device config fields sit flat on the device \u2014 no `config:` wrapper.\n    display:\n      type: lcd_i2c\n      bus: i2c_bus\n      address: 0x27\n      cols: 16\n      rows: 2\n\nactions:\n  read_time:\n    driver: rtc_read\n    params:\n      device: clock\n\n  show_time:\n    driver: lcd_display\n    params:\n      device: display\n      # {hour}, {minute}, {second} are RTC channels \u2014 formatted as %02d (zero-padded).\n      # No snprintf to write; the codegen produces it from this format string.\n      lines:\n        - format: "Time: {hour}:{minute}:{second}"\n          row: 0\n          col: 0\n\n# Tasks are a map keyed by name, not a list.\ntasks:\n  clock_tick:\n    every: 1000\n    do: [read_time, show_time]\n    description: Read the RTC and refresh the display every second\n'
+      }
     }
   };
 
@@ -9489,18 +9790,32 @@ ${implementations.join("\n\n")}`;
   var settingsModal = $("settings-modal");
   var keywordChips = $("keyword-chips");
   var keywordInput = $("keyword-input");
+  var modeModelBtn = $("mode-model");
+  var modeCodeBtn = $("mode-code");
+  var setEntryButton = $("set-entry");
+  var genStubsButton = $("gen-stubs");
   var store = new ProjectStore(localStorage);
   var workspace = { id: "", name: "", files: {}, entry: "", active: "", updatedAt: 0 };
+  var currentMode = "model";
   var current = null;
   function fileNames() {
-    const rest = Object.keys(workspace.files).filter((n) => n !== workspace.entry).sort();
+    if (currentMode === "code") {
+      return Object.keys(workspace.files).filter((n) => /\.(cpp|h|c)$/i.test(n)).sort();
+    }
+    const rest = Object.keys(workspace.files).filter((n) => n !== workspace.entry && /\.(ya?ml)$/i.test(n)).sort();
     return workspace.entry ? [workspace.entry, ...rest] : rest;
   }
   function openProject(project) {
     workspace = project;
+    currentMode = "model";
     store.setCurrent(project.id);
-    source.value = workspace.files[workspace.active] ?? "";
     projectName.textContent = project.name;
+    modeModelBtn.classList.add("active");
+    modeCodeBtn.classList.remove("active");
+    setEntryButton.hidden = false;
+    snippetButton.hidden = false;
+    genStubsButton.hidden = true;
+    source.value = workspace.files[workspace.active] ?? "";
     renderFileBar();
     paint();
     clearOutput();
@@ -9551,7 +9866,9 @@ target:
       source.style.color = "";
       highlightLayer.hidden = false;
     }
-    highlightCode.innerHTML = `${highlight(text, activeKeywords)}
+    const isCpp = /\.(cpp|h|c)$/i.test(workspace.active);
+    highlightCode.innerHTML = isCpp ? `${highlightCpp(text)}
+` : `${highlight(text, activeKeywords)}
 `;
     syncScroll();
   }
@@ -9668,14 +9985,18 @@ target:
   }
   function renderFileBar() {
     const names = fileNames();
-    fileBar.innerHTML = names.map((name) => {
-      const isEntry = name === workspace.entry;
-      const isActive = name === workspace.active;
-      const badge = isEntry ? '<span class="entry-badge" title="entry file">\u25B6</span>' : "";
-      const close = !isEntry ? `<span class="close" data-close="${escapeHtml2(name)}" title="Delete ${escapeHtml2(name)}">\xD7</span>` : "";
-      return `<button class="filetab${isActive ? " active" : ""}" data-file="${escapeHtml2(name)}"
-      title="${escapeHtml2(name)} (double-click to rename)">${badge}${escapeHtml2(name)}${close}</button>`;
-    }).join("");
+    if (names.length === 0 && currentMode === "code") {
+      fileBar.innerHTML = '<span class="filebar-hint">No C++ files yet \u2014 click + File to add one</span>';
+    } else {
+      fileBar.innerHTML = names.map((name) => {
+        const isEntry = currentMode === "model" && name === workspace.entry;
+        const isActive = name === workspace.active;
+        const badge = isEntry ? '<span class="entry-badge" title="entry file">\u25B6</span>' : "";
+        const close = !isEntry ? `<span class="close" data-close="${escapeHtml2(name)}" title="Delete ${escapeHtml2(name)}">\xD7</span>` : "";
+        return `<button class="filetab${isActive ? " active" : ""}" data-file="${escapeHtml2(name)}"
+        title="${escapeHtml2(name)} (double-click to rename)">${badge}${escapeHtml2(name)}${close}</button>`;
+      }).join("");
+    }
     for (const tab of fileBar.querySelectorAll(".filetab")) {
       const name = tab.dataset.file;
       tab.addEventListener("click", (event) => {
@@ -10169,6 +10490,25 @@ ${entry}
     persist();
   }
   function addFile() {
+    if (currentMode === "code") {
+      const name2 = prompt("New file name", "user.cpp");
+      if (!name2)
+        return;
+      const clean2 = name2.trim();
+      if (!/\.(cpp|h|c)$/i.test(clean2)) {
+        alert("User code files must end in .cpp, .h, or .c");
+        return;
+      }
+      if (workspace.files[clean2] !== void 0) {
+        alert(`"${clean2}" already exists`);
+        return;
+      }
+      workspace.files[clean2] = `// ${clean2}
+`;
+      selectFile(clean2);
+      persist();
+      return;
+    }
     const name = prompt("New file name", "part.yaml");
     if (!name)
       return;
@@ -10200,6 +10540,14 @@ ${entry}
       alert(`"${clean}" already exists`);
       return;
     }
+    if (/\.(ya?ml)$/i.test(name) && !/\.(ya?ml)$/i.test(clean)) {
+      alert("Model files must end in .yaml or .yml");
+      return;
+    }
+    if (/\.(cpp|h|c)$/i.test(name) && !/\.(cpp|h|c)$/i.test(clean)) {
+      alert("C++ files must end in .cpp, .h, or .c");
+      return;
+    }
     workspace.files[clean] = workspace.files[name];
     delete workspace.files[name];
     if (workspace.entry === name)
@@ -10207,20 +10555,31 @@ ${entry}
     if (workspace.active === name)
       workspace.active = clean;
     selectFile(workspace.active);
-    render();
+    if (currentMode === "model")
+      render();
   }
   function deleteFile(name) {
-    if (name === workspace.entry) {
+    if (currentMode === "model" && name === workspace.entry) {
       alert("The entry file cannot be deleted. Make another file the entry first.");
       return;
     }
     if (!confirm(`Delete "${name}"?`))
       return;
     delete workspace.files[name];
-    if (workspace.active === name)
-      workspace.active = workspace.entry;
-    selectFile(workspace.active);
-    render();
+    if (workspace.active === name) {
+      const remaining = fileNames();
+      workspace.active = remaining[0] ?? (currentMode === "model" ? workspace.entry : "");
+    }
+    if (workspace.active && workspace.files[workspace.active] !== void 0) {
+      selectFile(workspace.active);
+    } else {
+      source.value = "";
+      renderFileBar();
+      paint();
+      persist();
+    }
+    if (currentMode === "model")
+      render();
   }
   function setEntry() {
     if (workspace.active === workspace.entry)
@@ -10228,6 +10587,56 @@ ${entry}
     workspace.entry = workspace.active;
     renderFileBar();
     render();
+  }
+  function setMode(mode) {
+    currentMode = mode;
+    modeModelBtn.classList.toggle("active", mode === "model");
+    modeCodeBtn.classList.toggle("active", mode === "code");
+    setEntryButton.hidden = mode === "code";
+    snippetButton.hidden = mode === "code";
+    genStubsButton.hidden = mode === "model";
+    const names = fileNames();
+    if (!names.includes(workspace.active)) {
+      workspace.active = names[0] ?? "";
+      source.value = workspace.active ? workspace.files[workspace.active] ?? "" : "";
+    }
+    renderFileBar();
+    paint();
+  }
+  function genStubs() {
+    if (!current) {
+      alert("Fix any model errors first \u2014 stubs are generated from a valid model.");
+      return;
+    }
+    const { generatedProject } = current;
+    if (generatedProject.scaffolds.length === 0) {
+      alert("No stubs to generate for this model.\n\nStubs appear when the model has actions or guards that need C++ implementations.");
+      return;
+    }
+    let created = 0;
+    let skipped = 0;
+    let firstName = "";
+    for (const scaffold of generatedProject.scaffolds) {
+      const name = scaffold.path.split("/").pop();
+      if (!name || !/\.(cpp|h|c)$/i.test(name))
+        continue;
+      if (workspace.files[name] !== void 0) {
+        skipped++;
+      } else {
+        workspace.files[name] = scaffold.contents;
+        if (!firstName)
+          firstName = name;
+        created++;
+      }
+    }
+    if (created > 0) {
+      setMode("code");
+      if (firstName)
+        selectFile(firstName);
+      persist();
+    }
+    const msg = created > 0 && skipped > 0 ? `Created ${created} stub file${created !== 1 ? "s" : ""}, skipped ${skipped} that already exist.` : created > 0 ? `Created ${created} stub file${created !== 1 ? "s" : ""}.` : `All stub files already exist \u2014 nothing new was created.`;
+    alert(msg);
   }
   function newProject(label) {
     const template = label ? EXAMPLES[label] : null;
@@ -10329,6 +10738,13 @@ ${libSection}
     }
     for (const file of generatedProject.scaffolds) {
       entries[`${folder}/${file.path}`] = file.contents;
+    }
+    for (const [name, contents] of Object.entries(workspace.files)) {
+      if (/\.(cpp|h|c)$/i.test(name)) {
+        const dest = `${folder}/src/${name}`;
+        if (!entries[dest])
+          entries[dest] = contents;
+      }
     }
     download(`${folder}.zip`, zip(entries), "application/zip");
   }
@@ -10931,6 +11347,10 @@ machine:
     source.addEventListener("input", () => {
       workspace.files[workspace.active] = source.value;
       paint();
+      if (currentMode === "code") {
+        persist();
+        return;
+      }
       rerender();
       const raw = source.value;
       const fixed = normalizeYaml(raw);
@@ -10968,7 +11388,10 @@ machine:
       void copyText(copyOutputButton, visibleOutput());
     });
     $("add-file").addEventListener("click", addFile);
-    $("set-entry").addEventListener("click", setEntry);
+    setEntryButton.addEventListener("click", setEntry);
+    genStubsButton.addEventListener("click", genStubs);
+    modeModelBtn.addEventListener("click", () => setMode("model"));
+    modeCodeBtn.addEventListener("click", () => setMode("code"));
     function closeDownloadMenu() {
       downloadMenu.hidden = true;
       downloadButton.setAttribute("aria-expanded", "false");
@@ -11019,7 +11442,8 @@ machine:
           source.selectionStart = source.selectionEnd = selectionStart + 2;
           workspace.files[workspace.active] = source.value;
           paint();
-          rerender();
+          if (currentMode === "model")
+            rerender();
         } else {
           const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
           const block = value.slice(lineStart, selectionEnd);
@@ -11029,7 +11453,8 @@ machine:
           source.selectionEnd = lineStart + indented.length;
           workspace.files[workspace.active] = source.value;
           paint();
-          rerender();
+          if (currentMode === "model")
+            rerender();
         }
         return;
       }
@@ -11039,14 +11464,15 @@ machine:
         const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
         const currentLine = value.slice(lineStart, selectionStart);
         const indent = /^[ \t]*/.exec(currentLine)[0];
-        const deeper = /:\s*$/.test(currentLine);
+        const deeper = currentMode === "model" && /:\s*$/.test(currentLine);
         event.preventDefault();
         const insertion = "\n" + indent + (deeper ? "  " : "");
         source.value = value.slice(0, selectionStart) + insertion + value.slice(selectionEnd);
         source.selectionStart = source.selectionEnd = selectionStart + insertion.length;
         workspace.files[workspace.active] = source.value;
         paint();
-        rerender();
+        if (currentMode === "model")
+          rerender();
       }
     });
     projectButton.addEventListener("click", (event) => {
