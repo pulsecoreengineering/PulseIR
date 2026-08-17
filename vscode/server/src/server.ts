@@ -239,13 +239,13 @@ connection.onRequest('pulseir/generate', async (params: GenerateParams): Promise
 
     const gen   = new Codegen(backend);
     const gp    = gen.generateFiles(project);
-    const files = gp.generated.map(f => ({ name: f.filename, content: f.content }));
+    const files = gp.generated.map(f => ({ name: f.path, content: f.contents }));
 
     if (gp.scaffolds) {
       for (const s of gp.scaffolds) {
-        const dest = path.join(params.outDir, s.filename);
+        const dest = path.join(params.outDir, s.path);
         if (!fs.existsSync(dest)) {
-          files.push({ name: s.filename, content: s.content });
+          files.push({ name: s.path, content: s.contents });
         }
       }
     }
