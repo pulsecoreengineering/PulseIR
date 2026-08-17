@@ -3701,7 +3701,7 @@ ${implementations.join('\n\n')}`;
   }
 
   /**
-   * Convert an lcd format template (e.g. "{hour}:{minute}:{second}") into the
+   * Convert an lcd format template (e.g. "{clock.hour}:{clock.minute}:{clock.second}") into the
    * lines of code that write it to the display.
    *
    * RTC channels use %02d + (int) cast; other sensors use %.1f.
