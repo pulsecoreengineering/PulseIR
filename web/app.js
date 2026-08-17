@@ -10736,19 +10736,17 @@ ${libSection}
     const { project, generatedProject } = current;
     const folder = safeFolderName(project.name);
     const entries = {};
-    entries[`${folder}/platformio.ini`] = generatePlatformioIni(project);
-    for (const file of generatedProject.generated) {
-      entries[`${folder}/src/${file.path}`] = file.contents;
-    }
     for (const file of generatedProject.scaffolds) {
       entries[`${folder}/${file.path}`] = file.contents;
     }
     for (const [name, contents] of Object.entries(workspace.files)) {
       if (/\.(cpp|h|c)$/i.test(name)) {
-        const dest = `${folder}/src/${name}`;
-        if (!entries[dest])
-          entries[dest] = contents;
+        entries[`${folder}/src/${name}`] = contents;
       }
+    }
+    entries[`${folder}/platformio.ini`] = generatePlatformioIni(project);
+    for (const file of generatedProject.generated) {
+      entries[`${folder}/src/${file.path}`] = file.contents;
     }
     download(`${folder}.zip`, zip(entries), "application/zip");
   }

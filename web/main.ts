@@ -1505,26 +1505,26 @@ function downloadProjectZip(): void {
   const folder = safeFolderName(project.name);
   const entries: Record<string, string> = {};
 
-  // platformio.ini at the root so the folder opens directly in PlatformIO.
-  entries[`${folder}/platformio.ini`] = generatePlatformioIni(project);
+  // Priority order (lowest to highest): scaffolds → user edits → generated.
+  // Writing in this order means each layer silently wins over the one before.
 
-  // Generated files (e.g. uart_sample.ino, uart_sample_generated.h) — place
-  // under src/ to sit beside the scaffold files.
-  for (const file of generatedProject.generated) {
-    entries[`${folder}/src/${file.path}`] = file.contents;
-  }
-
-  // Scaffold paths already include the src/ prefix (e.g. src/actions.cpp).
+  // 1. Scaffold stubs — the starting template, lowest priority.
   for (const file of generatedProject.scaffolds) {
     entries[`${folder}/${file.path}`] = file.contents;
   }
 
-  // User-authored C++ files also belong in src/.
+  // 2. User-authored C++ files override scaffold stubs.
+  //    The user edited these in the C++ editor; their content must win.
   for (const [name, contents] of Object.entries(workspace.files)) {
     if (/\.(cpp|h|c)$/i.test(name)) {
-      const dest = `${folder}/src/${name}`;
-      if (!entries[dest]) entries[dest] = contents;
+      entries[`${folder}/src/${name}`] = contents;
     }
+  }
+
+  // 3. Generated files are always derived fresh from the model — highest priority.
+  entries[`${folder}/platformio.ini`] = generatePlatformioIni(project);
+  for (const file of generatedProject.generated) {
+    entries[`${folder}/src/${file.path}`] = file.contents;
   }
 
   download(`${folder}.zip`, zip(entries), 'application/zip');
