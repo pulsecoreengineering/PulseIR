@@ -425,7 +425,7 @@ test('rejects a log hole that names nothing declared', () => {
 });
 
 test('rejects a template that is turning into a language', () => {
-  expectReject(plain('tasks:\n  r: {every: 500, log: "{a + b}"}'), 'is not a name', 'expression');
+  expectReject(plain('tasks:\n  r: {every: 500, log: "{a + b}"}'), 'is not a valid reference', 'expression');
   expectReject(plain('tasks:\n  r: {every: 500, log: "unclosed {x"}'), 'Unclosed', 'unclosed brace');
   expectReject(plain('tasks:\n  r: {every: 500, log: "stray } here"}'), 'Unmatched', 'stray brace');
   expectReject(plain('tasks:\n  r: {every: 500, log: "empty {}"}'), 'Empty', 'empty hole');

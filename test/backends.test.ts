@@ -934,33 +934,33 @@ test('RTC: rtc_read action generates real RTClib code', () => {
   has(code, 'systemSensors.second = (float)_now.second();');
 });
 
-test('LCD display: single-line format generates snprintf + setCursor + print', () => {
+test('LCD display: single-line format emits display.print() chain with zero-padding', () => {
   const code = new Codegen().generate(parse(RTC_LCD_YAML));
-  has(code, 'snprintf(_lcd_buf, sizeof(_lcd_buf), "%02d:%02d:%02d",');
-  has(code, '(int)systemSensors.hour');
-  has(code, '(int)systemSensors.minute');
-  has(code, '(int)systemSensors.second');
+  // RTC channels use zero-padded integer display.print — no snprintf needed
+  has(code, "if ((int)systemSensors.hour < 10) screen.print('0');");
+  has(code, 'screen.print((int)systemSensors.hour);');
+  has(code, 'screen.print((int)systemSensors.minute);');
+  has(code, 'screen.print((int)systemSensors.second);');
   has(code, 'screen.setCursor(0, 0);');
-  has(code, 'screen.print(_lcd_buf);');
 });
 
 test('LCD display: multi-line with clear: true emits lcd.clear() + two writes', () => {
   const code = new Codegen().generate(parse(RTC_LCD_MULTILINE_YAML));
   has(code, 'screen.clear();');
-  // Row 0: RTC time — integer format
-  has(code, '"%02d:%02d:%02d"');
-  // Row 1: temperature — float format
-  has(code, '"T=%.1fC"');
+  // Row 0: RTC time — zero-padded integer prints
+  has(code, 'screen.print((int)systemSensors.hour);');
+  // Row 1: temperature — display.print(float, decimals) works on AVR and ESP32
+  has(code, 'screen.print(systemSensors.temperature, 1);');
   has(code, 'screen.setCursor(0, 0);');
   has(code, 'screen.setCursor(0, 1);');
 });
 
-test('LCD display: RTC channels use %02d, float sensors use %.1f', () => {
+test('LCD display: RTC channels zero-pad, float sensors use display.print(v, 1)', () => {
   const code = new Codegen().generate(parse(RTC_LCD_MULTILINE_YAML));
-  // RTC values are integer-cast
+  // RTC values are integer-cast with leading-zero guard
   has(code, '(int)systemSensors.hour');
-  // Sensor values are float
-  has(code, 'systemSensors.temperature');
+  // Sensor values use display.print(float, 1) — not (int) cast
+  has(code, 'screen.print(systemSensors.temperature, 1);');
   hasNot(code, '(int)systemSensors.temperature');
 });
 
