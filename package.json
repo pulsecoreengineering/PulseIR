@@ -8,9 +8,10 @@
     "pulse-ir": "dist/src/cli.js"
   },
   "scripts": {
-    "build": "npm run examples && tsc",
+    "build": "npm run examples && npm run pulsehsm && tsc",
     "postinstall": "npm run build",
     "examples": "node scripts/build-examples.mjs",
+    "pulsehsm": "node scripts/build-pulsehsm.mjs",
     "build:web": "npm run build && node scripts/build-web.mjs",
     "serve": "node scripts/serve.mjs",
     "web": "npm run build:web && node scripts/serve.mjs",
