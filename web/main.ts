@@ -2418,8 +2418,38 @@ function init(): void {
     $<HTMLButtonElement>('download-cmake').hidden = !isEspIdf;
   }
 
+  /**
+   * Disable board optgroups that are incompatible with the current framework.
+   *
+   * ESP-IDF only targets the ESP32 family. AVR boards (Uno / Mega / Nano) and
+   * RP2040 / ESP8266 have no modern ESP-IDF support, so their option groups are
+   * disabled and grayed out when the framework is ESP-IDF.
+   *
+   * If an incompatible board was already selected, we switch to esp32 and
+   * write that choice back into the model YAML, just as the board dropdown
+   * normally would when the user picks a different board.
+   */
+  function applyFrameworkToBoard(): void {
+    const isEspIdf = currentFramework === 'espidf';
+    const ESP32_VALUES = new Set(['esp32', 'esp32s3', 'esp32s2', 'esp32c3', 'esp32h2']);
+
+    for (const optgroup of boardSelect.querySelectorAll<HTMLOptGroupElement>('optgroup')) {
+      const groupIsCompatible = [...optgroup.querySelectorAll('option')]
+        .some(o => ESP32_VALUES.has(o.value));
+      optgroup.disabled = isEspIdf && !groupIsCompatible;
+    }
+
+    if (isEspIdf && boardSelect.value && !ESP32_VALUES.has(boardSelect.value)) {
+      boardSelect.value = 'esp32';
+      applyBoardToYaml('esp32');
+    }
+
+    boardSelect.classList.toggle('unset', boardSelect.value === '');
+  }
+
   frameworkSelect.addEventListener('change', () => {
     currentFramework = frameworkSelect.value as 'arduino' | 'espidf';
+    applyFrameworkToBoard();
     applyFrameworkToMenu();
     render();
   });

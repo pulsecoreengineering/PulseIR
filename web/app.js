@@ -8579,9 +8579,7 @@ ${body}}`;
         ``
       ].join("\n");
     }
-    mainComponentCmake(projectName2, hasMachine, extraSrcs = []) {
-      const safeName = projectName2.replace(/[^A-Za-z0-9_]/g, "_");
-      void safeName;
+    mainComponentCmake(_projectName, hasMachine, extraSrcs = []) {
       const allSrcs = ['"main.cpp"', ...extraSrcs.map((s) => `"${s}"`)];
       const srcsLine = allSrcs.length === 1 ? `    SRCS ${allSrcs[0]}` : `    SRCS ${allSrcs.join("\n           ")}`;
       const requires = hasMachine ? `    REQUIRES driver esp_timer PulseHSM` : `    REQUIRES driver esp_timer`;
@@ -12180,8 +12178,22 @@ machine:
       $("download-platformio").hidden = isEspIdf;
       $("download-cmake").hidden = !isEspIdf;
     }
+    function applyFrameworkToBoard() {
+      const isEspIdf = currentFramework === "espidf";
+      const ESP32_VALUES = /* @__PURE__ */ new Set(["esp32", "esp32s3", "esp32s2", "esp32c3", "esp32h2"]);
+      for (const optgroup of boardSelect.querySelectorAll("optgroup")) {
+        const groupIsCompatible = [...optgroup.querySelectorAll("option")].some((o) => ESP32_VALUES.has(o.value));
+        optgroup.disabled = isEspIdf && !groupIsCompatible;
+      }
+      if (isEspIdf && boardSelect.value && !ESP32_VALUES.has(boardSelect.value)) {
+        boardSelect.value = "esp32";
+        applyBoardToYaml("esp32");
+      }
+      boardSelect.classList.toggle("unset", boardSelect.value === "");
+    }
     frameworkSelect.addEventListener("change", () => {
       currentFramework = frameworkSelect.value;
+      applyFrameworkToBoard();
       applyFrameworkToMenu();
       render();
     });
