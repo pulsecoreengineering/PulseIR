@@ -7,6 +7,8 @@ import {
   ServerOptions,
   TransportKind,
 } from 'vscode-languageclient/node';
+import { PulseIRModelsProvider, PulseIRProjectProvider, ModelItem } from './sidebar.js';
+import { runNewProjectWizard } from './wizard.js';
 
 let client: LanguageClient;
 
@@ -44,11 +46,50 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  // Sidebar tree providers
+  const modelsProvider  = new PulseIRModelsProvider(context);
+  const projectProvider = new PulseIRProjectProvider(context);
+  vscode.window.registerTreeDataProvider('pulseir.modelsView',  modelsProvider);
+  vscode.window.registerTreeDataProvider('pulseir.projectView', projectProvider);
+
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument(promoteLanguage),
-    vscode.commands.registerCommand('pulseir.generate', () => generateCode(context)),
-    vscode.commands.registerCommand('pulseir.showDiagram', () => showDiagram(context)),
-    vscode.commands.registerCommand('pulseir.jumpToStub', jumpToStub),
+
+    // Editor commands
+    vscode.commands.registerCommand('pulseir.generate',     () => generateCode(context)),
+    vscode.commands.registerCommand('pulseir.showDiagram',  () => showDiagram(context)),
+    vscode.commands.registerCommand('pulseir.jumpToStub',   jumpToStub),
+
+    // Sidebar commands
+    vscode.commands.registerCommand('pulseir.newProject',   runNewProjectWizard),
+    vscode.commands.registerCommand('pulseir.refreshModels',() => modelsProvider.refresh()),
+
+    vscode.commands.registerCommand('pulseir.generateForModel', (item: ModelItem) =>
+      generateCode(context, item?.uri)),
+    vscode.commands.registerCommand('pulseir.showDiagramForModel', (item: ModelItem) =>
+      showDiagram(context, item?.uri)),
+
+    vscode.commands.registerCommand('pulseir.selectTarget', async () => {
+      const cfg   = vscode.workspace.getConfiguration('pulseir');
+      const current = cfg.get<string>('target', 'arduino');
+      const pick  = await vscode.window.showQuickPick(
+        ['arduino', 'espidf', 'zephyr', 'micropython'].map(t => ({
+          label: t, description: t === current ? '(current)' : '',
+        })),
+        { placeHolder: 'Select code generation target' },
+      );
+      if (pick) {
+        await cfg.update('target', pick.label, vscode.ConfigurationTarget.Workspace);
+        projectProvider.refresh();
+      }
+    }),
+
+    vscode.commands.registerCommand('pulseir.toggleGenerateOnSave', async () => {
+      const cfg = vscode.workspace.getConfiguration('pulseir');
+      await cfg.update('generateOnSave', !cfg.get('generateOnSave', false),
+                       vscode.ConfigurationTarget.Workspace);
+      projectProvider.refresh();
+    }),
   );
 
   // Promote any documents already open when the extension activates.
@@ -76,14 +117,22 @@ async function jumpToStub(filePath: string, lineIndex: number): Promise<void> {
 // Generate command
 // ---------------------------------------------------------------------------
 
-async function generateCode(context: vscode.ExtensionContext): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || editor.document.languageId !== 'pulseir') {
+async function generateCode(context: vscode.ExtensionContext, modelUri?: vscode.Uri): Promise<void> {
+  const uri = modelUri ?? vscode.window.activeTextEditor?.document.uri;
+  if (!uri) {
     vscode.window.showErrorMessage('Open a PulseIR (.pulse.yaml) file first.');
     return;
   }
+  // Ensure the document language is PulseIR (skip check when called from sidebar with explicit URI)
+  if (!modelUri) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'pulseir') {
+      vscode.window.showErrorMessage('Open a PulseIR (.pulse.yaml) file first.');
+      return;
+    }
+  }
 
-  const filePath = editor.document.uri.fsPath;
+  const filePath = uri.fsPath;
   const config   = vscode.workspace.getConfiguration('pulseir');
   const target   = config.get<string>('target', 'arduino');
   const outDir   = config.get<string>('outputDirectory', '') || path.dirname(filePath);
@@ -92,7 +141,7 @@ async function generateCode(context: vscode.ExtensionContext): Promise<void> {
     { location: vscode.ProgressLocation.Notification, title: 'PulseIR: Generating code…' },
     async () => {
       const result = await client.sendRequest<GenerateResult>('pulseir/generate', {
-        uri:    editor.document.uri.toString(),
+        uri:    uri.toString(),
         target,
         outDir,
       });
@@ -121,15 +170,22 @@ async function generateCode(context: vscode.ExtensionContext): Promise<void> {
 
 let diagramPanel: vscode.WebviewPanel | undefined;
 
-async function showDiagram(context: vscode.ExtensionContext): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || editor.document.languageId !== 'pulseir') {
+async function showDiagram(context: vscode.ExtensionContext, modelUri?: vscode.Uri): Promise<void> {
+  const uri = modelUri ?? vscode.window.activeTextEditor?.document.uri;
+  if (!uri) {
     vscode.window.showErrorMessage('Open a PulseIR (.pulse.yaml) file first.');
     return;
   }
+  if (!modelUri) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'pulseir') {
+      vscode.window.showErrorMessage('Open a PulseIR (.pulse.yaml) file first.');
+      return;
+    }
+  }
 
   const result = await client.sendRequest<DiagramResult>('pulseir/diagram', {
-    uri: editor.document.uri.toString(),
+    uri: uri.toString(),
   });
 
   if (result.error || !result.mermaid) {
@@ -147,7 +203,7 @@ async function showDiagram(context: vscode.ExtensionContext): Promise<void> {
     diagramPanel.onDidDispose(() => { diagramPanel = undefined; });
   }
 
-  diagramPanel.title   = `Diagram: ${path.basename(editor.document.uri.fsPath)}`;
+  diagramPanel.title   = `Diagram: ${path.basename(uri.fsPath)}`;
   diagramPanel.webview.html = diagramHtml(result.mermaid);
   diagramPanel.reveal(vscode.ViewColumn.Beside, true);
 }
