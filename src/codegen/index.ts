@@ -2801,9 +2801,11 @@ static char _mqttPrefix[96];`,
 
   /** Where a logged name lives in C. Validated by the parser, so it resolves. */
   private logValue(name: string): string {
-    const parameter = (this.project.system.parameters || []).find(p => p.name === name);
-    if (parameter) return `systemParameters.${this.sanitize(name)}`;
-    return `systemSensors.${this.sanitize(name)}`;
+    // {device.channel} → strip the device prefix; the field is named after the channel.
+    const fieldName = name.includes('.') ? name.slice(name.indexOf('.') + 1) : name;
+    const parameter = (this.project.system.parameters || []).find(p => p.name === fieldName);
+    if (parameter) return `systemParameters.${this.sanitize(fieldName)}`;
+    return `systemSensors.${this.sanitize(fieldName)}`;
   }
 
   /** Anything in the model that wants to print needs somewhere to print to. */
@@ -3686,7 +3688,11 @@ ${implementations.join('\n\n')}`;
   }
 
   /** True when channelName comes from an RTC device (values are integers, not floats). */
-  private isRtcChannel(channelName: string): boolean {
+  private isRtcChannel(nameOrRef: string): boolean {
+    // Accept both bare "hour" and dotted "clock.hour".
+    const channelName = nameOrRef.includes('.')
+      ? nameOrRef.slice(nameOrRef.indexOf('.') + 1)
+      : nameOrRef;
     for (const c of this.project.system.components ?? []) {
       if (c.driver !== 'rtc_read') continue;
       if (c.channels?.some(ch => ch.name === channelName)) return true;
@@ -3704,8 +3710,8 @@ ${implementations.join('\n\n')}`;
    */
   private renderLcdLine(fmt: string, row: number, col: number, objVar: string, bufSize: number): string[] {
     const refs: string[] = [];
-    // Collect refs to decide whether snprintf is needed.
-    const refPattern = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+    // Accept both {name} and {device.channel} refs.
+    const refPattern = /\{([A-Za-z_][A-Za-z0-9_.]*)\}/g;
     let m: RegExpExecArray | null;
     // eslint-disable-next-line no-cond-assign
     while ((m = refPattern.exec(fmt)) !== null) refs.push(m[1]);
@@ -3718,17 +3724,21 @@ ${implementations.join('\n\n')}`;
       return [setCursor, `  ${objVar}.print("${escaped}");`];
     }
 
+    // Strip device prefix from a ref to get the bare channel/field name.
+    const fieldOf = (ref: string) =>
+      ref.includes('.') ? ref.slice(ref.indexOf('.') + 1) : ref;
+
     // Build the snprintf format string and argument list.
     const snprintfFmt = fmt
       .replace(/%/g, '%%')   // escape literal % before we add our own
-      .replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => {
+      .replace(/\{([A-Za-z_][A-Za-z0-9_.]*)\}/g, (_, name: string) => {
         return this.isRtcChannel(name) ? '%02d' : '%.1f';
       });
 
     const args = refs.map(name =>
       this.isRtcChannel(name)
-        ? `(int)systemSensors.${this.sanitize(name)}`
-        : `systemSensors.${this.sanitize(name)}`
+        ? `(int)systemSensors.${this.sanitize(fieldOf(name))}`
+        : `systemSensors.${this.sanitize(fieldOf(name))}`
     );
 
     const escaped = snprintfFmt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');

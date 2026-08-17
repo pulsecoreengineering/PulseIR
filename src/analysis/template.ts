@@ -71,12 +71,12 @@ export function parseTemplate(template: string): LogSegment[] {
       if (!name) {
         throw new TemplateError(`Empty "{}" in ${JSON.stringify(template)}`);
       }
-      // A hole names one value. Anything else is the start of an expression
-      // language, which is what this deliberately is not.
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      // A hole names one value, optionally prefixed with a device name
+      // (e.g. {clock.hour}).  No spaces, no arithmetic, no nested dots.
+      if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(name)) {
         throw new TemplateError(
-          `"{${name}}" is not a name. A hole prints one declared parameter or ` +
-          'sensor; anything else belongs in an action you write.'
+          `"{${name}}" is not a valid reference. Use {name} for a parameter or ` +
+          'sensor, or {device.channel} for a named sensor channel.'
         );
       }
 
