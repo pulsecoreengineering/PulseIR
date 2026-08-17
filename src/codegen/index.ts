@@ -3730,16 +3730,17 @@ ${implementations.join('\n\n')}`;
       ref.includes('.') ? ref.slice(ref.indexOf('.') + 1) : ref;
 
     // Build the snprintf format string and argument list.
+    // Use integer formatting for all refs — %.1f breaks on AVR (Arduino Uno)
+    // because avr-libc's snprintf omits floats without -lprintf_flt.
+    // RTC channels get %02d; all other sensor values get %d with an (int) cast.
     const snprintfFmt = fmt
       .replace(/%/g, '%%')   // escape literal % before we add our own
       .replace(/\{([A-Za-z_][A-Za-z0-9_.]*)\}/g, (_, name: string) => {
-        return this.isRtcChannel(name) ? '%02d' : '%.1f';
+        return this.isRtcChannel(name) ? '%02d' : '%d';
       });
 
     const args = refs.map(name =>
-      this.isRtcChannel(name)
-        ? `(int)systemSensors.${this.sanitize(fieldOf(name))}`
-        : `systemSensors.${this.sanitize(fieldOf(name))}`
+      `(int)systemSensors.${this.sanitize(fieldOf(name))}`
     );
 
     const escaped = snprintfFmt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
