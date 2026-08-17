@@ -2061,8 +2061,12 @@ export class Parser {
     for (const device of components) {
       if (device.class !== 'sensor') continue;
       if (device.channels?.length) {
-        // Multi-channel device: log templates reference channel names, not the device name.
-        for (const ch of device.channels) known.set(ch.name, `sensor channel (${device.name})`);
+        for (const ch of device.channels) {
+          // Bare name kept for backward compatibility: {hour}
+          known.set(ch.name, `sensor channel (${device.name})`);
+          // Preferred dotted form: {clock.hour}
+          known.set(`${device.name}.${ch.name}`, `sensor channel (${device.name})`);
+        }
       } else {
         known.set(device.name, 'sensor');
       }
