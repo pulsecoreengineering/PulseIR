@@ -3716,12 +3716,13 @@ ${implementations.join('\n\n')}`;
     // eslint-disable-next-line no-cond-assign
     while ((m = refPattern.exec(fmt)) !== null) refs.push(m[1]);
 
-    const setCursor = `  ${objVar}.setCursor(${col}, ${row});`;
-
     if (refs.length === 0) {
       // Pure literal — no snprintf needed.
       const escaped = fmt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      return [setCursor, `  ${objVar}.print("${escaped}");`];
+      return [
+        `  ${objVar}.setCursor(${col}, ${row});`,
+        `  ${objVar}.print("${escaped}");`,
+      ];
     }
 
     // Strip device prefix from a ref to get the bare channel/field name.
@@ -3742,11 +3743,14 @@ ${implementations.join('\n\n')}`;
     );
 
     const escaped = snprintfFmt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    // Wrap in a block so multiple lines in one action don't redeclare _lcd_buf.
     return [
-      `  char _lcd_buf[${bufSize}];`,
-      `  snprintf(_lcd_buf, sizeof(_lcd_buf), "${escaped}", ${args.join(', ')});`,
-      setCursor,
-      `  ${objVar}.print(_lcd_buf);`,
+      `  {`,
+      `    char _lcd_buf[${bufSize}];`,
+      `    snprintf(_lcd_buf, sizeof(_lcd_buf), "${escaped}", ${args.join(', ')});`,
+      `    ${objVar}.setCursor(${col}, ${row});`,
+      `    ${objVar}.print(_lcd_buf);`,
+      `  }`,
     ];
   }
 }
