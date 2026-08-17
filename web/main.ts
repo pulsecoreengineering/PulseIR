@@ -17,6 +17,9 @@ import { Parser, ParseError } from '../src/parser/index.js';
 import { MemoryResolver } from '../src/parser/resolver.js';
 import { Codegen } from '../src/codegen/index.js';
 import type { GeneratedProject } from '../src/codegen/index.js';
+import { ArduinoBackend } from '../src/codegen/arduino.js';
+import { EspIdfBackend } from '../src/codegen/espidf.js';
+import { CmakeEmitter } from '../src/emit/cmake.js';
 import { TopicEmitter } from '../src/emit/topics.js';
 import { LibraryEmitter } from '../src/emit/libraries.js';
 import { flattenStates, resolveEntryLeaf, resolvePath } from '../src/analysis/states.js';
@@ -93,6 +96,7 @@ const snippetMenu = $<HTMLDivElement>('snippet-menu');
 const namespaceInput = $<HTMLInputElement>('namespace');
 const namespaceLabel = $<HTMLLabelElement>('namespace-label');
 const boardSelect = $<HTMLSelectElement>('board');
+const frameworkSelect = $<HTMLSelectElement>('framework');
 const staleNote = $<HTMLDivElement>('stale-note');
 const downloadButton = $<HTMLButtonElement>('download-button');
 const downloadMenu = $<HTMLDivElement>('download-menu');
@@ -134,6 +138,9 @@ let workspace: Project = { id: '', name: '', files: {}, entry: '', active: '', u
  * highlighter is used.
  */
 let currentMode: 'model' | 'code' = 'model';
+
+/** Which code-generation framework to target. */
+let currentFramework: 'arduino' | 'espidf' = 'arduino';
 
 /** Last successful render, so downloads never hand over a broken file. */
 let current: { project: PulseProject; sketch: string; topics: string; libraries: string; generatedProject: GeneratedProject } | null = null;
@@ -909,8 +916,9 @@ function render(): void {
   let topics: string;
   let libraries: string;
   try {
-    sketch = new Codegen().generate(project);
-    generatedProject = new Codegen().generateFiles(project);
+    const backend = currentFramework === 'espidf' ? new EspIdfBackend() : new ArduinoBackend();
+    sketch = new Codegen(backend).generate(project);
+    generatedProject = new Codegen(backend).generateFiles(project);
     topics = new TopicEmitter().toJSON(project, namespaceInput.value.trim() || undefined);
     libraries = new LibraryEmitter().toJSON(project);
   } catch (error) {
@@ -1486,6 +1494,85 @@ ${libSection}
 `;
 }
 
+/** CMakeLists.txt for the vendored PulseHSM component (ESP-IDF). */
+const PULSEHSM_COMPONENT_CMAKE = `idf_component_register(
+    SRCS "PulseHSM.cpp"
+    INCLUDE_DIRS "."
+)
+`;
+
+/**
+ * Package the project as an ESP-IDF CMake zip.
+ *
+ * Layout:
+ *   <folder>/
+ *     CMakeLists.txt               ← top-level ESP-IDF cmake
+ *     main/
+ *       CMakeLists.txt             ← registers main + scaffold sources
+ *       main.cpp                   ← generated sketch (renamed from <name>.cpp)
+ *       <name>_generated.h         ← generated declarations header
+ *       PulseHSM_config.h          ← sizing config (when machine:)
+ *       actions.cpp                ← scaffold (user-editable)
+ *       guards.cpp                 ← scaffold (when machine:, user-editable)
+ *     components/
+ *       PulseHSM/
+ *         CMakeLists.txt
+ *         PulseHSM.h
+ *         PulseHSM.cpp
+ */
+function downloadProjectZipEspIdf(): void {
+  if (!current) return;
+  const { project, generatedProject } = current;
+  const folder = safeFolderName(project.name);
+  const entries: Record<string, string> = {};
+
+  // Collect scaffold basenames for CMakeLists SRCS and placement.
+  const scaffoldBasenames: string[] = generatedProject.scaffolds
+    .map(f => f.path.split('/').pop()!)
+    .filter(n => /\.(cpp|c)$/i.test(n));
+
+  // Top-level and main/ CMakeLists.txt via CmakeEmitter.
+  const cmake = new CmakeEmitter();
+  const cmakeFiles = cmake.generate(project, '5.0', scaffoldBasenames);
+  entries[`${folder}/CMakeLists.txt`] = cmakeFiles.topLevel;
+  entries[`${folder}/main/CMakeLists.txt`] = cmakeFiles.mainComponent;
+
+  // 1. Scaffold stubs — lowest priority (template only).
+  for (const file of generatedProject.scaffolds) {
+    const basename = file.path.split('/').pop()!;
+    if (basename) entries[`${folder}/main/${basename}`] = file.contents;
+  }
+
+  // 2. User-authored C++ files override scaffold stubs.
+  for (const [name, contents] of Object.entries(workspace.files)) {
+    if (/\.(cpp|h|c)$/i.test(name)) {
+      entries[`${folder}/main/${name}`] = contents;
+    }
+  }
+
+  // 3. Generated files — highest priority.
+  for (const file of generatedProject.generated) {
+    if (file.path.endsWith('.cpp') || file.path.endsWith('.ino')) {
+      // Rename the sketch file to main.cpp (ESP-IDF convention).
+      entries[`${folder}/main/main.cpp`] = file.contents;
+    } else {
+      // Headers (generated header, PulseHSM_config.h) live in main/ so the
+      // component's INCLUDE_DIRS "." makes them visible without extra paths.
+      entries[`${folder}/main/${file.path}`] = file.contents;
+    }
+  }
+
+  // 4. Bundle PulseHSM as a component so the project builds with no
+  //    external idf_component_manager deps.
+  if (generatedProject.needsRuntime) {
+    entries[`${folder}/components/PulseHSM/CMakeLists.txt`] = PULSEHSM_COMPONENT_CMAKE;
+    entries[`${folder}/components/PulseHSM/PulseHSM.h`]   = PULSEHSM_H;
+    entries[`${folder}/components/PulseHSM/PulseHSM.cpp`] = PULSEHSM_CPP;
+  }
+
+  download(`${folder}.zip`, zip(entries), 'application/zip');
+}
+
 /**
  * Package the split project output as a zip.
  *
@@ -1496,6 +1583,7 @@ ${libSection}
  * do not, so we add it here without touching codegen.
  */
 function downloadProjectZip(): void {
+  if (currentFramework === 'espidf') { downloadProjectZipEspIdf(); return; }
   if (!current) return;
   const { project, generatedProject } = current;
   const folder = safeFolderName(project.name);
@@ -2286,7 +2374,11 @@ function init(): void {
   $<HTMLButtonElement>('download-sketch').addEventListener('click', () => {
     closeDownloadMenu();
     if (!current) return;
-    download(`${current.project.name}.ino`, current.sketch, 'text/plain');
+    if (currentFramework === 'espidf') {
+      download('main.cpp', current.sketch, 'text/plain');
+    } else {
+      download(`${current.project.name}.ino`, current.sketch, 'text/plain');
+    }
   });
   $<HTMLButtonElement>('download-project').addEventListener('click', () => {
     closeDownloadMenu();
@@ -2306,6 +2398,30 @@ function init(): void {
     closeDownloadMenu();
     if (!current) return;
     download('platformio.ini', generatePlatformioIni(current.project, current.generatedProject), 'text/plain');
+  });
+  $<HTMLButtonElement>('download-cmake').addEventListener('click', () => {
+    closeDownloadMenu();
+    if (!current) return;
+    const cmake = new CmakeEmitter();
+    const files = cmake.generate(current.project);
+    download('CMakeLists.txt', files.topLevel, 'text/plain');
+  });
+
+  /** Sync download-menu button labels and visibility to the current framework. */
+  function applyFrameworkToMenu(): void {
+    const isEspIdf = currentFramework === 'espidf';
+    const sketchBtn = $<HTMLButtonElement>('download-sketch');
+    sketchBtn.innerHTML = isEspIdf
+      ? 'ESP-IDF sketch  <span class="sub">.cpp</span>'
+      : 'Arduino sketch  <span class="sub">.ino</span>';
+    $<HTMLButtonElement>('download-platformio').hidden = isEspIdf;
+    $<HTMLButtonElement>('download-cmake').hidden = !isEspIdf;
+  }
+
+  frameworkSelect.addEventListener('change', () => {
+    currentFramework = frameworkSelect.value as 'arduino' | 'espidf';
+    applyFrameworkToMenu();
+    render();
   });
 
   // Tab and Enter — keep the editor from escaping focus and add auto-indent.

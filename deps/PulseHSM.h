@@ -1,7 +1,33 @@
 #ifndef PULSE_HSM_H
 #define PULSE_HSM_H
 
-#include <Arduino.h>
+// Platform abstraction — provide millis() from whatever timer the target has.
+//
+// Detection priority:
+//   1. ARDUINO macro (set by -DARDUINO=version in the Arduino IDE build): use
+//      the Arduino core's native millis().
+//   2. esp_timer.h in the include path (ESP-IDF SDK present): provide a shim.
+//   3. Arduino.h in the include path (host/test-harness environment with an
+//      Arduino shim): include it and get millis() from there.
+//   4. POSIX fallback for any other bare-C++ environment.
+#ifdef ARDUINO
+#  include <Arduino.h>
+#elif defined(__has_include) && __has_include("esp_timer.h")
+#  include "esp_timer.h"
+static inline unsigned long millis() {
+  return (unsigned long)(esp_timer_get_time() / 1000ULL);
+}
+#elif defined(__has_include) && __has_include(<Arduino.h>)
+#  include <Arduino.h>
+#else
+#  include <time.h>
+static inline unsigned long millis() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (unsigned long)((unsigned long)ts.tv_sec * 1000UL +
+                         (unsigned long)ts.tv_nsec / 1000000UL);
+}
+#endif
 
 // Compile-time configuration.
 //

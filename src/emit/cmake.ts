@@ -35,12 +35,16 @@ export class CmakeEmitter {
    * `idfVersion` is the minimum IDF version to declare in CMakeLists.txt.
    * Defaults to "5.0" which covers the current stable release line.
    */
-  generate(project: PulseProject, idfVersion = '5.0'): CmakeFiles {
+  /**
+   * @param extraSrcs  Additional source filenames (basenames only, e.g. `"actions.cpp"`)
+   *                   to add alongside `main.cpp` in the `idf_component_register` SRCS list.
+   */
+  generate(project: PulseProject, idfVersion = '5.0', extraSrcs: string[] = []): CmakeFiles {
     const name      = project.name;
     const hasMachine = project.system.states.length > 0;
 
     const topLevel       = this.topLevelCmake(name, idfVersion);
-    const mainComponent  = this.mainComponentCmake(name, hasMachine);
+    const mainComponent  = this.mainComponentCmake(name, hasMachine, extraSrcs);
 
     return { topLevel, mainComponent };
   }
@@ -61,8 +65,11 @@ export class CmakeEmitter {
     ].join('\n');
   }
 
-  private mainComponentCmake(projectName: string, hasMachine: boolean): string {
-    const safeName = projectName.replace(/[^A-Za-z0-9_]/g, '_');
+  private mainComponentCmake(_projectName: string, hasMachine: boolean, extraSrcs: string[] = []): string {
+    const allSrcs = ['"main.cpp"', ...extraSrcs.map(s => `"${s}"`)];
+    const srcsLine = allSrcs.length === 1
+      ? `    SRCS ${allSrcs[0]}`
+      : `    SRCS ${allSrcs.join('\n           ')}`;
 
     const requires = hasMachine
       ? `    REQUIRES driver esp_timer PulseHSM`
@@ -70,7 +77,7 @@ export class CmakeEmitter {
 
     return [
       `idf_component_register(`,
-      `    SRCS "main.cpp"`,
+      srcsLine,
       `    INCLUDE_DIRS "."`,
       requires,
       `)`,

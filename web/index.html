@@ -587,6 +587,15 @@
 
   <div class="vsep"></div>
 
+  <!-- Framework selector -->
+  <label for="framework">Framework</label>
+  <select id="framework" title="Target framework — Arduino generates .ino with setup/loop; ESP-IDF generates .cpp with app_main">
+    <option value="arduino">Arduino</option>
+    <option value="espidf">ESP-IDF</option>
+  </select>
+
+  <div class="vsep"></div>
+
   <!-- Board selector -->
   <label for="board">Board</label>
   <select id="board" title="Target board — affects PWM API, pin validation, and board-specific code hints">
@@ -710,6 +719,8 @@
           <div class="sep"></div>
           <button id="download-topics">MQTT topics  <span class="sub">topics.json</span></button>
           <button id="download-libraries">Library manifest  <span class="sub">libraries.json</span></button>
+          <!-- Hidden by default; shown for ESP-IDF framework -->
+          <button id="download-cmake" hidden>Top-level CMakeLists  <span class="sub">CMakeLists.txt</span></button>
         </div>
       </div>
     </div>
