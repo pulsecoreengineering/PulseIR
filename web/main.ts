@@ -27,6 +27,7 @@ import { highlightCpp } from './highlight-cpp.js';
 import { ProjectStore, foldImport, findEntry, importedName, nameFromModel } from './projects.js';
 import type { Project } from './projects.js';
 import { zip, unzip, ZipError } from './zip.js';
+import { PULSEHSM_H, PULSEHSM_CPP } from './pulsehsm-sources.js';
 import type { PulseProject, Resource } from '../src/model/index.js';
 import { EXAMPLES } from './examples.js';
 
@@ -1524,7 +1525,19 @@ function downloadProjectZip(): void {
   // 3. Generated files are always derived fresh from the model — highest priority.
   entries[`${folder}/platformio.ini`] = generatePlatformioIni(project);
   for (const file of generatedProject.generated) {
-    entries[`${folder}/src/${file.path}`] = file.contents;
+    // PulseHSM_config.h goes in include/ so PlatformIO adds it to the global
+    // include path — library code in lib/ can then find it via __has_include.
+    const dest = file.path === 'PulseHSM_config.h'
+      ? `${folder}/include/${file.path}`
+      : `${folder}/src/${file.path}`;
+    entries[dest] = file.contents;
+  }
+
+  // 4. Bundle PulseHSM as a local library so the project builds with no
+  //    external lib_deps. The lib/ directory is auto-scanned by PlatformIO.
+  if (generatedProject.needsRuntime) {
+    entries[`${folder}/lib/PulseHSM/PulseHSM.h`]   = PULSEHSM_H;
+    entries[`${folder}/lib/PulseHSM/PulseHSM.cpp`] = PULSEHSM_CPP;
   }
 
   download(`${folder}.zip`, zip(entries), 'application/zip');
