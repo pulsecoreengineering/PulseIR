@@ -11,6 +11,7 @@ import {
   CodeActionParams,
 } from 'vscode-languageserver/node';
 import { getCompletions, getHover, getCodeActions, EMPTY_MODEL, type ModelNames } from './providers.js';
+import { buildCodeLenses, findStubDefinition } from './stubs.js';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -35,6 +36,8 @@ connection.onInitialize((_params: InitializeParams): InitializeResult => ({
     completionProvider: { resolveProvider: false, triggerCharacters: [' ', ':'] },
     hoverProvider: true,
     codeActionProvider: true,
+    codeLensProvider: { resolveProvider: false },
+    definitionProvider: true,
   },
 }));
 
@@ -116,20 +119,46 @@ function tryGetModelNames(doc: ReturnType<typeof documents.get>): ModelNames {
       ? parser.parse(text, { origin: fsPath, resolver })
       : parser.parse(text);
     const params = project.system.parameters ?? [];
+    // Collect every action name used anywhere in the model.
+    const allActions = new Set<string>();
+    for (const t of project.system.transitions ?? []) {
+      for (const a of t.actions ?? []) allActions.add(a.name);
+    }
+    for (const t of project.system.tasks ?? []) {
+      for (const a of t.actions ?? []) allActions.add(a.name);
+    }
+    if (project.system.commands) {
+      for (const cmd of project.system.commands.commands ?? []) {
+        for (const a of cmd.actions ?? []) allActions.add(a.name);
+      }
+    }
+    for (const s of project.system.states ?? []) collectStateActions(s, allActions);
+
+    // Collect every guard name used in transitions.
+    const allGuards = new Set<string>();
+    for (const t of project.system.transitions ?? []) {
+      if (t.guard?.name) allGuards.add(t.guard.name);
+    }
+
     return {
       states:      getAllStateLeafNames(project.system.states),
       events:      project.system.events.map(e => e.name),
       allParams:   params.map(p => p.name),
       intParams:   params.filter(p => p.type === 'int').map(p => p.name),
       busNames:    (project.system.resources ?? []).map(r => r.name),
-      actionNames: [...new Map(
-        (project.system.transitions ?? [])
-          .flatMap(t => t.actions ?? [])
-          .map(a => [a.name, a.name])
-      ).values()],
+      actionNames: [...allActions],
+      guardNames:  [...allGuards],
     };
   } catch {
     return EMPTY_MODEL;
+  }
+}
+
+function collectStateActions(state: State, out: Set<string>): void {
+  for (const a of state.entry ?? []) out.add(a.name);
+  for (const a of state.exit  ?? []) out.add(a.name);
+  for (const r of state.regions ?? []) {
+    for (const s of r.states) collectStateActions(s, out);
   }
 }
 
@@ -163,6 +192,24 @@ connection.onCodeAction((params: CodeActionParams) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return [];
   return getCodeActions(doc, params.range, params.context.diagnostics);
+});
+
+connection.onCodeLens((params) => {
+  const doc     = documents.get(params.textDocument.uri);
+  if (!doc) return [];
+  const fsPath  = uriToFsPath(params.textDocument.uri);
+  if (!fsPath) return [];
+  const model   = tryGetModelNames(doc);
+  return buildCodeLenses(doc, model, fsPath);
+});
+
+connection.onDefinition((params: TextDocumentPositionParams) => {
+  const doc    = documents.get(params.textDocument.uri);
+  if (!doc) return null;
+  const fsPath = uriToFsPath(params.textDocument.uri);
+  if (!fsPath) return null;
+  const model  = tryGetModelNames(doc);
+  return findStubDefinition(doc, params.position, model, fsPath);
 });
 
 // ---------------------------------------------------------------------------

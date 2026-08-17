@@ -25,10 +25,11 @@ export interface ModelNames {
   intParams:     string[];
   busNames:      string[];
   actionNames:   string[];
+  guardNames:    string[];
 }
 
 export const EMPTY_MODEL: ModelNames = {
-  states: [], events: [], allParams: [], intParams: [], busNames: [], actionNames: [],
+  states: [], events: [], allParams: [], intParams: [], busNames: [], actionNames: [], guardNames: [],
 };
 
 // ---------------------------------------------------------------------------
