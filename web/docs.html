@@ -1,0 +1,1298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PulseIR Schema Reference</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f6f7f9;
+    --border: #d9dde3;
+    --text: #16191d;
+    --dim: #6b7280;
+    --accent: #0b6bcb;
+    --ok-bg: #e7f5ec; --ok-fg: #10603a;
+    --err-bg: #fdeaea; --err-fg: #97231f;
+    --warn-bg: #fdf3e2; --warn-fg: #7a4b06;
+    --code: #f3f4f6;
+    --info-bg: #eef3fb; --info-fg: #1a4fa0;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sel: rgba(11,107,203,.20);
+    --y-key: #0a5ea8;
+    --y-ident: #0e7c7b;
+    --y-string: #9b3b16;
+    --y-number: #7b3aa8;
+    --y-comment: #6b7280;
+    --y-anchor: #10603a;
+    --sidebar-w: 234px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14171c; --panel: #1b1f26; --border: #2c323c;
+      --text: #e6e8eb; --dim: #98a1ae; --accent: #62aaf5;
+      --ok-bg: #12281d; --ok-fg: #7fd4a4;
+      --err-bg: #2e1618; --err-fg: #f6a6a2;
+      --warn-bg: #2c2313; --warn-fg: #e9c07a;
+      --info-bg: #1a2640; --info-fg: #89b4f8;
+      --code: #10131a; --sel: rgba(98,170,245,.26);
+      --y-key: #7cc0ff; --y-ident: #56d4d4; --y-string: #e8a87c; --y-number: #d3a2f0;
+      --y-comment: #7d8794; --y-anchor: #7fd4a4;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14171c; --panel: #1b1f26; --border: #2c323c;
+    --text: #e6e8eb; --dim: #98a1ae; --accent: #62aaf5;
+    --ok-bg: #12281d; --ok-fg: #7fd4a4;
+    --err-bg: #2e1618; --err-fg: #f6a6a2;
+    --warn-bg: #2c2313; --warn-fg: #e9c07a;
+    --info-bg: #1a2640; --info-fg: #89b4f8;
+    --code: #10131a; --sel: rgba(98,170,245,.26);
+    --y-key: #7cc0ff; --y-ident: #56d4d4; --y-string: #e8a87c; --y-number: #d3a2f0;
+    --y-comment: #7d8794; --y-anchor: #7fd4a4;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff; --panel: #f6f7f9; --border: #d9dde3;
+    --text: #16191d; --dim: #6b7280; --accent: #0b6bcb;
+    --ok-bg: #e7f5ec; --ok-fg: #10603a;
+    --err-bg: #fdeaea; --err-fg: #97231f;
+    --warn-bg: #fdf3e2; --warn-fg: #7a4b06;
+    --info-bg: #eef3fb; --info-fg: #1a4fa0;
+    --code: #f3f4f6; --sel: rgba(11,107,203,.20);
+    --y-key: #0a5ea8; --y-ident: #0e7c7b; --y-string: #9b3b16; --y-number: #7b3aa8;
+    --y-comment: #6b7280; --y-anchor: #10603a;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 system-ui, -apple-system, Segoe UI, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Top bar ─────────────────────────────────────────────────────────────── */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 20px;
+    height: 46px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    flex-shrink: 0;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 7px;
+    text-decoration: none; color: var(--text);
+  }
+  .brand-icon {
+    width: 24px; height: 24px; border-radius: 5px;
+    background: var(--accent); color: #fff;
+    font: 700 11px/24px var(--mono);
+    text-align: center; letter-spacing: -.5px; flex-shrink: 0;
+  }
+  .brand-name { font-size: 14px; font-weight: 600; letter-spacing: -.01em; }
+  .brand-name span { color: var(--dim); font-weight: 400; }
+  .topbar-sep { flex: 1; }
+  .version-badge {
+    font: 600 11px var(--mono);
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--info-bg);
+    color: var(--info-fg);
+    border: 1px solid color-mix(in srgb, var(--info-fg) 20%, transparent);
+  }
+  .back-link {
+    font-size: 12.5px;
+    color: var(--dim);
+    text-decoration: none;
+    padding: 4px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    transition: color .12s, border-color .12s;
+  }
+  .back-link:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* ── Layout ──────────────────────────────────────────────────────────────── */
+  .layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  /* ── Sidebar ─────────────────────────────────────────────────────────────── */
+  nav {
+    width: var(--sidebar-w);
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    overflow-y: auto;
+    padding: 16px 0 24px;
+  }
+  .nav-group { margin-bottom: 2px; }
+  .nav-group-label {
+    font: 600 10.5px/1 var(--mono);
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--dim);
+    padding: 8px 16px 4px;
+  }
+  nav a {
+    display: block;
+    font-size: 13px;
+    padding: 4px 16px;
+    color: var(--text);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+    transition: color .1s, border-color .1s, background .1s;
+  }
+  nav a:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  nav a.active { color: var(--accent); border-left-color: var(--accent); font-weight: 500; }
+  nav a.sub { padding-left: 26px; font-size: 12.5px; color: var(--dim); }
+  nav a.sub:hover { color: var(--accent); }
+
+  /* ── Content ─────────────────────────────────────────────────────────────── */
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 48px 64px;
+    max-width: 860px;
+  }
+  @media (max-width: 768px) {
+    .layout { flex-direction: column; }
+    nav { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
+    main { padding: 0 20px 48px; max-width: 100%; }
+  }
+
+  section[id] { padding-top: 48px; }
+  section[id]:first-child { padding-top: 32px; }
+
+  h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; letter-spacing: -.02em; }
+  h2 { font-size: 17px; font-weight: 700; margin: 40px 0 10px; letter-spacing: -.01em; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h3 { font-size: 14px; font-weight: 600; margin: 28px 0 8px; color: var(--text); }
+  h4 { font-size: 13px; font-weight: 600; margin: 20px 0 6px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+  p { margin-bottom: 12px; }
+  p + p { margin-top: -4px; }
+  ul, ol { padding-left: 20px; margin-bottom: 12px; }
+  li { margin-bottom: 4px; }
+  li code { background: var(--code); padding: 1px 4px; border-radius: 3px; font-size: 12.5px; font-family: var(--mono); }
+  a { color: var(--accent); }
+
+  /* Intro hero */
+  .hero {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 24px 0 8px;
+  }
+  .hero p { margin: 0; color: var(--dim); font-size: 13.5px; }
+  .hero strong { color: var(--text); }
+
+  /* Key-value description lists */
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 20px; margin-bottom: 16px; }
+  dt {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--y-key);
+    padding: 4px 0;
+    white-space: nowrap;
+  }
+  dd { padding: 4px 0; font-size: 13px; color: var(--text); }
+  dd .type {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--code);
+    color: var(--y-number);
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  dd .opt {
+    display: inline-block;
+    font-size: 10.5px;
+    background: var(--panel);
+    color: var(--dim);
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: 4px;
+    border: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  dd .req {
+    display: inline-block;
+    font-size: 10.5px;
+    background: var(--warn-bg);
+    color: var(--warn-fg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: 4px;
+    border: 1px solid color-mix(in srgb, var(--warn-fg) 20%, transparent);
+    vertical-align: middle;
+  }
+  dd p { margin: 2px 0 0; font-size: 12.5px; color: var(--dim); }
+
+  /* Code blocks */
+  pre {
+    background: var(--code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font: 12.5px/1.55 var(--mono);
+    margin: 12px 0 18px;
+  }
+  code { font-family: var(--mono); font-size: 12.5px; }
+  .inline { background: var(--code); padding: 1px 5px; border-radius: 3px; }
+
+  /* YAML syntax highlighting classes */
+  .yk { color: var(--y-key); }
+  .yi { color: var(--y-ident); }
+  .ys { color: var(--y-string); }
+  .yn { color: var(--y-number); }
+  .yc { color: var(--y-comment); font-style: italic; }
+  .ya { color: var(--y-anchor); }
+
+  /* Tables */
+  .table-wrap { overflow-x: auto; margin: 12px 0 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left;
+    padding: 6px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+  td {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    vertical-align: top;
+  }
+  td code { font-size: 12px; }
+  tr:nth-child(even) td { background: color-mix(in srgb, var(--panel) 50%, transparent); }
+
+  /* Callouts */
+  .callout {
+    display: flex;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 8px;
+    margin: 14px 0;
+    font-size: 13px;
+  }
+  .callout.info { background: var(--info-bg); color: var(--info-fg); border: 1px solid color-mix(in srgb, var(--info-fg) 18%, transparent); }
+  .callout.warn { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid color-mix(in srgb, var(--warn-fg) 18%, transparent); }
+  .callout.ok   { background: var(--ok-bg);   color: var(--ok-fg);   border: 1px solid color-mix(in srgb, var(--ok-fg) 18%, transparent); }
+  .callout-icon { flex-shrink: 0; font-size: 14px; line-height: 1.6; }
+
+  /* Driver cards */
+  .driver-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 16px 0;
+    overflow: hidden;
+  }
+  .driver-card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .driver-name { font: 700 13px var(--mono); color: var(--accent); }
+  .driver-alias { font: 12px var(--mono); color: var(--dim); }
+  .driver-desc { font-size: 13px; color: var(--dim); margin-left: auto; }
+  .driver-card-body { padding: 12px 14px 4px; }
+  .driver-card-body dl { margin: 0; }
+
+  /* Divider */
+  hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+
+  /* Footer */
+  footer {
+    text-align: center;
+    padding: 20px;
+    font-size: 12px;
+    color: var(--dim);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <a class="brand" href="index.html">
+    <div class="brand-icon">Pi</div>
+    <span class="brand-name">PulseIR <span>docs</span></span>
+  </a>
+  <span class="topbar-sep"></span>
+  <span class="version-badge">Schema v1</span>
+  <a class="back-link" href="index.html">← Editor</a>
+</div>
+
+<div class="layout">
+
+<!-- ── Sidebar nav ─────────────────────────────────────────────────────────── -->
+<nav id="sidebar">
+  <div class="nav-group">
+    <div class="nav-group-label">Overview</div>
+    <a href="#intro">Introduction</a>
+    <a href="#structure">Top-level structure</a>
+    <a href="#versioning">Schema versioning</a>
+  </div>
+  <div class="nav-group">
+    <div class="nav-group-label">Hardware</div>
+    <a href="#hardware">hardware:</a>
+    <a class="sub" href="#boards">Supported boards</a>
+    <a class="sub" href="#buses">Bus types</a>
+    <a class="sub" href="#devices">Device types</a>
+    <a class="sub" href="#channels">Multi-channel sensors</a>
+  </div>
+  <div class="nav-group">
+    <div class="nav-group-label">Logic</div>
+    <a href="#events">events:</a>
+    <a href="#parameters">parameters:</a>
+    <a href="#actions-ref">actions:</a>
+    <a class="sub" href="#driver-gpio">GPIO drivers</a>
+    <a class="sub" href="#driver-pwm">PWM / ADC</a>
+    <a class="sub" href="#driver-sensor">Sensor drivers</a>
+    <a class="sub" href="#driver-display">Display drivers</a>
+    <a class="sub" href="#driver-rtc">RTC driver</a>
+  </div>
+  <div class="nav-group">
+    <div class="nav-group-label">Execution</div>
+    <a href="#tasks">tasks:</a>
+    <a href="#commands">commands:</a>
+    <a href="#machine">machine:</a>
+    <a class="sub" href="#states">States</a>
+    <a class="sub" href="#transitions">Transitions</a>
+  </div>
+  <div class="nav-group">
+    <div class="nav-group-label">System</div>
+    <a href="#communication">communication:</a>
+    <a href="#telemetry">telemetry:</a>
+    <a href="#safety">safety:</a>
+    <a href="#diagnostics">diagnostics:</a>
+    <a href="#libraries">libraries:</a>
+    <a href="#imports">imports:</a>
+  </div>
+</nav>
+
+<!-- ── Main content ────────────────────────────────────────────────────────── -->
+<main id="content">
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="intro">
+  <h1>PulseIR Schema Reference</h1>
+  <div class="hero">
+    <p><strong>PulseIR</strong> is a YAML-to-embedded-C++ compiler. You describe your hardware, logic, and behaviour in a single YAML file; the toolchain generates a complete, buildable Arduino sketch. The schema supports GPIO, I2C/SPI sensors, LCD and OLED displays, state machines, MQTT, telemetry, safety rules, and more — all without writing C by hand for the common cases.</p>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="structure">
+  <h2>Top-level structure</h2>
+  <p>A PulseIR model is a YAML document with the following top-level keys. All keys except <code class="inline">project</code> and <code class="inline">target</code> are optional.</p>
+  <pre><span class="yk">pulseir</span>: <span class="ys">"1"</span>               <span class="yc"># schema version declaration</span>
+
+<span class="yk">project</span>:
+  <span class="yk">name</span>: <span class="ys">my_system</span>
+  <span class="yk">version</span>: <span class="ys">"1.0.0"</span>
+  <span class="yk">description</span>: <span class="ys">What this does</span>
+
+<span class="yk">target</span>: <span class="ys">esp32</span>              <span class="yc"># board identifier</span>
+
+<span class="yk">hardware</span>:              <span class="yc"># buses + devices</span>
+  <span class="yk">buses</span>: []
+  <span class="yk">devices</span>: []
+
+<span class="yk">events</span>: []             <span class="yc"># named events for the state machine</span>
+<span class="yk">parameters</span>: {}         <span class="yc"># runtime-tuneable values</span>
+<span class="yk">actions</span>: {}            <span class="yc"># named driver invocations</span>
+<span class="yk">tasks</span>: []              <span class="yc"># periodic background work</span>
+<span class="yk">commands</span>:              <span class="yc"># line-oriented serial dispatch</span>
+  <span class="yk">commands</span>: []
+<span class="yk">machine</span>:               <span class="yc"># hierarchical state machine</span>
+  <span class="yk">states</span>: []
+  <span class="yk">transitions</span>: []
+<span class="yk">communication</span>: {}      <span class="yc"># selective MQTT publish/subscribe</span>
+<span class="yk">telemetry</span>: {}          <span class="yc"># per-channel sensor publish intervals</span>
+<span class="yk">safety</span>:                <span class="yc"># pre-dispatch safety checks</span>
+  <span class="yk">rules</span>: {}
+<span class="yk">diagnostics</span>: {}        <span class="yc"># watchdog, heartbeat, log level</span>
+<span class="yk">libraries</span>: []          <span class="yc"># third-party library declarations</span>
+<span class="yk">imports</span>: []            <span class="yc"># include other YAML files</span></pre>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="versioning">
+  <h2>Schema versioning</h2>
+  <p>Declare the schema version at the top of every model file. The current schema version is <strong>1</strong>.</p>
+  <pre><span class="yk">pulseir</span>: <span class="ys">"1"</span></pre>
+  <ul>
+    <li>A model declaring a <em>higher</em> version than the toolchain understands causes a warning (not an error).</li>
+    <li>A model declaring a <em>lower</em> version causes a migration note warning.</li>
+    <li>Omitting <code class="inline">pulseir:</code> is silently accepted for backward compatibility.</li>
+  </ul>
+  <div class="callout info">
+    <span class="callout-icon">ℹ</span>
+    <span>The version string is always quoted in YAML (<code>"1"</code>, not <code>1</code>) to avoid integer coercion across schema generations.</span>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="hardware">
+  <h2>hardware:</h2>
+  <p>Declares the physical hardware attached to the board: communication buses and named device components.</p>
+  <pre><span class="yk">hardware</span>:
+  <span class="yk">buses</span>:
+    - <span class="yk">name</span>: <span class="ys">i2c_bus</span>
+      <span class="yk">interface</span>: <span class="ys">i2c</span>
+      <span class="yk">binding</span>:
+        <span class="yk">sda</span>: <span class="yn">21</span>
+        <span class="yk">scl</span>: <span class="yn">22</span>
+        <span class="yk">frequency</span>: <span class="yn">400000</span>
+  <span class="yk">devices</span>:
+    - <span class="yk">name</span>: <span class="ys">led</span>
+      <span class="yk">type</span>: <span class="ys">digital_output</span>
+      <span class="yk">config</span>:
+        <span class="yk">pin</span>: <span class="yn">13</span></pre>
+
+  <!-- Boards -->
+  <h3 id="boards">Supported boards</h3>
+  <p>Set the <code class="inline">target:</code> key to one of these board identifiers.</p>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Identifier</th><th>Board</th><th>Platform</th></tr>
+      <tr><td><code>esp32</code></td><td>ESP32 (generic)</td><td>Arduino / ESP-IDF</td></tr>
+      <tr><td><code>esp32s3</code></td><td>ESP32-S3</td><td>Arduino / ESP-IDF</td></tr>
+      <tr><td><code>esp32s2</code></td><td>ESP32-S2</td><td>Arduino / ESP-IDF</td></tr>
+      <tr><td><code>esp32c3</code></td><td>ESP32-C3</td><td>Arduino / ESP-IDF</td></tr>
+      <tr><td><code>esp32h2</code></td><td>ESP32-H2</td><td>Arduino / ESP-IDF</td></tr>
+      <tr><td><code>uno</code></td><td>Arduino Uno</td><td>Arduino (AVR)</td></tr>
+      <tr><td><code>mega</code></td><td>Arduino Mega 2560</td><td>Arduino (AVR)</td></tr>
+      <tr><td><code>nano</code></td><td>Arduino Nano</td><td>Arduino (AVR)</td></tr>
+      <tr><td><code>rp2040</code></td><td>Raspberry Pi Pico / RP2040</td><td>Arduino (RP2040)</td></tr>
+      <tr><td><code>esp8266</code></td><td>ESP8266 (NodeMCU, Wemos D1)</td><td>Arduino</td></tr>
+      <tr><td><code>nano33ble</code></td><td>Arduino Nano 33 BLE</td><td>Arduino (nRF52840)</td></tr>
+      <tr><td><code>teensy41</code></td><td>Teensy 4.1</td><td>Teensyduino</td></tr>
+    </table>
+  </div>
+
+  <!-- Bus types -->
+  <h3 id="buses">Bus types</h3>
+  <p>Each bus entry in <code class="inline">hardware.buses</code> has a <code class="inline">name</code>, an <code class="inline">interface</code> type, and an optional <code class="inline">binding</code> map of interface-specific settings.</p>
+
+  <div class="table-wrap">
+    <table>
+      <tr><th>Interface</th><th>Common binding keys</th><th>Description</th></tr>
+      <tr>
+        <td><code>i2c</code></td>
+        <td><code>sda</code>, <code>scl</code>, <code>frequency</code></td>
+        <td>I2C / TWI bus. Multiple devices share one bus entry.</td>
+      </tr>
+      <tr>
+        <td><code>spi</code></td>
+        <td><code>mosi</code>, <code>miso</code>, <code>sck</code>, <code>cs</code>, <code>frequency</code></td>
+        <td>SPI bus. Each device may have its own CS pin in its config.</td>
+      </tr>
+      <tr>
+        <td><code>uart</code></td>
+        <td><code>port</code>, <code>baud</code>, <code>tx</code>, <code>rx</code></td>
+        <td>UART serial port. Used for Modbus, GPS, debug console, etc.</td>
+      </tr>
+      <tr>
+        <td><code>gpio</code></td>
+        <td><code>pin</code>, <code>mode</code></td>
+        <td>General-purpose digital I/O. Usually implied by <code>digital_input</code>/<code>digital_output</code> device types.</td>
+      </tr>
+      <tr>
+        <td><code>pwm</code></td>
+        <td><code>pin</code>, <code>frequency</code>, <code>resolution</code></td>
+        <td>PWM output. Implied by <code>pwm_output</code> device type.</td>
+      </tr>
+      <tr>
+        <td><code>adc</code></td>
+        <td><code>pin</code>, <code>resolution</code></td>
+        <td>Analog-to-digital conversion. Implied by <code>analog_input</code>.</td>
+      </tr>
+      <tr>
+        <td><code>onewire</code></td>
+        <td><code>pin</code></td>
+        <td>1-Wire bus. Required for DS18B20 temperature sensors.</td>
+      </tr>
+      <tr>
+        <td><code>wifi</code></td>
+        <td><code>ssid</code>, <code>host</code></td>
+        <td>Wi-Fi network. Credentials are loaded from config, not hardcoded.</td>
+      </tr>
+      <tr>
+        <td><code>ethernet</code></td>
+        <td><code>mac</code>, <code>ip</code></td>
+        <td>Wired Ethernet (W5500 or similar).</td>
+      </tr>
+      <tr>
+        <td><code>ble</code></td>
+        <td><code>name</code></td>
+        <td>Bluetooth Low Energy peripheral or central.</td>
+      </tr>
+      <tr>
+        <td><code>mqtt</code></td>
+        <td><code>host</code>, <code>port</code>, <code>client_id</code></td>
+        <td>MQTT broker connection. Requires a Wi-Fi or Ethernet bus.</td>
+      </tr>
+      <tr>
+        <td><code>can</code></td>
+        <td><code>tx</code>, <code>rx</code>, <code>speed</code></td>
+        <td>CAN bus (requires compatible transceiver hardware).</td>
+      </tr>
+      <tr>
+        <td><code>eeprom</code></td>
+        <td><code>size</code></td>
+        <td>On-chip EEPROM for persistent parameter storage.</td>
+      </tr>
+      <tr>
+        <td><code>littlefs</code></td>
+        <td><code>size</code></td>
+        <td>Flash filesystem for configuration and data files.</td>
+      </tr>
+      <tr>
+        <td><code>ota</code></td>
+        <td><code>hostname</code>, <code>password</code></td>
+        <td>Over-the-air firmware update (ESP32/ESP8266).</td>
+      </tr>
+      <tr>
+        <td><code>custom</code></td>
+        <td><em>any</em></td>
+        <td>Escape hatch for bus types not listed above.</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- Device types -->
+  <h3 id="devices">Device types</h3>
+  <p>Built-in device types infer their class and driver automatically. Set <code class="inline">type:</code> on a device to use one.</p>
+  <div class="table-wrap">
+    <table>
+      <tr><th>type:</th><th>class</th><th>driver</th><th>Library</th><th>Description</th></tr>
+      <tr><td><code>digital_output</code></td><td>actuator</td><td>gpio_control</td><td>—</td><td>GPIO output pin (LED, relay, etc.)</td></tr>
+      <tr><td><code>digital_input</code></td><td>sensor</td><td>gpio_read</td><td>—</td><td>GPIO input pin (button, switch, etc.)</td></tr>
+      <tr><td><code>pwm_output</code></td><td>actuator</td><td>pwm_control</td><td>—</td><td>PWM output (motor speed, dimmer, etc.)</td></tr>
+      <tr><td><code>analog_input</code></td><td>sensor</td><td>adc_read</td><td>—</td><td>Analog voltage read (potentiometer, NTC, etc.)</td></tr>
+      <tr><td><code>ds18b20</code></td><td>sensor</td><td>ds18b20</td><td>DallasTemperature</td><td>DS18B20 1-Wire temperature sensor</td></tr>
+      <tr><td><code>dht22</code></td><td>sensor</td><td>dht22</td><td>DHT sensor library</td><td>DHT22 temperature + humidity (2 channels)</td></tr>
+      <tr><td><code>dht11</code></td><td>sensor</td><td>dht11</td><td>DHT sensor library</td><td>DHT11 temperature + humidity (2 channels)</td></tr>
+      <tr><td><code>bme280</code></td><td>sensor</td><td>bme280</td><td>Adafruit BME280 Library</td><td>BME280 temperature / humidity / pressure (3 channels)</td></tr>
+      <tr><td><code>lcd_i2c</code></td><td>actuator</td><td>lcd_print</td><td>LiquidCrystal_I2C</td><td>I2C character LCD (16×2, 20×4, etc.)</td></tr>
+      <tr><td><code>oled_i2c</code></td><td>actuator</td><td>oled_print</td><td>Adafruit SSD1306</td><td>I2C OLED display (SSD1306, 128×64 or 128×32)</td></tr>
+      <tr><td><code>ds3231</code></td><td>sensor</td><td>rtc_read</td><td>RTClib</td><td>DS3231 real-time clock — auto-populates hour, minute, second channels</td></tr>
+      <tr><td><code>ds1307</code></td><td>sensor</td><td>rtc_read</td><td>RTClib</td><td>DS1307 real-time clock — auto-populates hour, minute, second channels</td></tr>
+    </table>
+  </div>
+
+  <h4>Common device fields</h4>
+  <dl>
+    <dt>name</dt><dd>Unique identifier for this device. <span class="req">required</span>
+      <p>Must be a valid C identifier. Used as the variable name in generated code.</p></dd>
+    <dt>type</dt><dd>Built-in device type (see table above). <span class="opt">optional</span>
+      <p>When set, <code>class</code> and <code>driver</code> are inferred. Omit when using a custom driver with explicit <code>class</code> and <code>driver</code>.</p></dd>
+    <dt>class</dt><dd><code class="inline">sensor</code> | <code class="inline">actuator</code> | <code class="inline">service</code> <span class="opt">optional if type is set</span>
+      <p>Required when <code>type</code> is not a built-in. Determines how the codegen treats the device.</p></dd>
+    <dt>driver</dt><dd>Driver plugin name. <span class="opt">optional if type is set</span></dd>
+    <dt>bus</dt><dd>Name of a declared bus. <span class="opt">optional</span>
+      <p>Required for I2C and SPI devices that share a bus.</p></dd>
+    <dt>config</dt><dd>Device-specific configuration map. <span class="opt">optional</span>
+      <p>For GPIO devices: <code>pin</code>. For LCD: <code>address</code>, <code>cols</code>, <code>rows</code>. For OLED: <code>address</code>, <code>width</code>, <code>height</code>.</p></dd>
+    <dt>channels</dt><dd>List of named readings for multi-value sensors. <span class="opt">optional</span>
+      <p>See <a href="#channels">Multi-channel sensors</a> below.</p></dd>
+    <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
+  </dl>
+
+  <h4>Examples</h4>
+  <pre><span class="yc"># Simple GPIO LED</span>
+- <span class="yk">name</span>: <span class="ys">status_led</span>
+  <span class="yk">type</span>: <span class="ys">digital_output</span>
+  <span class="yk">config</span>:
+    <span class="yk">pin</span>: <span class="yn">13</span>
+
+<span class="yc"># I2C LCD display</span>
+- <span class="yk">name</span>: <span class="ys">display</span>
+  <span class="yk">type</span>: <span class="ys">lcd_i2c</span>
+  <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
+  <span class="yk">config</span>:
+    <span class="yk">address</span>: <span class="yn">0x27</span>
+    <span class="yk">cols</span>: <span class="yn">16</span>
+    <span class="yk">rows</span>: <span class="yn">2</span>
+
+<span class="yc"># DS3231 RTC (channels auto-populated: hour, minute, second)</span>
+- <span class="yk">name</span>: <span class="ys">clock</span>
+  <span class="yk">type</span>: <span class="ys">ds3231</span>
+  <span class="yk">bus</span>: <span class="ys">i2c_bus</span></pre>
+
+  <!-- Multi-channel sensors -->
+  <h3 id="channels">Multi-channel sensors</h3>
+  <p>Sensors that expose multiple readings (temperature + humidity, time components, etc.) declare a <code class="inline">channels:</code> list. Each channel becomes its own <code class="inline">systemSensors.&lt;name&gt;</code> float field.</p>
+
+  <div class="callout ok">
+    <span class="callout-icon">✓</span>
+    <span>RTC devices (<code>ds3231</code>, <code>ds1307</code>) automatically populate <code>[hour, minute, second]</code> channels when no explicit <code>channels:</code> are declared.</span>
+  </div>
+
+  <h4>List form (ordered channels)</h4>
+  <pre><span class="yk">devices</span>:
+  - <span class="yk">name</span>: <span class="ys">weather</span>
+    <span class="yk">type</span>: <span class="ys">bme280</span>
+    <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
+    <span class="yk">channels</span>:
+      - <span class="yk">name</span>: <span class="ys">temperature</span>
+        <span class="yk">measure</span>: <span class="ys">temperature</span>
+      - <span class="yk">name</span>: <span class="ys">humidity</span>
+        <span class="yk">measure</span>: <span class="ys">humidity</span>
+      - <span class="yk">name</span>: <span class="ys">pressure</span>
+        <span class="yk">measure</span>: <span class="ys">pressure</span></pre>
+
+  <h4>Map form (named channels)</h4>
+  <pre><span class="yk">channels</span>:
+  <span class="yk">temperature</span>:
+    <span class="yk">measure</span>: <span class="ys">temperature</span>
+  <span class="yk">humidity</span>:
+    <span class="yk">measure</span>: <span class="ys">humidity</span></pre>
+
+  <h4>SensorChannel fields</h4>
+  <dl>
+    <dt>name</dt><dd>Channel identifier. <span class="req">required</span>
+      <p>Must be a valid C identifier. Becomes <code>systemSensors.&lt;name&gt;</code>.</p></dd>
+    <dt>measure</dt><dd>Driver hint for which reading to extract. <span class="opt">optional</span>
+      <p>Defaults to the channel name. Standard values: <code>temperature</code>, <code>humidity</code>, <code>pressure</code>.</p></dd>
+    <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
+    <dt>config</dt><dd>Driver-specific extras. <span class="opt">optional</span>
+      <p>E.g. <code>{ register: 0x04, scale: 0.01 }</code> for Modbus channels.</p></dd>
+  </dl>
+
+  <div class="callout info">
+    <span class="callout-icon">ℹ</span>
+    <span>When a device declares channels, log templates, MQTT topics, and telemetry entries must reference the <em>channel names</em> (not the device name). E.g. <code>{temperature}</code> not <code>{weather}</code>.</span>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="events">
+  <h2>events:</h2>
+  <p>Named system events that drive the state machine. Events from sensors, timers, GPIO, or MQTT can all be declared here.</p>
+  <pre><span class="yk">events</span>:
+  - <span class="yk">name</span>: <span class="ys">BUTTON_PRESSED</span>
+    <span class="yk">source</span>: <span class="ys">external</span>
+    <span class="yk">description</span>: <span class="ys">User pressed the main button</span>
+  - <span class="yk">name</span>: <span class="ys">TEMP_HIGH</span>
+    <span class="yk">source</span>: <span class="ys">sensor</span>
+  - <span class="yk">name</span>: <span class="ys">CMD_START</span>
+    <span class="yk">source</span>: <span class="ys">mqtt</span></pre>
+
+  <dl>
+    <dt>name</dt><dd>Event identifier. <span class="req">required</span>
+      <p>Conventionally UPPER_SNAKE_CASE.</p></dd>
+    <dt>source</dt><dd><span class="type">enum</span> <span class="req">required</span>
+      <p>One of: <code>external</code>, <code>timer</code>, <code>sensor</code>, <code>mqtt</code>, <code>internal</code>, <code>custom</code>.</p></dd>
+    <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
+    <dt>payload</dt><dd>Schema for event payload data. <span class="opt">optional</span></dd>
+  </dl>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="parameters">
+  <h2>parameters:</h2>
+  <p>Runtime-tuneable values. Parameters become typed C++ variables initialized to their defaults; they can be read in guards and actions, and written via MQTT subscribe or serial commands.</p>
+  <pre><span class="yk">parameters</span>:
+  <span class="yk">temp_threshold</span>:
+    <span class="yk">type</span>: <span class="ys">float</span>
+    <span class="yk">default</span>: <span class="yn">75.0</span>
+    <span class="yk">min</span>: <span class="yn">0.0</span>
+    <span class="yk">max</span>: <span class="yn">120.0</span>
+    <span class="yk">unit</span>: <span class="ys">°C</span>
+    <span class="yk">description</span>: <span class="ys">Temperature at which cooling starts</span>
+    <span class="yk">persist</span>: <span class="yn">true</span></pre>
+
+  <dl>
+    <dt>type</dt><dd><span class="type">enum</span> <span class="req">required</span>
+      <p>One of: <code>float</code>, <code>int</code>, <code>bool</code>, <code>string</code>.</p></dd>
+    <dt>default</dt><dd>Initial value. <span class="req">required</span></dd>
+    <dt>min / max</dt><dd>Clamp bounds for numeric types. <span class="opt">optional</span></dd>
+    <dt>unit</dt><dd>Display unit string (documentation only). <span class="opt">optional</span></dd>
+    <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
+    <dt>persist</dt><dd><span class="type">bool</span> <span class="opt">optional</span>
+      <p>When true, the value is loaded from NVS/EEPROM at boot and saved when changed.</p></dd>
+  </dl>
+  <p>Parameter names are referenced in log strings and action params as <code class="inline">{param_name}</code>.</p>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="actions-ref">
+  <h2>actions:</h2>
+  <p>Named driver invocations. Each action has a unique name, specifies a driver, and carries driver-specific parameters. Actions are referenced by name in tasks, transitions, commands, and state entry/exit hooks.</p>
+  <pre><span class="yk">actions</span>:
+  <span class="yk">turn_on_led</span>:
+    <span class="yk">driver</span>: <span class="ys">gpio_control</span>
+    <span class="yk">params</span>:
+      <span class="yk">device</span>: <span class="ys">status_led</span>
+      <span class="yk">value</span>: <span class="yn">true</span></pre>
+
+  <dl>
+    <dt>driver</dt><dd>Driver plugin name. <span class="req">required</span></dd>
+    <dt>params</dt><dd>Driver-specific parameters map. <span class="opt">optional</span></dd>
+    <dt>description</dt><dd>Human-readable note (reproduced as a comment in the generated stub). <span class="opt">optional</span></dd>
+  </dl>
+
+  <!-- GPIO drivers -->
+  <h3 id="driver-gpio">GPIO drivers</h3>
+
+  <div class="driver-card">
+    <div class="driver-card-head">
+      <span class="driver-name">gpio_control</span>
+      <span class="driver-desc">Write a digital value to an output pin</span>
+    </div>
+    <div class="driver-card-body">
+      <dl>
+        <dt>device</dt><dd>Name of a <code>digital_output</code> device. <span class="req">required</span></dd>
+        <dt>value</dt><dd><span class="type">bool</span> <code>true</code> = HIGH, <code>false</code> = LOW. <span class="req">required</span></dd>
+      </dl>
+      <pre><span class="yk">turn_off</span>:
+  <span class="yk">driver</span>: <span class="ys">gpio_control</span>
+  <span class="yk">params</span>:
+    <span class="yk">device</span>: <span class="ys">relay</span>
+    <span class="yk">value</span>: <span class="yn">false</span></pre>
+    </div>
+  </div>
+
+  <div class="driver-card">
+    <div class="driver-card-head">
+      <span class="driver-name">gpio_read</span>
+      <span class="driver-desc">Read a digital input pin into systemSensors</span>
+    </div>
+    <div class="driver-card-body">
+      <dl>
+        <dt>device</dt><dd>Name of a <code>digital_input</code> device. <span class="req">required</span></dd>
+      </dl>
+    </div>
+  </div>
+
+  <!-- PWM / ADC -->
+  <h3 id="driver-pwm">PWM and ADC drivers</h3>
+
+  <div class="driver-card">
+    <div class="driver-card-head">
+      <span class="driver-name">pwm_control</span>
+      <span class="driver-desc">Set a PWM duty cycle (0–255 or 0.0–1.0)</span>
+    </div>
+    <div class="driver-card-body">
+      <dl>
+        <dt>device</dt><dd>Name of a <code>pwm_output</code> device. <span class="req">required</span></dd>
+        <dt>duty</dt><dd><span class="type">int | float | string</span> Duty cycle: integer 0–255, float 0.0–1.0, or a parameter name. <span class="req">required</span></dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="driver-card">
+    <div class="driver-card-head">
+      <span class="driver-name">adc_read</span>
+      <span class="driver-desc">Read an analog input into systemSensors</span>
+    </div>
+    <div class="driver-card-body">
+      <dl>
+        <dt>device</dt><dd>Name of an <code>analog_input</code> device. <span class="req">required</span></dd>
+      </dl>
+    </div>
+  </div>
+
+  <!-- Sensor drivers -->
+  <h3 id="driver-sensor">Sensor drivers</h3>
+
+  <div class="driver-card">
+    <div class="driver-card-head">
+      <span class="driver-name">ds18b20</span>
+      <span class="driver-desc">1-Wire temperature sensor (DallasTemperature library)</span>
+    </div>
+    <div class="driver-card-body">
+      <dl>
+        <dt>device</dt><dd>Name of a <code>ds18b20</code> device. <span class="req">required</span></dd>
+      </dl>
+      <p>Generates <code>device.requestTemperatures(); systemSensors.name = device.getTempCByIndex(0);</code></p>
+    </div>
+  </div>
+
+  <div class="driver-card">
+    <div class="driver-card-head">
+      <span class="driver-name">dht22</span>
+      <span class="driver-alias">/ dht11</span>
+      <span class="driver-desc">DHT temperature + humidity (DHT sensor library)</span>
+    </div>
+    <div class="driver-card-body">
+      <dl>
+        <dt>device</dt><dd>Name of a <code>dht22</code> or <code>dht11</code> device. <span class="req">required</span></dd>
+      </dl>
+      <p>Declares two channels: <code>temperature</code> and <code>humidity</code> when none are explicitly set.</p>
+    </div>
+  </div>
+
+  <div class="driver-card">
+    <div class="driver-card-head">
+      <span class="driver-name">bme280</span>
+      <span class="driver-desc">BME280 environmental sensor (Adafruit BME280 Library)</span>
+    </div>
+    <div class="driver-card-body">
+      <dl>
+        <dt>device</dt><dd>Name of a <code>bme280</code> device. <span class="req">required</span></dd>
+      </dl>
+      <p>Reads <code>temperature</code>, <code>humidity</code>, and <code>pressure</code> channels.</p>
+    </div>
+  </div>
+
+  <!-- Display drivers -->
+  <h3 id="driver-display">Display drivers</h3>
+
+  <div class="driver-card">
+    <div class="driver-card-head">
+      <span class="driver-name">lcd_display</span>
+      <span class="driver-alias">alias: lcd_print</span>
+      <span class="driver-desc">Write formatted text to an I2C character LCD</span>
+    </div>
+    <div class="driver-card-body">
+      <dl>
+        <dt>device</dt><dd>Name of an <code>lcd_i2c</code> device. <span class="req">required</span></dd>
+        <dt>clear</dt><dd><span class="type">bool</span> Call <code>display.clear()</code> before writing. <span class="opt">optional</span></dd>
+        <dt>format</dt><dd>Single-line format string with <code>{name}</code> template refs. <span class="opt">see below</span>
+          <p>Used together with <code>row</code> and <code>col</code> for single-line output.</p></dd>
+        <dt>row</dt><dd><span class="type">int</span> LCD row (0-indexed). <span class="opt">optional, default 0</span></dd>
+        <dt>col</dt><dd><span class="type">int</span> LCD column (0-indexed). <span class="opt">optional, default 0</span></dd>
+        <dt>lines</dt><dd>Array of line descriptors for multi-line output. <span class="opt">see below</span>
+          <p>Use either <code>format</code> (single-line) or <code>lines</code> (multi-line), not both.</p></dd>
+      </dl>
+
+      <h4>Single-line example</h4>
+      <pre><span class="yk">show_temp</span>:
+  <span class="yk">driver</span>: <span class="ys">lcd_display</span>
+  <span class="yk">params</span>:
+    <span class="yk">device</span>: <span class="ys">display</span>
+    <span class="yk">clear</span>: <span class="yn">true</span>
+    <span class="yk">format</span>: <span class="ys">Temp: {temperature}C</span>
+    <span class="yk">row</span>: <span class="yn">0</span>
+    <span class="yk">col</span>: <span class="yn">0</span></pre>
+
+      <h4>Multi-line example</h4>
+      <pre><span class="yk">show_clock</span>:
+  <span class="yk">driver</span>: <span class="ys">lcd_display</span>
+  <span class="yk">params</span>:
+    <span class="yk">device</span>: <span class="ys">display</span>
+    <span class="yk">clear</span>: <span class="yn">true</span>
+    <span class="yk">lines</span>:
+      - <span class="yk">format</span>: <span class="ys">Time: {hour}:{minute}:{second}</span>
+        <span class="yk">row</span>: <span class="yn">0</span>
+        <span class="yk">col</span>: <span class="yn">0</span>
+      - <span class="yk">format</span>: <span class="ys">Temp: {temperature}C</span>
+        <span class="yk">row</span>: <span class="yn">1</span>
+        <span class="yk">col</span>: <span class="yn">0</span></pre>
+
+      <h4>Lines array entries</h4>
+      <p>Each entry in <code>lines:</code> can be a plain string (placed at row 0, col 0) or an object:</p>
+      <dl>
+        <dt>format</dt><dd>Format string. <span class="req">required for object form</span></dd>
+        <dt>row</dt><dd><span class="type">int</span> LCD row (0-indexed). <span class="opt">optional, default 0</span></dd>
+        <dt>col</dt><dd><span class="type">int</span> LCD column (0-indexed). <span class="opt">optional, default 0</span></dd>
+      </dl>
+
+      <h4>Format strings</h4>
+      <p>Template refs use <code>{name}</code> syntax. The name must match a declared sensor, channel, or parameter.</p>
+      <ul>
+        <li>RTC channels (<code>{hour}</code>, <code>{minute}</code>, <code>{second}</code>) are formatted as <code>%02d</code> (two digits, zero-padded).</li>
+        <li>Float sensors are formatted as <code>%.1f</code> (one decimal place).</li>
+        <li>Literal <code>%</code> characters are automatically escaped.</li>
+        <li>Pure-literal strings (no refs) generate a direct <code>print("...")</code> without <code>snprintf</code>.</li>
+      </ul>
+      <div class="callout info">
+        <span class="callout-icon">ℹ</span>
+        <span>All <code>{name}</code> references in format strings are validated at parse time. An unknown name is a parse error, not a runtime bug.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="driver-card">
+    <div class="driver-card-head">
+      <span class="driver-name">oled_print</span>
+      <span class="driver-desc">Write text to an I2C OLED display (SSD1306)</span>
+    </div>
+    <div class="driver-card-body">
+      <dl>
+        <dt>device</dt><dd>Name of an <code>oled_i2c</code> device. <span class="req">required</span></dd>
+        <dt>text</dt><dd>Text to print. <span class="opt">optional</span></dd>
+        <dt>row</dt><dd><span class="type">int</span> Text cursor line. <span class="opt">optional</span></dd>
+      </dl>
+    </div>
+  </div>
+
+  <!-- RTC driver -->
+  <h3 id="driver-rtc">RTC driver</h3>
+
+  <div class="driver-card">
+    <div class="driver-card-head">
+      <span class="driver-name">rtc_read</span>
+      <span class="driver-desc">Read time from a DS3231 or DS1307 RTC module (RTClib)</span>
+    </div>
+    <div class="driver-card-body">
+      <dl>
+        <dt>device</dt><dd>Name of a <code>ds3231</code> or <code>ds1307</code> device. <span class="req">required</span></dd>
+      </dl>
+      <p>Generates real RTClib code. For each declared (or auto-populated) channel, the generated snippet reads from <code>DateTime _now = obj.now()</code>:</p>
+      <ul>
+        <li><code>hour</code> → <code>systemSensors.hour = (float)_now.hour();</code></li>
+        <li><code>minute</code> → <code>systemSensors.minute = (float)_now.minute();</code></li>
+        <li><code>second</code> → <code>systemSensors.second = (float)_now.second();</code></li>
+        <li><code>day</code> → <code>systemSensors.day = (float)_now.day();</code></li>
+        <li><code>month</code> → <code>systemSensors.month = (float)_now.month();</code></li>
+        <li><code>year</code> → <code>systemSensors.year = (float)_now.year();</code></li>
+      </ul>
+
+      <h4>Complete RTC + LCD example</h4>
+      <p>A full clock-on-display program written entirely in YAML, no manual C required:</p>
+      <pre><span class="yk">pulseir</span>: <span class="ys">"1"</span>
+
+<span class="yk">project</span>:
+  <span class="yk">name</span>: <span class="ys">rtc_clock</span>
+
+<span class="yk">target</span>: <span class="ys">esp32</span>
+
+<span class="yk">hardware</span>:
+  <span class="yk">buses</span>:
+    - <span class="yk">name</span>: <span class="ys">i2c_bus</span>
+      <span class="yk">interface</span>: <span class="ys">i2c</span>
+      <span class="yk">binding</span>: { <span class="yk">sda</span>: <span class="yn">21</span>, <span class="yk">scl</span>: <span class="yn">22</span> }
+  <span class="yk">devices</span>:
+    - <span class="yk">name</span>: <span class="ys">clock</span>
+      <span class="yk">type</span>: <span class="ys">ds3231</span>
+      <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
+    - <span class="yk">name</span>: <span class="ys">display</span>
+      <span class="yk">type</span>: <span class="ys">lcd_i2c</span>
+      <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
+      <span class="yk">config</span>: { <span class="yk">address</span>: <span class="yn">0x27</span>, <span class="yk">cols</span>: <span class="yn">16</span>, <span class="yk">rows</span>: <span class="yn">2</span> }
+
+<span class="yk">actions</span>:
+  <span class="yk">read_time</span>:
+    <span class="yk">driver</span>: <span class="ys">rtc_read</span>
+    <span class="yk">params</span>: { <span class="yk">device</span>: <span class="ys">clock</span> }
+  <span class="yk">show_time</span>:
+    <span class="yk">driver</span>: <span class="ys">lcd_display</span>
+    <span class="yk">params</span>:
+      <span class="yk">device</span>: <span class="ys">display</span>
+      <span class="yk">format</span>: <span class="ys">{hour}:{minute}:{second}</span>
+      <span class="yk">row</span>: <span class="yn">0</span>
+      <span class="yk">col</span>: <span class="yn">3</span>
+
+<span class="yk">tasks</span>:
+  - <span class="yk">name</span>: <span class="ys">clock_tick</span>
+    <span class="yk">every</span>: <span class="yn">1000</span>
+    <span class="yk">actions</span>: [<span class="ys">read_time</span>, <span class="ys">show_time</span>]</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="tasks">
+  <h2>tasks:</h2>
+  <p>Periodic background work. Each task runs its action list on a fixed interval. Tasks work with or without a state machine.</p>
+  <pre><span class="yk">tasks</span>:
+  - <span class="yk">name</span>: <span class="ys">sensor_poll</span>
+    <span class="yk">every</span>: <span class="yn">2000</span>            <span class="yc"># milliseconds, or a parameter name</span>
+    <span class="yk">actions</span>: [<span class="ys">read_temp</span>, <span class="ys">check_limits</span>]
+    <span class="yk">log</span>: <span class="ys">T={temperature} H={humidity}</span>
+    <span class="yk">description</span>: <span class="ys">Poll weather sensors every 2 seconds</span></pre>
+
+  <dl>
+    <dt>name</dt><dd>Task identifier. <span class="req">required</span></dd>
+    <dt>every</dt><dd><span class="type">int | string</span> Interval in milliseconds, or the name of an <code>int</code> parameter. <span class="req">required</span></dd>
+    <dt>actions</dt><dd>List of action names to run each tick. <span class="req">required</span></dd>
+    <dt>log</dt><dd>Format string printed after actions run. <span class="opt">optional</span>
+      <p>Supports <code>{name}</code> template refs. Requires a UART console bus.</p></dd>
+    <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
+  </dl>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="commands">
+  <h2>commands:</h2>
+  <p>Line-oriented command dispatch, typically over UART serial. Incoming lines are matched exactly; the matching entry runs its actions and/or raises an event.</p>
+  <pre><span class="yk">commands</span>:
+  <span class="yk">source</span>: <span class="ys">console</span>           <span class="yc"># name of a UART bus; defaults to the console</span>
+  <span class="yk">reportUnknown</span>: <span class="yn">true</span>      <span class="yc"># print "unknown command" when nothing matches</span>
+  <span class="yk">commands</span>:
+    - <span class="yk">match</span>: <span class="ys">start</span>
+      <span class="yk">actions</span>: [<span class="ys">turn_on_pump</span>]
+      <span class="yk">event</span>: <span class="ys">CMD_START</span>
+      <span class="yk">log</span>: <span class="ys">Pump started</span>
+    - <span class="yk">match</span>: <span class="ys">stop</span>
+      <span class="yk">event</span>: <span class="ys">CMD_STOP</span></pre>
+
+  <dl>
+    <dt>source</dt><dd>Name of a declared UART interface. <span class="opt">optional</span>
+      <p>Defaults to the project's console (first UART bus).</p></dd>
+    <dt>reportUnknown</dt><dd><span class="type">bool</span> Print an error line when input doesn't match any command. <span class="opt">optional, default true</span></dd>
+    <dt>commands</dt><dd>Array of command entries. <span class="req">required</span></dd>
+  </dl>
+
+  <h4>Command entry fields</h4>
+  <dl>
+    <dt>match</dt><dd>Exact string to match (after trimming whitespace). <span class="req">required</span></dd>
+    <dt>actions</dt><dd>Action names to run when matched. <span class="opt">optional</span></dd>
+    <dt>event</dt><dd>Event name to raise when matched (requires a state machine). <span class="opt">optional</span></dd>
+    <dt>log</dt><dd>Reply line to print, with <code>{name}</code> template refs. <span class="opt">optional</span></dd>
+    <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
+  </dl>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="machine">
+  <h2>machine:</h2>
+  <p>An optional hierarchical state machine (HSM). The machine section targets the PulseHSM runtime on Arduino. You can have tasks and commands without a machine, but a machine requires at least one state and one transition.</p>
+  <pre><span class="yk">machine</span>:
+  <span class="yk">states</span>:
+    - <span class="yk">name</span>: <span class="ys">idle</span>
+      <span class="yk">entry</span>: [<span class="ys">turn_off_led</span>]
+    - <span class="yk">name</span>: <span class="ys">running</span>
+      <span class="yk">entry</span>: [<span class="ys">turn_on_led</span>]
+      <span class="yk">exit</span>: [<span class="ys">log_stop</span>]
+  <span class="yk">transitions</span>:
+    - <span class="yk">source</span>: <span class="ys">idle</span>
+      <span class="yk">target</span>: <span class="ys">running</span>
+      <span class="yk">event</span>: <span class="ys">CMD_START</span>
+    - <span class="yk">source</span>: <span class="ys">running</span>
+      <span class="yk">target</span>: <span class="ys">idle</span>
+      <span class="yk">after</span>: <span class="yn">30000</span>          <span class="yc"># timeout in ms</span></pre>
+
+  <h3 id="states">States</h3>
+  <dl>
+    <dt>name</dt><dd>State identifier. <span class="req">required</span></dd>
+    <dt>type</dt><dd><span class="type">enum</span> <code>simple</code> (default), <code>composite</code>, <code>orthogonal</code>. <span class="opt">optional</span></dd>
+    <dt>entry</dt><dd>Action names run when the machine enters this state. <span class="opt">optional</span></dd>
+    <dt>exit</dt><dd>Action names run when the machine exits this state. <span class="opt">optional</span></dd>
+    <dt>initial</dt><dd>Initial child state name (composite states only). <span class="opt">optional</span></dd>
+    <dt>regions</dt><dd>Child regions (composite/orthogonal states). <span class="opt">optional</span></dd>
+    <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
+  </dl>
+
+  <h4>Nested states</h4>
+  <pre><span class="yk">states</span>:
+  - <span class="yk">name</span>: <span class="ys">operating</span>
+    <span class="yk">type</span>: <span class="ys">composite</span>
+    <span class="yk">initial</span>: <span class="ys">heating</span>
+    <span class="yk">regions</span>:
+      - <span class="yk">initial</span>: <span class="ys">heating</span>
+        <span class="yk">states</span>:
+          - <span class="yk">name</span>: <span class="ys">heating</span>
+          - <span class="yk">name</span>: <span class="ys">cooling</span></pre>
+
+  <p>Nested state paths use <code class="inline">/</code> as separator: <code class="inline">operating/heating</code>.</p>
+
+  <h3 id="transitions">Transitions</h3>
+  <dl>
+    <dt>source</dt><dd>Source state path. Use <code>*</code> for wildcard (any state). <span class="req">required</span></dd>
+    <dt>target</dt><dd>Destination state path. <span class="opt">optional for <code>every:</code> transitions</span></dd>
+    <dt>event</dt><dd>Event name that triggers this transition. <span class="opt">see below</span></dd>
+    <dt>after</dt><dd><span class="type">int | string</span> Fire this many ms after entering the source state. <span class="opt">mutually exclusive with event</span></dd>
+    <dt>every</dt><dd><span class="type">int | string</span> Repeat actions every N ms without leaving the state. <span class="opt">mutually exclusive with event/after</span></dd>
+    <dt>guard</dt><dd>Named C guard function that must return <code>true</code> for the transition to fire. <span class="opt">optional</span></dd>
+    <dt>actions</dt><dd>Action names to run during the transition. <span class="opt">optional</span></dd>
+    <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
+  </dl>
+
+  <div class="callout info">
+    <span class="callout-icon">ℹ</span>
+    <span>Guard functions are C stubs you implement: <code>bool guard_&lt;name&gt;(const SystemContext* ctx)</code>. Guards live in C where they can be debugged and type-checked — PulseIR deliberately has no expression language.</span>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="communication">
+  <h2>communication:</h2>
+  <p>Explicit MQTT publish and subscribe contract. Without this block, the codegen publishes every sensor and subscribes every parameter and MQTT-sourced event. With it, only the listed items are wired.</p>
+  <pre><span class="yk">communication</span>:
+  <span class="yk">publish</span>:
+    - <span class="yk">sensor</span>: <span class="ys">temperature</span>
+      <span class="yk">topic</span>: <span class="ys">env/temp</span>
+    - <span class="yk">sensor</span>: <span class="ys">humidity</span>
+  <span class="yk">subscribe</span>:
+    - <span class="yk">parameter</span>: <span class="ys">setpoint</span>
+      <span class="yk">topic</span>: <span class="ys">ctrl/setpoint</span>
+    - <span class="yk">event</span>: <span class="ys">CMD_START</span></pre>
+
+  <dl>
+    <dt>publish[].sensor</dt><dd>Name of a declared sensor or channel. <span class="req">required</span></dd>
+    <dt>publish[].topic</dt><dd>Stable MQTT topic segment. <span class="opt">optional — defaults to the sensor name</span></dd>
+    <dt>subscribe[].parameter</dt><dd>Parameter name to expose as a remotely-settable setpoint. <span class="opt">one of</span></dd>
+    <dt>subscribe[].event</dt><dd>Event name to allow triggering via MQTT. <span class="opt">one of</span></dd>
+    <dt>subscribe[].topic</dt><dd>Stable MQTT topic segment. <span class="opt">optional — defaults to the parameter/event name</span></dd>
+  </dl>
+  <div class="callout info">
+    <span class="callout-icon">ℹ</span>
+    <span>Machine state is always published when a state machine is declared — it does not need to appear in <code>publish</code>.</span>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="telemetry">
+  <h2>telemetry:</h2>
+  <p>Per-channel MQTT publish intervals. Without this section, all sensors publish at the same global interval. With it, each channel can have its own interval — a fast temperature sensor and a slow diagnostic counter can coexist.</p>
+  <pre><span class="yk">telemetry</span>:
+  <span class="yk">interval_ms</span>: <span class="yn">10000</span>        <span class="yc"># default for channels that omit their own</span>
+  <span class="yk">topic_prefix</span>: <span class="ys">device/01</span>  <span class="yc"># defaults to project name</span>
+  <span class="yk">channels</span>:
+    - <span class="yk">sensor</span>: <span class="ys">temperature</span>
+      <span class="yk">interval_ms</span>: <span class="yn">2000</span>
+    - <span class="yk">sensor</span>: <span class="ys">battery_v</span>
+      <span class="yk">topic</span>: <span class="ys">health/battery</span></pre>
+
+  <dl>
+    <dt>interval_ms</dt><dd>Default publish interval (ms or int parameter). <span class="opt">required if any channel omits its own</span></dd>
+    <dt>topic_prefix</dt><dd>MQTT topic prefix. <span class="opt">optional — defaults to project name</span></dd>
+    <dt>channels</dt><dd>Array of channel entries. <span class="req">required</span></dd>
+    <dt>channels[].sensor</dt><dd>Name of a declared sensor or channel. <span class="req">required</span></dd>
+    <dt>channels[].interval_ms</dt><dd>Per-channel override interval. <span class="opt">optional</span></dd>
+    <dt>channels[].topic</dt><dd>Absolute MQTT topic override. <span class="opt">optional</span></dd>
+  </dl>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="safety">
+  <h2>safety:</h2>
+  <p>Pre-dispatch safety rules. <code>runSafetyChecks()</code> runs at the very top of <code>loop()</code>, before the HSM tick, so a critical fault preempts normal event dispatch. Rules reference C guard functions you write.</p>
+  <pre><span class="yk">safety</span>:
+  <span class="yk">rules</span>:
+    <span class="yk">overtemp</span>:
+      <span class="yk">check</span>: <span class="ys">temperature_above_limit</span>
+      <span class="yk">description</span>: <span class="ys">Shut down if temperature exceeds 80°C</span>
+      <span class="yk">severity</span>: <span class="ys">critical</span>
+      <span class="yk">response</span>: [<span class="ys">turn_off_heater</span>, <span class="ys">sound_alarm</span>]
+      <span class="yk">to</span>: <span class="ys">fault</span>
+      <span class="yk">latching</span>: <span class="yn">true</span>
+      <span class="yk">reset_when</span>: <span class="ys">temperature_safe</span>
+      <span class="yk">restore</span>: [<span class="ys">silence_alarm</span>]</pre>
+
+  <dl>
+    <dt>rules.&lt;name&gt;.check</dt><dd>C guard function name — you implement <code>bool check_fn(const SystemContext* ctx)</code>. <span class="req">required</span>
+      <p>Returns <code>true</code> when the condition is unsafe.</p></dd>
+    <dt>rules.&lt;name&gt;.description</dt><dd>Comment reproduced in the generated code. <span class="opt">optional</span></dd>
+    <dt>rules.&lt;name&gt;.severity</dt><dd><code>critical</code> | <code>warning</code>. Documentation only. <span class="opt">optional</span></dd>
+    <dt>rules.&lt;name&gt;.response</dt><dd>Action names to invoke when the check fires. <span class="opt">optional</span></dd>
+    <dt>rules.&lt;name&gt;.to</dt><dd>Target state to transition to when the check fires. Requires a state machine. <span class="opt">optional</span></dd>
+    <dt>rules.&lt;name&gt;.latching</dt><dd><span class="type">bool</span> Once triggered, keeps acting on every loop even if check returns false. <span class="opt">optional</span></dd>
+    <dt>rules.&lt;name&gt;.reset_when</dt><dd>C guard function that clears a latching fault. <span class="opt">optional — latching only</span></dd>
+    <dt>rules.&lt;name&gt;.restore</dt><dd>Actions called when the latching fault clears. <span class="opt">optional — latching only</span></dd>
+  </dl>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="diagnostics">
+  <h2>diagnostics:</h2>
+  <p>Runtime health and observability configuration: hardware watchdog, heartbeat LED, and log verbosity.</p>
+  <pre><span class="yk">diagnostics</span>:
+  <span class="yk">watchdog</span>:
+    <span class="yk">timeout_s</span>: <span class="yn">5</span>             <span class="yc"># seconds before watchdog fires; default 5</span>
+  <span class="yk">heartbeat</span>:
+    <span class="yk">pin</span>: <span class="yn">2</span>                   <span class="yc"># GPIO pin to toggle; default 2 (built-in LED)</span>
+    <span class="yk">interval_ms</span>: <span class="yn">1000</span>        <span class="yc"># toggle interval; default 1000</span>
+  <span class="yk">log_level</span>: <span class="ys">info</span>            <span class="yc"># verbose | info | warning | error | none</span></pre>
+
+  <dl>
+    <dt>watchdog.timeout_s</dt><dd><span class="type">int</span> Watchdog timeout in seconds. <span class="opt">optional, default 5</span></dd>
+    <dt>heartbeat.pin</dt><dd><span class="type">int | string</span> GPIO pin or parameter name. <span class="opt">optional, default 2</span></dd>
+    <dt>heartbeat.interval_ms</dt><dd><span class="type">int | string</span> Toggle interval or parameter name. <span class="opt">optional, default 1000</span></dd>
+    <dt>log_level</dt><dd><span class="type">enum</span> Serial trace verbosity. <span class="opt">optional, default info</span>
+      <p>Values: <code>verbose</code>, <code>info</code>, <code>warning</code>, <code>error</code>, <code>none</code>.</p></dd>
+  </dl>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="libraries">
+  <h2>libraries:</h2>
+  <p>Declares third-party libraries the generated code depends on. Libraries implied by a built-in device type (Wire for I2C, SPI for SPI) do not need declaring — each backend knows its own platform's built-ins.</p>
+  <pre><span class="yk">libraries</span>:
+  - <span class="yk">name</span>: <span class="ys">PubSubClient</span>
+    <span class="yk">include</span>: <span class="ys">PubSubClient.h</span>
+    <span class="yk">version</span>: <span class="ys">"^2.8"</span>
+    <span class="yk">source</span>: <span class="ys">registry</span>
+    <span class="yk">description</span>: <span class="ys">MQTT client library</span></pre>
+
+  <dl>
+    <dt>name</dt><dd>Library name as listed in the Arduino Library Manager. <span class="req">required</span></dd>
+    <dt>include</dt><dd>Header file to include. <span class="opt">optional — defaults to <code>&lt;name&gt;.h</code></span></dd>
+    <dt>version</dt><dd>Version constraint for the build system. <span class="opt">optional</span></dd>
+    <dt>source</dt><dd><code>builtin</code> | <code>registry</code> | <code>git</code> | <code>local</code>. <span class="opt">optional</span></dd>
+    <dt>url</dt><dd>Repository or local path (for <code>git</code> and <code>local</code> sources). <span class="opt">optional</span></dd>
+    <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
+  </dl>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="imports">
+  <h2>imports:</h2>
+  <p>Include other YAML files into this model. List sections (<code>events</code>, <code>states</code>, <code>transitions</code>, <code>components</code>, <code>resources</code>, <code>parameters</code>, <code>libraries</code>) are merged in declaration order; the importing file always overrides imported content on conflicts.</p>
+  <pre><span class="yk">imports</span>:
+  - <span class="ys">shared/sensors.yaml</span>
+  - <span class="ys">shared/comm.yaml</span></pre>
+
+  <div class="callout warn">
+    <span class="callout-icon">⚠</span>
+    <span>Circular imports are detected and reported as a parse error. The maximum import depth is 32 levels.</span>
+  </div>
+
+  <p>Paths are resolved relative to the importing file's location. The <code>imports</code> list must be a top-level key.</p>
+</section>
+
+<hr>
+
+<footer>PulseIR Schema Reference &mdash; Schema v1 &mdash; <a href="index.html">Back to Editor</a></footer>
+
+</main>
+</div>
+
+<script>
+  /* Inherit theme from opener (same origin) if available */
+  try {
+    const opener = window.opener;
+    if (opener && opener.document) {
+      const theme = opener.document.documentElement.getAttribute('data-theme');
+      if (theme) document.documentElement.setAttribute('data-theme', theme);
+    }
+  } catch (_) {}
+
+  /* Sidebar active link on scroll */
+  const sections = document.querySelectorAll('section[id], h3[id]');
+  const links = document.querySelectorAll('nav a[href^="#"]');
+  const observer = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (e.isIntersecting) {
+        const id = e.target.id;
+        links.forEach(a => {
+          a.classList.toggle('active', a.getAttribute('href') === '#' + id);
+        });
+      }
+    }
+  }, { rootMargin: '-20% 0px -75% 0px' });
+  sections.forEach(s => observer.observe(s));
+</script>
+
+</body>
+</html>
