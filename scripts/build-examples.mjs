@@ -105,6 +105,10 @@ const SOURCES = [
     dir: 'examples/sensor_gateway',
     entry: 'pulse.yaml',
   },
+  {
+    label: 'RTC clock — DS3231 time on an I2C LCD, no C required',
+    file: 'examples/rtc_clock.yaml',
+  },
 ];
 
 const examples = {};
