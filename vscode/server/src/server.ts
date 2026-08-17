@@ -169,7 +169,11 @@ connection.onRequest('pulseir/diagram', async (params: DiagramParams): Promise<D
 
 function uriToFsPath(uri: string): string | null {
   if (!uri.startsWith('file://')) return null;
-  return decodeURIComponent(uri.replace(/^file:\/\//, ''));
+  // file:///c:/path (Windows) → strip 3 slashes → /c:/path → strip leading slash → c:/path
+  // file:///path    (Unix)    → strip 3 slashes → /path   (correct)
+  // file://host/path          → strip 2 slashes → /path   (UNC — strip the host part)
+  const decoded = decodeURIComponent(uri.replace(/^file:\/\/\//, '/').replace(/^file:\/\/[^/]*/, ''));
+  return decoded.replace(/^\/([a-zA-Z]:[\\/])/, '$1');
 }
 
 function resolveBackend(target: string): PlatformBackend {
