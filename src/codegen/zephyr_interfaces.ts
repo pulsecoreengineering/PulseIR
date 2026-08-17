@@ -115,10 +115,25 @@ export class ZephyrInterfaceBackend {
       }
 
       case 'adc': {
-        out.todos.push(
-          `${resource.name}: ADC — add CONFIG_ADC=y; use DEVICE_DT_GET(DT_NODELABEL(adc0)) ` +
-          'with struct adc_channel_cfg and adc_read()'
+        // Phase 3: adc_dt_spec via DT alias declared in app.overlay.
+        // The overlay must define io-channels + io-channel-names under the
+        // zephyr,user node matching the lowercase symbol name.
+        const adcSpec = `${symbol}_ADC`;
+        const rawName = `${symbol}_raw`;
+        const seqName = `${symbol}_seq`;
+        const dtName  = symbol.toLowerCase();
+        out.globals.push(
+          `static const struct adc_dt_spec ${adcSpec} = ADC_DT_SPEC_GET_BY_NAME(DT_PATH(zephyr_user), ${dtName});`,
+          `static int16_t ${rawName} = 0;`,
+          `static struct adc_sequence ${seqName} = { .buffer = &${rawName}, .buffer_size = sizeof(${rawName}) };`,
         );
+        out.init.push(
+          `adc_channel_setup_dt(&${adcSpec});`,
+          `adc_sequence_init_dt(&${adcSpec}, &${seqName});`,
+        );
+        // ADC pin bindings are channel numbers, not GPIO pins — prevent the
+        // post-switch block from adding a spurious gpio_dt_spec.
+        gpioSpecEmitted = true;
         break;
       }
 

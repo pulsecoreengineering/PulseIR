@@ -49,6 +49,7 @@ export class ZephyrBackend implements PlatformBackend {
       '#include <zephyr/drivers/gpio.h>',
       '#include <zephyr/drivers/pwm.h>',
       '#include <zephyr/drivers/uart.h>',
+      '#include <zephyr/drivers/adc.h>',
       '#include <zephyr/net/net_if.h>',
       '#include <zephyr/net/wifi_mgmt.h>',
       '#include <zephyr/net/mqtt.h>',
@@ -133,10 +134,13 @@ export class ZephyrBackend implements PlatformBackend {
   }
 
   analogReadExpr(pin: string): string {
-    // ADC in Zephyr uses adc_read() with a sequence descriptor; a direct
-    // analogRead equivalent does not exist. Phase 3 will generate the full
-    // adc_sequence flow. For now, emit a zero with a TODO comment.
-    return `/* TODO: adc_read() sequence needed for pin ${pin} */ 0`;
+    // Phase 3: adc_dt_spec + adc_sequence declared by ZephyrInterfaceBackend.
+    // pin = SYMBOL_PIN (from Codegen); strip the _PIN suffix to recover the
+    // base symbol used for SYMBOL_ADC, SYMBOL_seq, and SYMBOL_raw.
+    const sym = pin.endsWith('_PIN') ? pin.slice(0, -4) : pin;
+    // Comma operator: adc_read_dt() fills the raw buffer as a side effect;
+    // the expression then evaluates to the float-cast raw count.
+    return `(adc_read_dt(&${sym}_ADC, &${sym}_seq), (float)${sym}_raw)`;
   }
 
   analogWriteExpr(pin: string, duty: string): string {
@@ -259,5 +263,45 @@ export class ZephyrBackend implements PlatformBackend {
       '  return 0;',
       '}',
     ].join('\n');
+  }
+
+  // ── Phase 3: native timer tasks ───────────────────────────────────────────
+
+  timerTask(base: string, intervalExpr: string, actionCalls: string): {
+    decls: string;
+    setup: string;
+  } | undefined {
+    // Parameter-based intervals (systemParameters.xyz) can change at runtime.
+    // k_timer is started with a fixed value in setup() and does not update when
+    // the parameter changes, so fall back to the polling pattern for these.
+    if (intervalExpr.includes('systemParameters.')) return undefined;
+
+    // k_work handler runs on the system workqueue (cooperative context).
+    // syncContext() is called first so actions see a consistent machine state.
+    const handler = `work_${base}_handler`;
+    const workVar  = `work_${base}`;
+    const timerVar = `timer_${base}`;
+    const expiryFn = `timer_${base}_expiry`;
+
+    const decls = [
+      `static void ${handler}(struct k_work *w) {`,
+      `  (void)w;`,
+      `  syncContext();`,
+      actionCalls,
+      `}`,
+      `K_WORK_DEFINE(${workVar}, ${handler});`,
+      ``,
+      `static void ${expiryFn}(struct k_timer *t) {`,
+      `  (void)t;`,
+      `  k_work_submit(&${workVar});`,
+      `}`,
+      `K_TIMER_DEFINE(${timerVar}, ${expiryFn}, NULL);`,
+    ].join('\n');
+
+    // k_timer_start(timer, initial_delay, period).  Use the interval as both
+    // the initial delay and the period for consistent first-fire timing.
+    const setup = `k_timer_start(&${timerVar}, K_MSEC(${intervalExpr}), K_MSEC(${intervalExpr}));`;
+
+    return { decls, setup };
   }
 }

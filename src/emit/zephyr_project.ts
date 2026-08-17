@@ -153,6 +153,8 @@ export class ZephyrProjectEmitter {
 
   private generateOverlay(resources: Resource[], components: Component[]): string | undefined {
     const entries: string[] = [];
+    // ADC channels collected for io-channels + io-channel-names (must be emitted together).
+    const adcChannels: Array<{ name: string; channel: number }> = [];
 
     for (const r of resources) {
       if (String(r.interface) !== 'gpio') continue;
@@ -165,6 +167,20 @@ export class ZephyrProjectEmitter {
     }
 
     for (const c of components) {
+      const ctype = String(c.type ?? '');
+
+      // ADC components (analog_input): emit io-channels, not gpios.
+      if (ctype === 'analog_input') {
+        const chanStr = c.config?.channel ?? c.config?.pin;
+        if (chanStr !== undefined) {
+          const chanNum = Number(String(chanStr).replace(/^ADC/i, '').replace(/^GPIO/i, ''));
+          if (!isNaN(chanNum)) {
+            adcChannels.push({ name: c.name.toLowerCase(), channel: chanNum });
+          }
+        }
+        continue;
+      }
+
       const pinStr = c.config?.pin;
       if (pinStr === undefined) continue;
       const pinNum = Number(String(pinStr).replace(/^GPIO/i, ''));
@@ -175,12 +191,22 @@ export class ZephyrProjectEmitter {
       entries.push(`        ${baseProp}-gpios = <&gpio0 ${pinNum} GPIO_ACTIVE_HIGH>;`);
 
       // PWM spec entry — pwm_output devices additionally need a pwms property.
-      if (String(c.type ?? '') === 'pwm_output') {
+      if (ctype === 'pwm_output') {
         const freq      = Number(c.config?.frequency ?? 5000);
         const channel   = Number(c.config?.channel ?? 0);
         const periodNs  = Math.round(1_000_000_000 / freq);
         entries.push(`        ${baseProp}-pwms = <&pwm0 ${channel} ${periodNs} PWM_POLARITY_NORMAL>;`);
       }
+    }
+
+    // Emit io-channels / io-channel-names as a pair for all ADC components.
+    if (adcChannels.length > 0) {
+      const ioChannels = adcChannels.map(({ channel }) => `<&adc0 ${channel}>`).join(', ');
+      const ioNames    = adcChannels.map(({ name })    => `"${name}"`).join(', ');
+      entries.push(
+        `        io-channels = ${ioChannels};`,
+        `        io-channel-names = ${ioNames};`,
+      );
     }
 
     if (entries.length === 0) return undefined;
