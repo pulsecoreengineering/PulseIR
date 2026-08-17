@@ -14,6 +14,7 @@ import { EspIdfBackend } from '../src/codegen/espidf.js';
 import { MicroPythonCodegen } from '../src/codegen/micropython.js';
 import { ZephyrBackend } from '../src/codegen/zephyr.js';
 import { ZephyrProjectEmitter } from '../src/emit/zephyr_project.js';
+import { CmakeEmitter } from '../src/emit/cmake.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1993,6 +1994,90 @@ test('ZephyrProjectEmitter: prj.conf adds CONFIG_HTTP_CLIENT=y when http_post is
 test('ZephyrProjectEmitter: prj.conf does NOT add CONFIG_HTTP_CLIENT when no HTTP actions', () => {
   const files = new ZephyrProjectEmitter().generate(parse(WIFI_YAML));
   hasNot(files.prjConf, 'CONFIG_HTTP_CLIENT=y');
+});
+
+// ---------------------------------------------------------------------------
+// CmakeEmitter — ESP-IDF CMakeLists.txt generation
+// ---------------------------------------------------------------------------
+
+console.log('\n⚡ Testing CmakeEmitter...\n');
+
+test('CmakeEmitter: top-level cmake_minimum_required and project() use safe project name', () => {
+  const project = parse(BLINK_YAML);
+  const files = new CmakeEmitter().generate(project);
+  has(files.topLevel, 'cmake_minimum_required(VERSION 3.16)');
+  has(files.topLevel, 'project(blink)');
+});
+
+test('CmakeEmitter: top-level includes IDF_PATH project.cmake', () => {
+  const project = parse(BLINK_YAML);
+  const files = new CmakeEmitter().generate(project);
+  has(files.topLevel, 'include($ENV{IDF_PATH}/tools/cmake/project.cmake)');
+});
+
+test('CmakeEmitter: top-level declares minimum IDF version (default 5.0)', () => {
+  const project = parse(BLINK_YAML);
+  const files = new CmakeEmitter().generate(project);
+  has(files.topLevel, 'idf_build_set_property(MINIMUM_IDF_VERSION 5.0)');
+});
+
+test('CmakeEmitter: top-level respects custom idfVersion argument', () => {
+  const project = parse(BLINK_YAML);
+  const files = new CmakeEmitter().generate(project, '4.4');
+  has(files.topLevel, 'idf_build_set_property(MINIMUM_IDF_VERSION 4.4)');
+  hasNot(files.topLevel, '5.0');
+});
+
+test('CmakeEmitter: project name with special chars is sanitized to underscores', () => {
+  const yaml = BLINK_YAML.replace('name: blink', 'name: my-cool project!');
+  const project = parse(yaml);
+  const files = new CmakeEmitter().generate(project);
+  has(files.topLevel, 'project(my_cool_project_)');
+});
+
+test('CmakeEmitter: main component registers main.cpp when no extra sources', () => {
+  const project = parse(BLINK_YAML);
+  const files = new CmakeEmitter().generate(project);
+  has(files.mainComponent, 'idf_component_register(');
+  has(files.mainComponent, 'SRCS "main.cpp"');
+});
+
+test('CmakeEmitter: main component REQUIRES includes driver and esp_timer', () => {
+  const project = parse(BLINK_YAML);
+  const files = new CmakeEmitter().generate(project);
+  has(files.mainComponent, 'REQUIRES driver esp_timer');
+});
+
+test('CmakeEmitter: main component does NOT require PulseHSM when no state machine', () => {
+  const project = parse(BLINK_YAML);
+  const files = new CmakeEmitter().generate(project);
+  hasNot(files.mainComponent, 'PulseHSM');
+});
+
+test('CmakeEmitter: main component REQUIRES PulseHSM when state machine is declared', () => {
+  const project = parse(SIGNAL_YAML);
+  const files = new CmakeEmitter().generate(project);
+  has(files.mainComponent, 'REQUIRES driver esp_timer PulseHSM');
+});
+
+test('CmakeEmitter: extra sources appear in SRCS list', () => {
+  const project = parse(BLINK_YAML);
+  const files = new CmakeEmitter().generate(project, '5.0', ['actions.cpp']);
+  has(files.mainComponent, '"main.cpp"');
+  has(files.mainComponent, '"actions.cpp"');
+});
+
+test('CmakeEmitter: multiple extra sources are each quoted', () => {
+  const project = parse(BLINK_YAML);
+  const files = new CmakeEmitter().generate(project, '5.0', ['actions.cpp', 'guards.cpp']);
+  has(files.mainComponent, '"actions.cpp"');
+  has(files.mainComponent, '"guards.cpp"');
+});
+
+test('CmakeEmitter: main component sets INCLUDE_DIRS to "."', () => {
+  const project = parse(BLINK_YAML);
+  const files = new CmakeEmitter().generate(project);
+  has(files.mainComponent, 'INCLUDE_DIRS "."');
 });
 
 // ---------------------------------------------------------------------------
