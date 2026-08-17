@@ -766,6 +766,92 @@ test('bme280: pressure action calls readPressure and converts to hPa', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Multi-channel sensor devices
+// ---------------------------------------------------------------------------
+
+const DHT22_CHANNELS_YAML = `
+pulseir: "1"
+project:
+  name: dht22_channels_test
+  version: "1.0"
+
+hardware:
+  devices:
+    weather:
+      type: dht22
+      pin: GPIO4
+      channels:
+        - temperature
+        - humidity
+
+actions:
+  read_weather: { driver: dht22, params: { device: weather } }
+
+tasks:
+  poll: { every: 2000, do: read_weather }
+`;
+
+const BME280_CHANNELS_YAML = `
+pulseir: "1"
+project:
+  name: bme280_channels_test
+  version: "1.0"
+
+hardware:
+  buses:
+    sensor_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+  devices:
+    env:
+      type: bme280
+      bus: sensor_bus
+      address: 0x76
+      channels:
+        temperature:
+        humidity:
+        pressure:
+
+actions:
+  read_env: { driver: bme280, params: { device: env } }
+
+tasks:
+  poll: { every: 5000, do: read_env }
+`;
+
+test('dht22 channels: generates one DHT object (not two)', () => {
+  const code = new Codegen().generate(parse(DHT22_CHANNELS_YAML));
+  const matches = [...code.matchAll(/DHT weather\(/g)];
+  assert(matches.length === 1, `expected exactly one DHT weather object, got ${matches.length}`);
+});
+
+test('dht22 channels: sensor struct has temperature and humidity fields, not device name', () => {
+  const code = new Codegen().generate(parse(DHT22_CHANNELS_YAML));
+  has(code, 'float temperature;');
+  has(code, 'float humidity;');
+  hasNot(code, 'float weather;');
+});
+
+test('dht22 channels: action reads both channels in one call', () => {
+  const code = new Codegen().generate(parse(DHT22_CHANNELS_YAML));
+  has(code, 'systemSensors.temperature = weather.readTemperature();');
+  has(code, 'systemSensors.humidity = weather.readHumidity();');
+});
+
+test('bme280 channels: sensor struct has three fields, not device name', () => {
+  const code = new Codegen().generate(parse(BME280_CHANNELS_YAML));
+  has(code, 'float temperature;');
+  has(code, 'float humidity;');
+  has(code, 'float pressure;');
+  hasNot(code, 'float env;');
+});
+
+test('bme280 channels: action reads all three channels', () => {
+  const code = new Codegen().generate(parse(BME280_CHANNELS_YAML));
+  has(code, 'systemSensors.temperature = env.readTemperature();');
+  has(code, 'systemSensors.humidity = env.readHumidity();');
+  has(code, 'systemSensors.pressure = env.readPressure() / 100.0F;');
+});
+
+// ---------------------------------------------------------------------------
 // Gap 2: Interrupt / ISR wiring
 // ---------------------------------------------------------------------------
 

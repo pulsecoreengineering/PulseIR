@@ -232,6 +232,32 @@ export interface Transition {
 // COMPONENTS - Sensors, actuators, services
 // ============================================================================
 
+/**
+ * One named reading provided by a multi-value sensor.
+ *
+ * When a device declares channels, each channel becomes its own
+ * `systemSensors.<name>` field. The device still maps to a single C++ object;
+ * channels control which readings are extracted from it per read action.
+ *
+ * Examples:
+ *   DHT22  → temperature, humidity
+ *   BME280 → temperature, humidity, pressure
+ *   Modbus → voltage, current, power_factor (driver-defined register config)
+ */
+export interface SensorChannel {
+  /** Name that becomes `systemSensors.<name>`. Must be a valid C identifier. */
+  name: string;
+  /**
+   * Driver-specific reading hint.
+   * For standard sensors: 'temperature' | 'humidity' | 'pressure'.
+   * Defaults to the channel name when omitted.
+   */
+  measure?: string;
+  description?: string;
+  /** Driver-specific extras, e.g. { register: 0x04, scale: 0.01 } for Modbus. */
+  config?: Record<string, unknown>;
+}
+
 export interface Component {
   name: string;
   class: ComponentClass;
@@ -245,6 +271,17 @@ export interface Component {
   /** Name of the bus this device sits on, for shared buses like I2C. */
   bus?: string;
   config?: Record<string, unknown>;
+  /**
+   * Named readings this device provides, for multi-value sensors.
+   *
+   * When present, the device itself does not add a `systemSensors` field —
+   * each channel does. One C++ sensor object is generated per device; the
+   * read action fills every channel's field in one pass.
+   *
+   * Log templates, MQTT topics, and telemetry channels must reference the
+   * channel names (not the device name) when channels are declared.
+   */
+  channels?: SensorChannel[];
   description?: string;
   metadata?: Metadata;
 }

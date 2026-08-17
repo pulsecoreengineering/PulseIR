@@ -1094,13 +1094,21 @@ SystemSensors systemSensors = {};`;
       c => String(c.class) === 'sensor'
     );
 
-    const fields = sensors.length > 0
-      ? sensors
-          .map(c => {
-            const unitNote = c.config?.unit ? `, unit: ${c.config.unit}` : '';
-            return `  float ${this.sanitize(c.name)};  // driver: ${c.driver}${unitNote}`;
-          })
-          .join('\n')
+    const fieldLines: string[] = [];
+    for (const c of sensors) {
+      if (c.channels?.length) {
+        // Multi-channel device: one field per channel, labeled with the device driver.
+        for (const ch of c.channels) {
+          fieldLines.push(`  float ${this.sanitize(ch.name)};  // ${c.driver}.${ch.measure ?? ch.name}`);
+        }
+      } else {
+        const unitNote = c.config?.unit ? `, unit: ${c.config.unit}` : '';
+        fieldLines.push(`  float ${this.sanitize(c.name)};  // driver: ${c.driver}${unitNote}`);
+      }
+    }
+
+    const fields = fieldLines.length > 0
+      ? fieldLines.join('\n')
       : '  // TODO: Add your sensor readings here (e.g. float temperature;)';
 
     return `// ============================================================================
@@ -2125,7 +2133,19 @@ static void pollCommands() {
         const deviceName = String(params.device ?? '');
         const component  = (this.project.system.components || []).find(c => c.name === deviceName);
         if (component && this.isSensorComponent(deviceName)) {
-          const objVar  = this.sanitize(deviceName);
+          const objVar = this.sanitize(deviceName);
+          if (component.channels?.length) {
+            // Multi-channel: read both temperature and humidity in one action call.
+            const lines = component.channels.map(ch => {
+              const field   = `systemSensors.${this.sanitize(ch.name)}`;
+              const measure = ch.measure ?? ch.name;
+              const readCall = measure === 'humidity'
+                ? `${objVar}.readHumidity()`
+                : `${objVar}.readTemperature()`;
+              return `  ${field} = ${readCall};\n  if (isnan(${field})) { /* read failed */ }`;
+            });
+            return lines.join('\n') + '\n  (void)ctx;';
+          }
           const field   = `systemSensors.${objVar}`;
           const measure = String(component.config?.measure ?? 'temperature');
           const readCall = measure === 'humidity'
@@ -2140,7 +2160,22 @@ static void pollCommands() {
         const deviceName = String(params.device ?? '');
         const component  = (this.project.system.components || []).find(c => c.name === deviceName);
         if (component && this.isSensorComponent(deviceName)) {
-          const objVar  = this.sanitize(deviceName);
+          const objVar = this.sanitize(deviceName);
+          if (component.channels?.length) {
+            // Multi-channel: read every declared channel in one action.
+            const lines = component.channels.map(ch => {
+              const field = `systemSensors.${this.sanitize(ch.name)}`;
+              const measure = ch.measure ?? ch.name;
+              let readCall: string;
+              switch (measure) {
+                case 'humidity': readCall = `${objVar}.readHumidity()`; break;
+                case 'pressure': readCall = `${objVar}.readPressure() / 100.0F`; break;
+                default:         readCall = `${objVar}.readTemperature()`; break;
+              }
+              return `  ${field} = ${readCall};`;
+            });
+            return lines.join('\n') + '\n  (void)ctx;';
+          }
           const field   = `systemSensors.${objVar}`;
           const measure = String(component.config?.measure ?? 'temperature');
           let readCall: string;
@@ -2506,9 +2541,17 @@ ${reads.join('\n')}
           return { event, seg: this.topicSegment(item.topic ?? item.event!) };
         });
     } else {
-      sensorWires = allComponents
-        .filter(c => String(c.class) === 'sensor')
-        .map(c => ({ name: c.name, seg: this.topicSegment(c.name) }));
+      sensorWires = [];
+      for (const c of allComponents.filter(c => String(c.class) === 'sensor')) {
+        if (c.channels?.length) {
+          // Multi-channel device: publish each channel under its own topic.
+          for (const ch of c.channels) {
+            sensorWires.push({ name: ch.name, seg: this.topicSegment(ch.name) });
+          }
+        } else {
+          sensorWires.push({ name: c.name, seg: this.topicSegment(c.name) });
+        }
+      }
       paramWires = allParameters.map(p => ({ parameter: p, seg: this.topicSegment(p.name) }));
       eventWires = allEvents
         .filter(e => String(e.source) === 'mqtt')
