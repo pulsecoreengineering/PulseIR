@@ -75,6 +75,7 @@ export class MicroPythonCodegen {
     this.init(project);
     return {
       needsRuntime: false,
+      libDeps: [],
       generated: [{ path: 'main.py', contents: this.buildMain() }],
       scaffolds: [],
     };

@@ -209,6 +209,14 @@ export interface GeneratedProject {
    * dependency exists when it does not.
    */
   needsRuntime: boolean;
+  /**
+   * Ready-to-paste lib_deps entries for platformio.ini.
+   *
+   * Combines user-declared libraries (preserving version/git-URL) with any
+   * libraries implied by interface drivers (e.g. DallasTemperature pulled in by
+   * a ds18b20 sensor). Builtins are excluded — they ship with the core.
+   */
+  libDeps: string[];
   /** Rewritten on every run. Never edit these. */
   generated: GeneratedFile[];
   /** Written only if absent, so your implementations survive regeneration. */
@@ -334,10 +342,25 @@ export class Codegen {
     const guardName = 'src/guards.cpp';
     const actionName = 'src/actions.cpp';
 
+    // Build lib_deps: user-declared libraries keep their version/git-URL; any
+    // additional libraries implied by interface drivers are appended by name.
+    const userLibs = project.system.libraries ?? [];
+    const userLibNames = new Set(userLibs.map(l => l.name));
+    const userLibDeps = userLibs.map(lib => {
+      if (lib.source === 'git' && lib.url) return lib.url;
+      if (lib.version) return `${lib.name}@${lib.version}`;
+      return lib.name;
+    });
+    const impliedLibDeps = Array.from(this.libraries.values())
+      .filter(l => l.source === 'registry' && !userLibNames.has(l.name))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map(l => l.name);
+
     return {
       // Only a project with a state machine needs the runtime, the header that
       // sizes it, or a place to put guards - guards live on transitions.
       needsRuntime: this.hasMachine,
+      libDeps: [...userLibDeps, ...impliedLibDeps],
       generated: [
         ...(this.hasMachine
           ? [{ path: 'PulseHSM_config.h', contents: this.generateConfigHeader() }]

@@ -1451,9 +1451,10 @@ function exportProject(): void {
  * Board names used in PulseIR models map to PlatformIO board IDs. Unknown
  * boards fall back to the raw string so the user can correct it themselves.
  * Libraries with a version use the `name@version` form; git-sourced libs use
- * their URL directly.
+ * their URL directly. Interface-implied libraries (e.g. DallasTemperature for
+ * a ds18b20 sensor) are appended after the user-declared ones.
  */
-function generatePlatformioIni(project: PulseProject): string {
+function generatePlatformioIni(project: PulseProject, generatedProject: GeneratedProject): string {
   const board = project.target?.board ?? '';
 
   // PulseIR board name → [platformio platform, platformio board id]
@@ -1472,13 +1473,7 @@ function generatePlatformioIni(project: PulseProject): string {
 
   const [platform, boardId] = BOARD_MAP[board] ?? ['# unknown platform', board || '# set board in target:'];
 
-  const libs = project.system.libraries ?? [];
-  const libDeps = libs.map(lib => {
-    if (lib.source === 'git' && lib.url) return lib.url;
-    if (lib.version) return `${lib.name}@${lib.version}`;
-    return lib.name;
-  });
-
+  const { libDeps } = generatedProject;
   const libSection = libDeps.length > 0
     ? `lib_deps =\n${libDeps.map(l => `    ${l}`).join('\n')}`
     : '# lib_deps =';
@@ -1523,7 +1518,7 @@ function downloadProjectZip(): void {
   }
 
   // 3. Generated files are always derived fresh from the model — highest priority.
-  entries[`${folder}/platformio.ini`] = generatePlatformioIni(project);
+  entries[`${folder}/platformio.ini`] = generatePlatformioIni(project, generatedProject);
   for (const file of generatedProject.generated) {
     // PulseHSM_config.h goes in include/ so PlatformIO adds it to the global
     // include path — library code in lib/ can then find it via __has_include.
@@ -2310,7 +2305,7 @@ function init(): void {
   $<HTMLButtonElement>('download-platformio').addEventListener('click', () => {
     closeDownloadMenu();
     if (!current) return;
-    download('platformio.ini', generatePlatformioIni(current.project), 'text/plain');
+    download('platformio.ini', generatePlatformioIni(current.project, current.generatedProject), 'text/plain');
   });
 
   // Tab and Enter — keep the editor from escaping focus and add auto-indent.
