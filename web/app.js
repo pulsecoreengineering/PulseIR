@@ -8231,6 +8231,369 @@ ${implementations.join("\n\n")}`;
     }
   };
 
+  // dist/src/codegen/espidf_interfaces.js
+  var IDF = (include, reason) => ({ name: include.replace(/[/.].*$/, ""), include, source: "builtin", reason });
+  var EspIdfInterfaceBackend = class {
+    constructor() {
+      this.defines = new InterfaceBackend();
+    }
+    emit(resource, symbol) {
+      const { defines, todos: defineTodos } = this.defines.emit(resource, symbol);
+      const out = {
+        defines,
+        globals: [],
+        init: [],
+        libraries: [],
+        todos: [...defineTodos]
+      };
+      const binding = resource.binding || {};
+      const kind = String(resource.interface);
+      const has = (key) => binding[key] !== void 0;
+      const ref = (key) => `${symbol}_${key.toUpperCase()}`;
+      switch (kind) {
+        case "gpio": {
+          if (!has("pin")) {
+            out.todos.push(`${resource.name}: add a "pin" binding for gpio_config()`);
+            break;
+          }
+          const rawMode = String(binding.mode || "output").toUpperCase();
+          const gpioMode = rawMode === "INPUT" ? "GPIO_MODE_INPUT" : rawMode === "INPUT_PULLUP" ? "GPIO_MODE_INPUT" : rawMode === "INPUT_PULLDOWN" ? "GPIO_MODE_INPUT" : "GPIO_MODE_OUTPUT";
+          const pullUp = rawMode === "INPUT_PULLUP" ? "GPIO_PULLUP_ENABLE" : "GPIO_PULLUP_DISABLE";
+          const pullDown = rawMode === "INPUT_PULLDOWN" ? "GPIO_PULLDOWN_ENABLE" : "GPIO_PULLDOWN_DISABLE";
+          out.init.push("{", `  gpio_config_t _cfg = {};`, `  _cfg.pin_bit_mask = (1ULL << ${ref("pin")});`, `  _cfg.mode         = ${gpioMode};`, `  _cfg.pull_up_en   = ${pullUp};`, `  _cfg.pull_down_en = ${pullDown};`, `  _cfg.intr_type    = GPIO_INTR_DISABLE;`, `  gpio_config(&_cfg);`, "}");
+          break;
+        }
+        case "uart": {
+          out.libraries.push(IDF("driver/uart.h", "UART"));
+          const port = binding.port === void 0 ? 0 : Number(binding.port);
+          const uartNum = `UART_NUM_${port}`;
+          const baud = has("baud") ? ref("baud") : "115200";
+          out.init.push("{", `  const uart_config_t _cfg = {`, `    .baud_rate  = (int)(${baud}),`, `    .data_bits  = UART_DATA_8_BITS,`, `    .parity     = UART_PARITY_DISABLE,`, `    .stop_bits  = UART_STOP_BITS_1,`, `    .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,`, `    .source_clk = UART_SCLK_DEFAULT,`, `  };`, `  uart_param_config(${uartNum}, &_cfg);`, has("rx") && has("tx") ? `  uart_set_pin(${uartNum}, ${ref("tx")}, ${ref("rx")}, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);` : `  // uart_set_pin(${uartNum}, TX_PIN, RX_PIN, ...); \u2014 add tx/rx bindings to set custom pins`, `  uart_driver_install(${uartNum}, 256, 0, 0, NULL, 0);`, "}");
+          break;
+        }
+        case "rs485": {
+          out.libraries.push(IDF("driver/uart.h", "RS-485 via UART"));
+          const port = binding.port === void 0 ? 1 : Number(binding.port);
+          const uartNum = `UART_NUM_${port}`;
+          const baud = has("baud") ? ref("baud") : "9600";
+          out.init.push("{", `  const uart_config_t _cfg = {`, `    .baud_rate  = (int)(${baud}),`, `    .data_bits  = UART_DATA_8_BITS,`, `    .parity     = UART_PARITY_DISABLE,`, `    .stop_bits  = UART_STOP_BITS_1,`, `    .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,`, `    .source_clk = UART_SCLK_DEFAULT,`, `  };`, `  uart_param_config(${uartNum}, &_cfg);`, has("rx") && has("tx") ? `  uart_set_pin(${uartNum}, ${ref("tx")}, ${ref("rx")}, ` + (has("de") ? `${ref("de")}, ` : "UART_PIN_NO_CHANGE, ") + `UART_PIN_NO_CHANGE);` : `  // uart_set_pin(${uartNum}, TX_PIN, RX_PIN, ...); \u2014 add tx/rx bindings`, `  uart_set_mode(${uartNum}, UART_MODE_RS485_HALF_DUPLEX);`, `  uart_driver_install(${uartNum}, 256, 0, 0, NULL, 0);`, "}");
+          if (!has("de")) {
+            out.todos.push(`${resource.name}: add a "de" binding for the RS-485 direction pin`);
+          }
+          break;
+        }
+        case "i2c": {
+          out.libraries.push(IDF("driver/i2c.h", "I2C"));
+          const sda = has("sda") ? `(gpio_num_t)(${ref("sda")})` : "(gpio_num_t)21";
+          const scl = has("scl") ? `(gpio_num_t)(${ref("scl")})` : "(gpio_num_t)22";
+          const freq = has("frequency") ? ref("frequency") : "400000";
+          out.init.push("{", `  const i2c_config_t _cfg = {`, `    .mode             = I2C_MODE_MASTER,`, `    .sda_io_num       = ${sda},`, `    .scl_io_num       = ${scl},`, `    .sda_pullup_en    = GPIO_PULLUP_ENABLE,`, `    .scl_pullup_en    = GPIO_PULLUP_ENABLE,`, `    .master.clk_speed = (uint32_t)(${freq}),`, `  };`, `  i2c_param_config(I2C_NUM_0, &_cfg);`, `  i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0);`, "}");
+          break;
+        }
+        case "spi": {
+          out.libraries.push(IDF("driver/spi_master.h", "SPI"));
+          const mosi = has("mosi") ? `(gpio_num_t)(${ref("mosi")})` : "(gpio_num_t)23";
+          const miso = has("miso") ? `(gpio_num_t)(${ref("miso")})` : "(gpio_num_t)19";
+          const sck = has("sck") ? `(gpio_num_t)(${ref("sck")})` : "(gpio_num_t)18";
+          out.init.push("{", `  const spi_bus_config_t _cfg = {`, `    .mosi_io_num     = ${mosi},`, `    .miso_io_num     = ${miso},`, `    .sclk_io_num     = ${sck},`, `    .quadwp_io_num   = -1,`, `    .quadhd_io_num   = -1,`, `    .max_transfer_sz = 4096,`, `  };`, `  spi_bus_initialize(SPI2_HOST, &_cfg, SPI_DMA_CH_AUTO);`, "}");
+          if (has("cs")) {
+            out.init.push(`gpio_set_direction((gpio_num_t)(${ref("cs")}), GPIO_MODE_OUTPUT);`, `gpio_set_level((gpio_num_t)(${ref("cs")}), 1);  // CS deasserted (active-low)`);
+          }
+          break;
+        }
+        case "pwm": {
+          out.libraries.push(IDF("driver/ledc.h", "LEDC PWM"));
+          if (!has("pin") || !has("channel")) {
+            out.todos.push(`${resource.name}: add "pin" and "channel" bindings for ledc_channel_config()`);
+            break;
+          }
+          const freq = has("frequency") ? ref("frequency") : "5000";
+          const resolution = has("resolution") ? `(ledc_timer_bit_t)(${ref("resolution")})` : "LEDC_TIMER_8_BIT";
+          out.init.push("{", `  const ledc_timer_config_t _timer = {`, `    .speed_mode      = LEDC_HIGH_SPEED_MODE,`, `    .duty_resolution = ${resolution},`, `    .timer_num       = LEDC_TIMER_0,`, `    .freq_hz         = (uint32_t)(${freq}),`, `    .clk_cfg         = LEDC_AUTO_CLK,`, `  };`, `  ledc_timer_config(&_timer);`, `  const ledc_channel_config_t _ch = {`, `    .gpio_num   = (gpio_num_t)(${ref("pin")}),`, `    .speed_mode = LEDC_HIGH_SPEED_MODE,`, `    .channel    = (ledc_channel_t)(${ref("channel")}),`, `    .timer_sel  = LEDC_TIMER_0,`, `    .duty       = 0,`, `    .hpoint     = 0,`, `    .flags      = { .output_invert = 0 },`, `  };`, `  ledc_channel_config(&_ch);`, "}");
+          break;
+        }
+        case "adc": {
+          out.libraries.push(IDF("driver/adc.h", "ADC (legacy driver; IDF \u22655.0: esp_adc/adc_oneshot.h)"));
+          if (has("pin")) {
+            out.init.push(
+              `adc1_config_width(ADC_WIDTH_BIT_12);`,
+              // adc1_channel_t != gpio pin; users must map pin to channel enum
+              `adc1_config_channel_atten((adc1_channel_t)(${ref("pin")}), ${has("attenuation") ? ref("attenuation") : "ADC_ATTEN_DB_12"});`
+            );
+            out.todos.push(`${resource.name}: replace (adc1_channel_t)(${ref("pin")}) with the correct ADC1_CHANNEL_N enum \u2014 GPIO numbers and channel numbers are not the same on ESP32.`);
+          }
+          break;
+        }
+        case "wifi": {
+          out.libraries.push(IDF("esp_wifi.h", "Wi-Fi"));
+          out.libraries.push(IDF("nvs_flash.h", "NVS (required by Wi-Fi stack)"));
+          out.todos.push(`${resource.name}: call nvs_flash_init(), esp_netif_init(), esp_event_loop_create_default(), esp_wifi_init(), esp_wifi_set_config() and esp_wifi_start() in order`);
+          break;
+        }
+        case "mqtt": {
+          out.libraries.push(IDF("mqtt_client.h", "ESP-IDF MQTT client"));
+          out.todos.push(`${resource.name}: create esp_mqtt_client_config_t (set .broker.address.uri), call esp_mqtt_client_init() and esp_mqtt_client_start()`);
+          break;
+        }
+        case "eeprom":
+          out.libraries.push(IDF("nvs.h", "NVS (persistent key-value store, replaces EEPROM on ESP32)"));
+          out.todos.push(`${resource.name}: use nvs_open() / nvs_set_* / nvs_commit() / nvs_close() \u2014 ESP-IDF has no EEPROM peripheral; NVS is the idiomatic replacement`);
+          break;
+        case "littlefs": {
+          out.libraries.push(IDF("esp_littlefs.h", "LittleFS on ESP-IDF"));
+          const formatOnFail = binding.format_on_fail === true;
+          out.init.push("{", `  const esp_vfs_littlefs_conf_t _cfg = {`, `    .base_path              = "/littlefs",`, `    .partition_label        = "littlefs",`, `    .format_if_mount_failed = ${formatOnFail},`, `  };`, `  esp_vfs_littlefs_register(&_cfg);`, "}");
+          out.todos.push(`${resource.name}: add a "littlefs" partition (64KB minimum) to your partition table`);
+          break;
+        }
+        case "can": {
+          out.libraries.push(IDF("driver/twai.h", "TWAI/CAN"));
+          out.todos.push(`${resource.name}: configure twai_general_config_t, twai_timing_config_t and twai_filter_config_t, then call twai_driver_install() and twai_start()`);
+          break;
+        }
+        case "onewire":
+          out.todos.push(`${resource.name}: 1-Wire is not a native ESP-IDF peripheral \u2014 use the esp-idf-owb or similar component from the ESP-IDF Component Registry`);
+          break;
+        case "ble":
+          out.libraries.push(IDF("esp_bt.h", "Bluetooth"));
+          out.libraries.push(IDF("esp_gap_ble_api.h", "BLE GAP"));
+          out.todos.push(`${resource.name}: initialise BT controller, bluedroid stack, then set up GATT/GAP`);
+          break;
+        case "ethernet": {
+          out.libraries.push(IDF("esp_eth.h", "Ethernet"));
+          out.todos.push(`${resource.name}: configure esp_eth_mac_new_esp32() (or SPI MAC) and esp_eth_phy_new_*(), then call esp_eth_driver_install() and esp_eth_start()`);
+          break;
+        }
+        default:
+          out.todos.push(`${resource.name}: custom interface \u2014 add your ESP-IDF driver initialisation`);
+          break;
+      }
+      out.init = out.init.filter(Boolean);
+      return out;
+    }
+    declared(libraries) {
+      return new InterfaceBackend().declared(libraries);
+    }
+  };
+
+  // dist/src/codegen/espidf.js
+  var EspIdfBackend = class {
+    constructor() {
+      this.name = "espidf";
+      this.fileExtension = ".cpp";
+      this.interfaces = new EspIdfInterfaceBackend();
+    }
+    platformIncludes(hasMachine, sizing) {
+      const sizingBlock = hasMachine ? [
+        "// Sized from the model, and repeated in PulseHSM_config.h so that PulseHSM.cpp",
+        "// - a separate translation unit that never sees this file - is compiled",
+        "// against the same table sizes. Defining them only here would leave the",
+        "// runtime on its defaults, and states past the eighth would be silently",
+        "// dropped. Generate with --outdir to get that file written for you.",
+        `#define PULSEHSM_MAX_STATES  ${sizing.maxStates}   // ${sizing.stateCount} states + headroom`,
+        `#define PULSEHSM_MAX_EVENTS  ${sizing.maxEvents}   // ring buffer, must be a power of two`,
+        `#define PULSEHSM_MAX_DEPTH   ${sizing.levels}   // deepest nesting, including the leaf`,
+        ""
+      ] : [];
+      const idfHeaders = [
+        '#include "freertos/FreeRTOS.h"',
+        '#include "freertos/task.h"',
+        '#include "esp_timer.h"',
+        '#include "driver/gpio.h"',
+        '#include "driver/uart.h"',
+        '#include "driver/adc.h"    // legacy ADC driver; IDF \u22655.0: esp_adc/adc_oneshot.h',
+        '#include "driver/ledc.h"',
+        '#include "esp_log.h"',
+        hasMachine ? '#include "PulseHSM.h"' : ""
+      ].filter(Boolean);
+      const consoleHelpers = [
+        "",
+        "// Console helpers \u2014 route PulseIR print calls through printf.",
+        "// Overloads cover const char* (log text) and float (sensor readings).",
+        'static inline void pulseIrPrint(const char *s)  { printf("%s",  s); }',
+        'static inline void pulseIrPrint(float f)        { printf("%g",  f); }',
+        'static inline void pulseIrPrintln(const char *s){ printf("%s\\n", s); }',
+        'static inline void pulseIrPrintln(float f)      { printf("%g\\n", f); }',
+        'static inline void pulseIrPrintlnEmpty()        { printf("\\n"); }',
+        "",
+        "// UART helpers for the command dispatcher (commands: in the model).",
+        "static inline int pulseIrUartAvailable(uart_port_t port) {",
+        "  size_t len = 0;",
+        "  uart_get_buffered_data_len(port, &len);",
+        "  return (int)len;",
+        "}",
+        "static inline int pulseIrUartRead(uart_port_t port) {",
+        "  uint8_t b;",
+        "  return uart_read_bytes(port, &b, 1, 0) == 1 ? (int)b : -1;",
+        "}"
+      ];
+      return [...sizingBlock, ...idfHeaders, ...consoleHelpers].join("\n");
+    }
+    nowExpr() {
+      return "(esp_timer_get_time() / 1000LL)";
+    }
+    timestampType() {
+      return "int64_t";
+    }
+    durationLiteral(ms) {
+      return `INT64_C(${ms})`;
+    }
+    gpioPinVar(sym) {
+      return `${sym}_PIN`;
+    }
+    consoleStreamName(port) {
+      return port === 0 ? "UART_NUM_0" : `UART_NUM_${port}`;
+    }
+    // The stream parameter is ignored — ESP-IDF routes all console output
+    // through printf (via pulseIrPrint* helpers); there is no stream object.
+    printExpr(_stream, value) {
+      return `pulseIrPrint(${value})`;
+    }
+    printlnExpr(_stream, value) {
+      return `pulseIrPrintln(${value})`;
+    }
+    printlnNoArgExpr(_stream) {
+      return "pulseIrPrintlnEmpty()";
+    }
+    streamAvailableExpr(stream) {
+      return `pulseIrUartAvailable(${stream})`;
+    }
+    streamReadExpr(stream) {
+      return `pulseIrUartRead(${stream})`;
+    }
+    digitalWriteExpr(pin, value) {
+      return `gpio_set_level((gpio_num_t)(${pin}), (uint32_t)(${value}))`;
+    }
+    digitalReadExpr(pin) {
+      return `gpio_get_level((gpio_num_t)(${pin}))`;
+    }
+    analogReadExpr(pin) {
+      return `adc1_get_raw((adc1_channel_t)(${pin}))`;
+    }
+    analogWriteExpr(pin, duty) {
+      return `ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, (ledc_channel_t)(${pin}), (uint32_t)(${duty}), 0)`;
+    }
+    ledcWriteLines(pin, channel, duty, _board) {
+      return [
+        `  ledc_set_duty(LEDC_HIGH_SPEED_MODE, (ledc_channel_t)(${channel}), (uint32_t)(${duty}));`,
+        `  ledc_update_duty(LEDC_HIGH_SPEED_MODE, (ledc_channel_t)(${channel}));`
+      ].join("\n");
+    }
+    pwmWriteLines(sym, _freqMacro, _resMacro, dutyExpr, board) {
+      return this.ledcWriteLines(`${sym}_PIN`, `${sym}_CHANNEL`, dutyExpr, board);
+    }
+    httpGetLines(url, _board) {
+      return [
+        "  // Requires: esp_http_client (CONFIG_ESP_HTTP_CLIENT_ENABLE=y in sdkconfig)",
+        "  {",
+        "    esp_http_client_config_t _cfg = {};",
+        `    _cfg.url = ${url};`,
+        "    esp_http_client_handle_t _client = esp_http_client_init(&_cfg);",
+        "    esp_http_client_perform(_client);",
+        "    esp_http_client_cleanup(_client);",
+        "  }",
+        "  (void)ctx;"
+      ].join("\n");
+    }
+    httpPostLines(url, body, contentType, _board) {
+      return [
+        "  // Requires: esp_http_client (CONFIG_ESP_HTTP_CLIENT_ENABLE=y in sdkconfig)",
+        "  {",
+        "    esp_http_client_config_t _cfg = {};",
+        `    _cfg.url    = ${url};`,
+        "    _cfg.method = HTTP_METHOD_POST;",
+        "    esp_http_client_handle_t _client = esp_http_client_init(&_cfg);",
+        `    esp_http_client_set_header(_client, "Content-Type", ${contentType});`,
+        `    esp_http_client_set_post_field(_client, ${body}, (int)strlen(${body}));`,
+        "    esp_http_client_perform(_client);",
+        "    esp_http_client_cleanup(_client);",
+        "  }",
+        "  (void)ctx;"
+      ].join("\n");
+    }
+    emitInterface(resource, symbol) {
+      return this.interfaces.emit(resource, symbol);
+    }
+    declaredLibraries(libraries) {
+      return this.interfaces.declared(libraries);
+    }
+    interfacesNote() {
+      return "// Resource macros and driver init calls for the hardware declared in the model.";
+    }
+    entryPointDeclarations() {
+      return [
+        "// ESP-IDF entry point (called by the FreeRTOS scheduler at boot).",
+        'extern "C" void app_main(void);',
+        "void setupInterfaces();"
+      ].join("\n");
+    }
+    renderSetup(body) {
+      return `static void _setup() {
+${body}}`;
+    }
+    renderLoop(body) {
+      const indented = body.split("\n").map((line) => line === "" ? "" : `  ${line}`).join("\n");
+      return [
+        'extern "C" void app_main(void) {',
+        "  _setup();",
+        "  for (;;) {",
+        indented,
+        "    vTaskDelay(pdMS_TO_TICKS(1));",
+        "  }",
+        "}"
+      ].join("\n");
+    }
+  };
+
+  // dist/src/emit/cmake.js
+  var CmakeEmitter = class {
+    /**
+     * Generate the CMake project files for the given project.
+     *
+     * `idfVersion` is the minimum IDF version to declare in CMakeLists.txt.
+     * Defaults to "5.0" which covers the current stable release line.
+     */
+    /**
+     * @param extraSrcs  Additional source filenames (basenames only, e.g. `"actions.cpp"`)
+     *                   to add alongside `main.cpp` in the `idf_component_register` SRCS list.
+     */
+    generate(project, idfVersion = "5.0", extraSrcs = []) {
+      const name = project.name;
+      const hasMachine = project.system.states.length > 0;
+      const topLevel = this.topLevelCmake(name, idfVersion);
+      const mainComponent = this.mainComponentCmake(name, hasMachine, extraSrcs);
+      return { topLevel, mainComponent };
+    }
+    topLevelCmake(projectName2, idfVersion) {
+      const safeName = projectName2.replace(/[^A-Za-z0-9_]/g, "_");
+      return [
+        `cmake_minimum_required(VERSION 3.16)`,
+        ``,
+        `# ESP-IDF project setup \u2014 must come before project().`,
+        `include($ENV{IDF_PATH}/tools/cmake/project.cmake)`,
+        ``,
+        `project(${safeName})`,
+        ``,
+        `# Declare the IDF version this project was generated against.`,
+        `idf_build_set_property(MINIMUM_IDF_VERSION ${idfVersion})`,
+        ``
+      ].join("\n");
+    }
+    mainComponentCmake(_projectName, hasMachine, extraSrcs = []) {
+      const allSrcs = ['"main.cpp"', ...extraSrcs.map((s) => `"${s}"`)];
+      const srcsLine = allSrcs.length === 1 ? `    SRCS ${allSrcs[0]}` : `    SRCS ${allSrcs.join("\n           ")}`;
+      const requires = hasMachine ? `    REQUIRES driver esp_timer PulseHSM` : `    REQUIRES driver esp_timer`;
+      return [
+        `idf_component_register(`,
+        srcsLine,
+        `    INCLUDE_DIRS "."`,
+        requires,
+        `)`,
+        ``
+      ].join("\n");
+    }
+  };
+
   // dist/src/analysis/states.js
   function childrenOf(state) {
     return (state.regions || []).flatMap((region) => region.states);
@@ -9566,7 +9929,33 @@ ${implementations.join("\n\n")}`;
   var PULSEHSM_H = `#ifndef PULSE_HSM_H
 #define PULSE_HSM_H
 
-#include <Arduino.h>
+// Platform abstraction \u2014 provide millis() from whatever timer the target has.
+//
+// Detection priority:
+//   1. ARDUINO macro (set by -DARDUINO=version in the Arduino IDE build): use
+//      the Arduino core's native millis().
+//   2. esp_timer.h in the include path (ESP-IDF SDK present): provide a shim.
+//   3. Arduino.h in the include path (host/test-harness environment with an
+//      Arduino shim): include it and get millis() from there.
+//   4. POSIX fallback for any other bare-C++ environment.
+#ifdef ARDUINO
+#  include <Arduino.h>
+#elif defined(__has_include) && __has_include("esp_timer.h")
+#  include "esp_timer.h"
+static inline unsigned long millis() {
+  return (unsigned long)(esp_timer_get_time() / 1000ULL);
+}
+#elif defined(__has_include) && __has_include(<Arduino.h>)
+#  include <Arduino.h>
+#else
+#  include <time.h>
+static inline unsigned long millis() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (unsigned long)((unsigned long)ts.tv_sec * 1000UL +
+                         (unsigned long)ts.tv_nsec / 1000000UL);
+}
+#endif
 
 // Compile-time configuration.
 //
@@ -10074,6 +10463,7 @@ int PulseHSM::_findLCA(int a, int b) const {
   var namespaceInput = $("namespace");
   var namespaceLabel = $("namespace-label");
   var boardSelect = $("board");
+  var frameworkSelect = $("framework");
   var staleNote = $("stale-note");
   var downloadButton = $("download-button");
   var downloadMenu = $("download-menu");
@@ -10090,6 +10480,7 @@ int PulseHSM::_findLCA(int a, int b) const {
   var store = new ProjectStore(localStorage);
   var workspace = { id: "", name: "", files: {}, entry: "", active: "", updatedAt: 0 };
   var currentMode = "model";
+  var currentFramework = "arduino";
   var current = null;
   function fileNames() {
     if (currentMode === "code") {
@@ -10580,8 +10971,9 @@ target:
     let topics;
     let libraries;
     try {
-      sketch = new Codegen().generate(project);
-      generatedProject = new Codegen().generateFiles(project);
+      const backend = currentFramework === "espidf" ? new EspIdfBackend() : new ArduinoBackend();
+      sketch = new Codegen(backend).generate(project);
+      generatedProject = new Codegen(backend).generateFiles(project);
       topics = new TopicEmitter().toJSON(project, namespaceInput.value.trim() || void 0);
       libraries = new LibraryEmitter().toJSON(project);
     } catch (error) {
@@ -11013,7 +11405,51 @@ framework = arduino
 ${libSection}
 `;
   }
+  var PULSEHSM_COMPONENT_CMAKE = `idf_component_register(
+    SRCS "PulseHSM.cpp"
+    INCLUDE_DIRS "."
+)
+`;
+  function downloadProjectZipEspIdf() {
+    if (!current)
+      return;
+    const { project, generatedProject } = current;
+    const folder = safeFolderName(project.name);
+    const entries = {};
+    const scaffoldBasenames = generatedProject.scaffolds.map((f) => f.path.split("/").pop()).filter((n) => /\.(cpp|c)$/i.test(n));
+    const cmake = new CmakeEmitter();
+    const cmakeFiles = cmake.generate(project, "5.0", scaffoldBasenames);
+    entries[`${folder}/CMakeLists.txt`] = cmakeFiles.topLevel;
+    entries[`${folder}/main/CMakeLists.txt`] = cmakeFiles.mainComponent;
+    for (const file of generatedProject.scaffolds) {
+      const basename = file.path.split("/").pop();
+      if (basename)
+        entries[`${folder}/main/${basename}`] = file.contents;
+    }
+    for (const [name, contents] of Object.entries(workspace.files)) {
+      if (/\.(cpp|h|c)$/i.test(name)) {
+        entries[`${folder}/main/${name}`] = contents;
+      }
+    }
+    for (const file of generatedProject.generated) {
+      if (file.path.endsWith(".cpp") || file.path.endsWith(".ino")) {
+        entries[`${folder}/main/main.cpp`] = file.contents;
+      } else {
+        entries[`${folder}/main/${file.path}`] = file.contents;
+      }
+    }
+    if (generatedProject.needsRuntime) {
+      entries[`${folder}/components/PulseHSM/CMakeLists.txt`] = PULSEHSM_COMPONENT_CMAKE;
+      entries[`${folder}/components/PulseHSM/PulseHSM.h`] = PULSEHSM_H;
+      entries[`${folder}/components/PulseHSM/PulseHSM.cpp`] = PULSEHSM_CPP;
+    }
+    download(`${folder}.zip`, zip(entries), "application/zip");
+  }
   function downloadProjectZip() {
+    if (currentFramework === "espidf") {
+      downloadProjectZipEspIdf();
+      return;
+    }
     if (!current)
       return;
     const { project, generatedProject } = current;
@@ -11699,7 +12135,11 @@ machine:
       closeDownloadMenu();
       if (!current)
         return;
-      download(`${current.project.name}.ino`, current.sketch, "text/plain");
+      if (currentFramework === "espidf") {
+        download("main.cpp", current.sketch, "text/plain");
+      } else {
+        download(`${current.project.name}.ino`, current.sketch, "text/plain");
+      }
     });
     $("download-project").addEventListener("click", () => {
       closeDownloadMenu();
@@ -11722,6 +12162,40 @@ machine:
       if (!current)
         return;
       download("platformio.ini", generatePlatformioIni(current.project, current.generatedProject), "text/plain");
+    });
+    $("download-cmake").addEventListener("click", () => {
+      closeDownloadMenu();
+      if (!current)
+        return;
+      const cmake = new CmakeEmitter();
+      const files = cmake.generate(current.project);
+      download("CMakeLists.txt", files.topLevel, "text/plain");
+    });
+    function applyFrameworkToMenu() {
+      const isEspIdf = currentFramework === "espidf";
+      const sketchBtn = $("download-sketch");
+      sketchBtn.innerHTML = isEspIdf ? 'ESP-IDF sketch  <span class="sub">.cpp</span>' : 'Arduino sketch  <span class="sub">.ino</span>';
+      $("download-platformio").hidden = isEspIdf;
+      $("download-cmake").hidden = !isEspIdf;
+    }
+    function applyFrameworkToBoard() {
+      const isEspIdf = currentFramework === "espidf";
+      const ESP32_VALUES = /* @__PURE__ */ new Set(["esp32", "esp32s3", "esp32s2", "esp32c3", "esp32h2"]);
+      for (const optgroup of boardSelect.querySelectorAll("optgroup")) {
+        const groupIsCompatible = [...optgroup.querySelectorAll("option")].some((o) => ESP32_VALUES.has(o.value));
+        optgroup.disabled = isEspIdf && !groupIsCompatible;
+      }
+      if (isEspIdf && boardSelect.value && !ESP32_VALUES.has(boardSelect.value)) {
+        boardSelect.value = "esp32";
+        applyBoardToYaml("esp32");
+      }
+      boardSelect.classList.toggle("unset", boardSelect.value === "");
+    }
+    frameworkSelect.addEventListener("change", () => {
+      currentFramework = frameworkSelect.value;
+      applyFrameworkToBoard();
+      applyFrameworkToMenu();
+      render();
     });
     source.addEventListener("keydown", (event) => {
       const { selectionStart, selectionEnd, value } = source;
