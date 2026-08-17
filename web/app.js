@@ -10733,8 +10733,9 @@ ${libSection}
     const { project, generatedProject } = current;
     const folder = safeFolderName(project.name);
     const entries = {};
+    entries[`${folder}/platformio.ini`] = generatePlatformioIni(project);
     for (const file of generatedProject.generated) {
-      entries[`${folder}/${file.path}`] = file.contents;
+      entries[`${folder}/src/${file.path}`] = file.contents;
     }
     for (const file of generatedProject.scaffolds) {
       entries[`${folder}/${file.path}`] = file.contents;
