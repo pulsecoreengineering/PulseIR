@@ -25,6 +25,7 @@ import { Parser } from '../src/parser/index.js';
 import { FileResolver } from '../src/parser/fs-resolver.js';
 import { Codegen } from '../src/codegen/index.js';
 import { ZephyrBackend } from '../src/codegen/zephyr.js';
+import { ZephyrProjectEmitter } from '../src/emit/zephyr_project.js';
 
 const __dirname      = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot       = path.resolve(__dirname, '../..');
@@ -157,8 +158,11 @@ test('blink: tasks-only model compiles without errors or warnings', () => {
   compile('blink', code);
   // Sanity: no PulseHSM linked means these must be absent from the source.
   assert(!code.includes('#include "PulseHSM.h"'), 'blink should not include PulseHSM');
-  assert(code.includes('k_uptime_get()'),        'blink must use k_uptime_get() for timing');
-  assert(code.includes('int main(void)'),         'blink must have int main(void)');
+  // Phase 3: tasks now use k_timer/k_work; k_uptime_get() is no longer needed
+  // for task scheduling (but may still appear in guard/action bodies).
+  assert(code.includes('K_TIMER_DEFINE') || code.includes('runTask_'),
+    'blink must emit either k_timer (Phase 3) or runTask polling');
+  assert(code.includes('int main(void)'), 'blink must have int main(void)');
 });
 
 test('serial_console: UART console model compiles without errors', () => {
@@ -417,6 +421,123 @@ actions:
     'http_post must set HTTP_POST method');
   assert(code.includes('_http_req.content_type_value = "application/json"'),
     'http_post must set content_type_value');
+});
+
+// ── Phase 3: ADC via adc_dt_spec ─────────────────────────────────────────────
+
+test('analog_input: adc_dt_spec global and adc_read_dt() compile without errors', () => {
+  const code = generateInline(`
+pulseir: "1"
+project:
+  name: adc_sensor
+  version: "1.0"
+hardware:
+  devices:
+    soil: { type: analog_input, channel: 0, class: sensor, unit: raw }
+tasks:
+  read_soil: { every: 500, do: report }
+actions:
+  report: { driver: logger }
+`);
+  compile('adc_sensor', code);
+  assert(code.includes('adc_dt_spec SOIL_ADC'),
+    'analog_input must declare struct adc_dt_spec');
+  assert(code.includes('ADC_DT_SPEC_GET_BY_NAME(DT_PATH(zephyr_user), soil)'),
+    'adc_dt_spec must use ADC_DT_SPEC_GET_BY_NAME with zephyr_user node');
+  assert(code.includes('int16_t SOIL_raw'),
+    'analog_input must declare int16_t raw buffer');
+  assert(code.includes('adc_sequence SOIL_seq'),
+    'analog_input must declare adc_sequence descriptor');
+  assert(code.includes('adc_channel_setup_dt(&SOIL_ADC)'),
+    'setup must call adc_channel_setup_dt');
+  assert(code.includes('adc_sequence_init_dt(&SOIL_ADC, &SOIL_seq)'),
+    'setup must call adc_sequence_init_dt');
+  assert(code.includes('#include <zephyr/drivers/adc.h>'),
+    'must include adc driver header');
+});
+
+test('analog_input: analogReadExpr uses adc_read_dt comma-operator expression', () => {
+  const code = generateInline(`
+pulseir: "1"
+project:
+  name: adc_read
+  version: "1.0"
+hardware:
+  devices:
+    moisture: { type: analog_input, channel: 1, class: sensor, unit: raw }
+tasks:
+  poll: { every: 200, do: noop }
+actions:
+  noop: { driver: logger }
+`);
+  compile('adc_read', code);
+  assert(code.includes('adc_read_dt(&MOISTURE_ADC, &MOISTURE_seq)'),
+    'analogReadExpr must call adc_read_dt with the correct dt_spec and sequence');
+  assert(code.includes('(float)MOISTURE_raw'),
+    'analogReadExpr must cast the raw int16 to float');
+});
+
+test('adc overlay: analog_input emits io-channels + io-channel-names in app.overlay', () => {
+  const files = new ZephyrProjectEmitter().generate(new Parser().parse(`
+pulseir: "1"
+project:
+  name: adc_overlay
+  version: "1.0"
+hardware:
+  devices:
+    vbat: { type: analog_input, channel: 2, class: sensor }
+tasks:
+  sample: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`));
+  assert(files.overlay !== undefined, 'overlay must be generated for analog_input devices');
+  assert(files.overlay!.includes('io-channels = <&adc0 2>'),
+    'overlay must declare io-channels with the correct channel number');
+  assert(files.overlay!.includes('io-channel-names = "vbat"'),
+    'overlay must declare io-channel-names matching the component name');
+});
+
+// ── Phase 3: native k_timer tasks ────────────────────────────────────────────
+
+test('tasks: Zephyr native k_timer/k_work pattern compiles without errors', () => {
+  const code = generateInline(`
+pulseir: "1"
+project:
+  name: timer_tasks
+  version: "1.0"
+tasks:
+  heartbeat: { every: 1000, do: noop }
+  watchdog:  { every: 5000, do: noop }
+actions:
+  noop: { driver: logger }
+`);
+  compile('timer_tasks', code);
+  assert(code.includes('K_WORK_DEFINE(work_heartbeat,'),
+    'tasks must emit K_WORK_DEFINE for each task');
+  assert(code.includes('K_TIMER_DEFINE(timer_heartbeat,'),
+    'tasks must emit K_TIMER_DEFINE for each task');
+  assert(code.includes('k_timer_start(&timer_heartbeat,'),
+    'setup must call k_timer_start for each task');
+  assert(code.includes('k_timer_start(&timer_watchdog,'),
+    'setup must call k_timer_start for the second task');
+  assert(!code.includes('runTask_heartbeat()'),
+    'k_timer tasks must not emit runTask_BASE() polling calls');
+  assert(!code.includes('runTask_watchdog()'),
+    'k_timer tasks must not emit runTask_BASE() polling calls');
+  assert(code.includes('k_work_submit(&work_heartbeat)'),
+    'timer expiry must submit work to the system workqueue');
+});
+
+test('blink: parameter-interval tasks fall back to polling (k_uptime_get)', () => {
+  const code = generateFrom(path.join(repoRoot, 'examples/blink.yaml'));
+  compile('blink_poll', code);
+  // The blink example uses `every: blink_ms` (parameter-based), so k_timer
+  // is not used (it can't track runtime parameter changes).
+  assert(code.includes('runTask_') && code.includes('k_uptime_get()'),
+    'parameter-interval task must use polling runTask_ + k_uptime_get()');
+  assert(!code.includes('K_TIMER_DEFINE'),
+    'parameter-interval task must not use K_TIMER_DEFINE');
 });
 
 // ---------------------------------------------------------------------------

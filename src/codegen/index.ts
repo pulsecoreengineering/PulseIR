@@ -255,6 +255,15 @@ export class Codegen {
   /** Every library needed, deduplicated by name. */
   private libraries: Map<string, ImpliedLibrary> = new Map();
 
+  /**
+   * Task bases that use a native timer (e.g. k_timer on Zephyr) instead of
+   * the polling runTask_BASE() pattern.  Populated during generateTasks() and
+   * consumed by generateLoopFunction() and generateSetupFunction().
+   */
+  private nativeTimerBases = new Set<string>();
+  /** Setup lines (one per native-timer task) injected into _setup(). */
+  private nativeTimerSetupLines: string[] = [];
+
   constructor(backend: PlatformBackend = new ArduinoBackend()) {
     this.backend = backend;
   }
@@ -1693,10 +1702,15 @@ ${this.hasConsole && this.isVerbose ? `
 
     const diagSetup = this.project.system.diagnostics ? '\n  setupDiagnostics();\n' : '';
 
+    const timerStarts = this.nativeTimerSetupLines.length > 0
+      ? '\n  // Start platform-native task timers.\n' +
+        this.nativeTimerSetupLines.map(l => `  ${l}`).join('\n') + '\n'
+      : '';
+
     const setupBody = `  // Buses and peripherals declared as resources. Nothing else is opened: a
   // peripheral the model did not declare has no business appearing here.
   setupInterfaces();
-${diagSetup}${loadCall}
+${timerStarts}${diagSetup}${loadCall}
   // Wire up the context handed to every action
   systemContext.parameters = &systemParameters;
   systemContext.sensors = &systemSensors;
@@ -1770,6 +1784,11 @@ ${this.backend.renderSetup(setupBody)}`;
     const tsType = this.backend.timestampType();
     const now = this.backend.nowExpr();
 
+    // Reset native-timer tracking so regeneration from a fresh Codegen instance
+    // doesn't accumulate stale entries across multiple generate() calls.
+    this.nativeTimerBases.clear();
+    this.nativeTimerSetupLines = [];
+
     const blocks = tasks.map(task => {
       const base = this.sanitize(task.name);
       const interval = typeof task.every === 'string'
@@ -1782,6 +1801,14 @@ ${this.backend.renderSetup(setupBody)}`;
         // the reading it just took, not the one before it.
         ...(task.log ? [this.logLines(task.log, '  ')] : []),
       ].join('\n');
+
+      // Delegate to the backend's native timer mechanism when available.
+      const nativeTimer = this.backend.timerTask?.(base, interval, calls);
+      if (nativeTimer !== undefined) {
+        this.nativeTimerBases.add(base);
+        this.nativeTimerSetupLines.push(nativeTimer.setup);
+        return `// Task "${task.name}" - ${source} (k_timer/k_work workqueue).${task.description ? `\n// ${task.description}` : ''}\n${nativeTimer.decls}`;
+      }
 
       return `// Task "${task.name}" - ${source}.${task.description ? `\n// ${task.description}` : ''}
 static ${tsType} dueAt_${base} = 0;
@@ -1805,13 +1832,25 @@ ${calls}
 }`;
     });
 
-    return `// ============================================================================
+    const hasPolling = tasks.some(t => !this.nativeTimerBases.has(this.sanitize(t.name)));
+    const hasNative  = this.nativeTimerBases.size > 0;
+
+    const header = hasNative && !hasPolling
+      ? `// ============================================================================
+// TASKS
+// ============================================================================
+//
+// Each task runs on the Zephyr system workqueue, fired by a k_timer.  The
+// timer's start() call is in _setup(); no polling is needed in main().`
+      : `// ============================================================================
 // TASKS
 // ============================================================================
 //
 // Each runs on its own interval, checked every pass of loop(). An interval
 // naming a parameter is read every time, so retuning it takes effect at once.
-// Subtraction on unsigned long is correct across the millis() rollover.
+// Subtraction on unsigned long is correct across the millis() rollover.`;
+
+    return `${header}
 
 ${blocks.join('\n\n')}`;
   }
@@ -3083,7 +3122,11 @@ ${blocks.join('\n\n')}`;
     if (this.project.system.commands) body.push('  pollCommands();');
 
     for (const task of this.project.system.tasks || []) {
-      body.push(`  runTask_${this.sanitize(task.name)}();`);
+      const base = this.sanitize(task.name);
+      // Native-timer tasks (k_timer on Zephyr) fire autonomously; no poll call.
+      if (!this.nativeTimerBases.has(base)) {
+        body.push(`  runTask_${base}();`);
+      }
     }
 
     if (this.hasMachine) {

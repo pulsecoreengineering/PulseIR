@@ -174,4 +174,25 @@ export interface PlatformBackend {
    * Arduino: `void loop() {\nbody\n}`.
    */
   renderLoop(body: string): string;
+
+  /**
+   * Optional. Emit a periodic task as a native timer/workqueue block instead
+   * of the default polling `runTask_BASE()` function.
+   *
+   * @param base         - Sanitized lowercase task name (e.g. `sensor_poll`)
+   * @param intervalExpr - C expression for the interval in ms (e.g. `INT64_C(1000)`)
+   * @param actionCalls  - Action-call statements already indented with two spaces
+   *
+   * When defined and non-null, `generateTasks()` uses this instead of the
+   * polling pattern; `generateLoopFunction()` omits `runTask_BASE()` calls for
+   * this task; and `generateSetupFunction()` injects the returned `setup` line.
+   *
+   * Return `undefined` to fall back to the default polling pattern for this task.
+   */
+  timerTask?(base: string, intervalExpr: string, actionCalls: string): {
+    /** Static function + timer/work definitions — emitted in the TASKS section. */
+    decls: string;
+    /** `k_timer_start(...)` or equivalent — injected into the setup function. */
+    setup: string;
+  } | undefined;
 }
