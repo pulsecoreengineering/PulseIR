@@ -1,0 +1,113 @@
+{
+  "name": "pulseir",
+  "displayName": "PulseIR",
+  "description": "YAML-to-C++ language support for PulseIR embedded state machines — diagnostics, syntax highlighting, and code generation",
+  "version": "0.1.0",
+  "publisher": "pulsecoreengineering",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pulsecoreengineering/PulseIR"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "pulseir",
+    "embedded",
+    "arduino",
+    "esp32",
+    "state machine",
+    "yaml"
+  ],
+  "icon": "images/icon.png",
+  "activationEvents": [],
+  "main": "./client/out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "pulseir",
+        "aliases": ["PulseIR", "pulseir"],
+        "filenamePatterns": ["*.pulse.yaml", "*.pulse.yml"],
+        "firstLine": "^pulseir:\\s*\"",
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pulseir",
+        "scopeName": "source.pulseir",
+        "path": "./syntaxes/pulseir.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "pulseir.generate",
+        "title": "PulseIR: Generate Code",
+        "icon": "$(play)"
+      },
+      {
+        "command": "pulseir.showDiagram",
+        "title": "PulseIR: Show State Diagram",
+        "icon": "$(type-hierarchy)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "when": "resourceLangId == pulseir",
+          "command": "pulseir.generate",
+          "group": "navigation"
+        },
+        {
+          "when": "resourceLangId == pulseir",
+          "command": "pulseir.showDiagram",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "PulseIR",
+      "properties": {
+        "pulseir.target": {
+          "type": "string",
+          "default": "arduino",
+          "enum": ["arduino", "espidf", "zephyr", "micropython"],
+          "description": "Default code generation target"
+        },
+        "pulseir.generateOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically generate code when a PulseIR file is saved"
+        },
+        "pulseir.outputDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Output directory for generated files (default: same directory as the model file)"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "esbuild": "^0.20.0",
+    "@vscode/vsce": "^2.24.0",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.11"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "package": "npm run build && vsce package",
+    "typecheck": "tsc --noEmit -p client/tsconfig.json && tsc --noEmit -p server/tsconfig.json"
+  }
+}
