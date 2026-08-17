@@ -101,6 +101,10 @@ const settingsButton = $<HTMLButtonElement>('settings-button');
 const settingsModal = $<HTMLDivElement>('settings-modal');
 const keywordChips = $<HTMLDivElement>('keyword-chips');
 const keywordInput = $<HTMLInputElement>('keyword-input');
+const modeModelBtn = $<HTMLButtonElement>('mode-model');
+const modeCodeBtn = $<HTMLButtonElement>('mode-code');
+const setEntryButton = $<HTMLButtonElement>('set-entry');
+const genStubsButton = $<HTMLButtonElement>('gen-stubs');
 
 // ---------------------------------------------------------------------------
 // Model state
@@ -117,22 +121,45 @@ const store = new ProjectStore(localStorage);
  */
 let workspace: Project = { id: '', name: '', files: {}, entry: '', active: '', updatedAt: 0 };
 
+/**
+ * Which set of files the editor is showing.
+ *
+ * 'model' — the YAML files the parser consumes.
+ * 'code'  — the user's hand-written C++ files (.cpp / .h / .c).
+ *
+ * The two families live together in workspace.files, distinguished purely by
+ * extension. The parser never sees the C++ files; the code editor never touches
+ * the YAML ones. Switching mode just changes which tabs are visible and which
+ * highlighter is used.
+ */
+let currentMode: 'model' | 'code' = 'model';
+
 /** Last successful render, so downloads never hand over a broken file. */
 let current: { project: PulseProject; sketch: string; topics: string; libraries: string; generatedProject: GeneratedProject } | null = null;
 
 function fileNames(): string[] {
-  // Entry first, then the rest alphabetically - a stable order that puts the
-  // file you start reading from where you expect it.
-  const rest = Object.keys(workspace.files).filter(n => n !== workspace.entry).sort();
+  if (currentMode === 'code') {
+    return Object.keys(workspace.files).filter(n => /\.(cpp|h|c)$/i.test(n)).sort();
+  }
+  // Model mode: YAML files only, entry first.
+  const rest = Object.keys(workspace.files)
+    .filter(n => n !== workspace.entry && /\.(ya?ml)$/i.test(n))
+    .sort();
   return workspace.entry ? [workspace.entry, ...rest] : rest;
 }
 
 /** Open a project, replacing whatever is on screen. */
 function openProject(project: Project): void {
   workspace = project;
+  currentMode = 'model';
   store.setCurrent(project.id);
-  source.value = workspace.files[workspace.active] ?? '';
   projectName.textContent = project.name;
+  modeModelBtn.classList.add('active');
+  modeCodeBtn.classList.remove('active');
+  setEntryButton.hidden = false;
+  snippetButton.hidden = false;
+  genStubsButton.hidden = true;
+  source.value = workspace.files[workspace.active] ?? '';
   renderFileBar();
   paint();
   clearOutput();
@@ -223,7 +250,10 @@ function paint(): void {
 
   // A trailing newline needs a line to sit on, or the last line of a
   // scrolled-to-the-bottom document has nothing beneath the caret.
-  highlightCode.innerHTML = `${highlight(text, activeKeywords)}\n`;
+  const isCpp = /\.(cpp|h|c)$/i.test(workspace.active);
+  highlightCode.innerHTML = isCpp
+    ? `${highlightCpp(text)}\n`
+    : `${highlight(text, activeKeywords)}\n`;
   syncScroll();
 }
 
@@ -422,18 +452,21 @@ function setStatus(kind: 'ok' | 'warn' | 'error' | 'info', title: string, detail
 function renderFileBar(): void {
   const names = fileNames();
 
-  fileBar.innerHTML = names.map(name => {
-    const isEntry = name === workspace.entry;
-    const isActive = name === workspace.active;
-    // The entry file is where parsing starts, so it is worth marking: an
-    // include in any other file is only reachable through it.
-    const badge = isEntry ? '<span class="entry-badge" title="entry file">▶</span>' : '';
-    const close = !isEntry
-      ? `<span class="close" data-close="${escapeHtml(name)}" title="Delete ${escapeHtml(name)}">×</span>`
-      : '';
-    return `<button class="filetab${isActive ? ' active' : ''}" data-file="${escapeHtml(name)}"
-      title="${escapeHtml(name)} (double-click to rename)">${badge}${escapeHtml(name)}${close}</button>`;
-  }).join('');
+  if (names.length === 0 && currentMode === 'code') {
+    fileBar.innerHTML = '<span class="filebar-hint">No C++ files yet — click + File to add one</span>';
+  } else {
+    fileBar.innerHTML = names.map(name => {
+      // In model mode the entry file cannot be closed; in code mode every file can be.
+      const isEntry = currentMode === 'model' && name === workspace.entry;
+      const isActive = name === workspace.active;
+      const badge = isEntry ? '<span class="entry-badge" title="entry file">▶</span>' : '';
+      const close = !isEntry
+        ? `<span class="close" data-close="${escapeHtml(name)}" title="Delete ${escapeHtml(name)}">×</span>`
+        : '';
+      return `<button class="filetab${isActive ? ' active' : ''}" data-file="${escapeHtml(name)}"
+        title="${escapeHtml(name)} (double-click to rename)">${badge}${escapeHtml(name)}${close}</button>`;
+    }).join('');
+  }
 
   for (const tab of fileBar.querySelectorAll<HTMLButtonElement>('.filetab')) {
     const name = tab.dataset.file!;
@@ -1143,6 +1176,24 @@ function selectFile(name: string): void {
 }
 
 function addFile(): void {
+  if (currentMode === 'code') {
+    const name = prompt('New file name', 'user.cpp');
+    if (!name) return;
+    const clean = name.trim();
+    if (!/\.(cpp|h|c)$/i.test(clean)) {
+      alert('User code files must end in .cpp, .h, or .c');
+      return;
+    }
+    if (workspace.files[clean] !== undefined) {
+      alert(`"${clean}" already exists`);
+      return;
+    }
+    workspace.files[clean] = `// ${clean}\n`;
+    selectFile(clean);
+    persist();
+    return;
+  }
+
   const name = prompt('New file name', 'part.yaml');
   if (!name) return;
 
@@ -1179,6 +1230,16 @@ function renameFile(name: string): void {
     return;
   }
 
+  // Keep the file in its language family to prevent accidental cross-type renames.
+  if (/\.(ya?ml)$/i.test(name) && !/\.(ya?ml)$/i.test(clean)) {
+    alert('Model files must end in .yaml or .yml');
+    return;
+  }
+  if (/\.(cpp|h|c)$/i.test(name) && !/\.(cpp|h|c)$/i.test(clean)) {
+    alert('C++ files must end in .cpp, .h, or .c');
+    return;
+  }
+
   workspace.files[clean] = workspace.files[name];
   delete workspace.files[name];
 
@@ -1189,20 +1250,33 @@ function renameFile(name: string): void {
   // parse, and the error says which file is missing. That is clearer than
   // silently editing YAML the user did not ask us to touch.
   selectFile(workspace.active);
-  render();
+  if (currentMode === 'model') render();
 }
 
 function deleteFile(name: string): void {
-  if (name === workspace.entry) {
+  if (currentMode === 'model' && name === workspace.entry) {
     alert('The entry file cannot be deleted. Make another file the entry first.');
     return;
   }
   if (!confirm(`Delete "${name}"?`)) return;
 
   delete workspace.files[name];
-  if (workspace.active === name) workspace.active = workspace.entry;
-  selectFile(workspace.active);
-  render();
+
+  if (workspace.active === name) {
+    const remaining = fileNames(); // already filtered for current mode
+    workspace.active = remaining[0] ?? (currentMode === 'model' ? workspace.entry : '');
+  }
+
+  if (workspace.active && workspace.files[workspace.active] !== undefined) {
+    selectFile(workspace.active);
+  } else {
+    source.value = '';
+    renderFileBar();
+    paint();
+    persist();
+  }
+
+  if (currentMode === 'model') render();
 }
 
 function setEntry(): void {
@@ -1210,6 +1284,79 @@ function setEntry(): void {
   workspace.entry = workspace.active;
   renderFileBar();
   render();
+}
+
+// ---------------------------------------------------------------------------
+// Mode switching (Model ↔ C++)
+// ---------------------------------------------------------------------------
+
+function setMode(mode: 'model' | 'code'): void {
+  currentMode = mode;
+  modeModelBtn.classList.toggle('active', mode === 'model');
+  modeCodeBtn.classList.toggle('active', mode === 'code');
+  setEntryButton.hidden = mode === 'code';
+  snippetButton.hidden = mode === 'code';
+  genStubsButton.hidden = mode === 'model';
+
+  // If the currently active file does not belong to the new mode, switch to
+  // the first file in the new mode (or clear the editor when there are none).
+  const names = fileNames();
+  if (!names.includes(workspace.active)) {
+    workspace.active = names[0] ?? '';
+    source.value = workspace.active ? (workspace.files[workspace.active] ?? '') : '';
+  }
+
+  renderFileBar();
+  paint();
+}
+
+/**
+ * Generate stub .cpp files from the last successful codegen run.
+ *
+ * Scaffolds are "write once" — if the file already exists in the workspace it
+ * is left untouched. Only missing files are created, then the editor switches
+ * to Code mode so the user can edit them immediately.
+ */
+function genStubs(): void {
+  if (!current) {
+    alert('Fix any model errors first — stubs are generated from a valid model.');
+    return;
+  }
+  const { generatedProject } = current;
+  if (generatedProject.scaffolds.length === 0) {
+    alert('No stubs to generate for this model.\n\nStubs appear when the model has actions or guards that need C++ implementations.');
+    return;
+  }
+
+  let created = 0;
+  let skipped = 0;
+  let firstName = '';
+
+  for (const scaffold of generatedProject.scaffolds) {
+    // Use only the basename so it sits alongside the YAML files in the editor.
+    const name = scaffold.path.split('/').pop()!;
+    if (!name || !/\.(cpp|h|c)$/i.test(name)) continue;
+    if (workspace.files[name] !== undefined) {
+      skipped++;
+    } else {
+      workspace.files[name] = scaffold.contents;
+      if (!firstName) firstName = name;
+      created++;
+    }
+  }
+
+  if (created > 0) {
+    setMode('code');
+    if (firstName) selectFile(firstName);
+    persist();
+  }
+
+  const msg = created > 0 && skipped > 0
+    ? `Created ${created} stub file${created !== 1 ? 's' : ''}, skipped ${skipped} that already exist.`
+    : created > 0
+    ? `Created ${created} stub file${created !== 1 ? 's' : ''}.`
+    : `All stub files already exist — nothing new was created.`;
+  alert(msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -1365,6 +1512,15 @@ function downloadProjectZip(): void {
     // Scaffolds are "write once" — label them so the user knows not to
     // delete them and expect the generator to regenerate them.
     entries[`${folder}/${file.path}`] = file.contents;
+  }
+
+  // Include user-authored C++ files alongside the generated sketch.
+  // They go into src/ so unzipping gives a single coherent PlatformIO folder.
+  for (const [name, contents] of Object.entries(workspace.files)) {
+    if (/\.(cpp|h|c)$/i.test(name)) {
+      const dest = `${folder}/src/${name}`;
+      if (!entries[dest]) entries[dest] = contents;
+    }
   }
 
   download(`${folder}.zip`, zip(entries), 'application/zip');
@@ -2039,6 +2195,13 @@ function init(): void {
   source.addEventListener('input', () => {
     workspace.files[workspace.active] = source.value;
     paint();
+
+    // C++ files don't go through the parser — just save and stop.
+    if (currentMode === 'code') {
+      persist();
+      return;
+    }
+
     rerender();
     // Normalize tabs → spaces and other fixups. Done after the first paint so
     // the overlay is never stale, even when normalization is skipped.
@@ -2086,7 +2249,11 @@ function init(): void {
   });
 
   $<HTMLButtonElement>('add-file').addEventListener('click', addFile);
-  $<HTMLButtonElement>('set-entry').addEventListener('click', setEntry);
+  setEntryButton.addEventListener('click', setEntry);
+  genStubsButton.addEventListener('click', genStubs);
+
+  modeModelBtn.addEventListener('click', () => setMode('model'));
+  modeCodeBtn.addEventListener('click', () => setMode('code'));
 
   // Download dropdown
   function closeDownloadMenu(): void {
@@ -2141,7 +2308,7 @@ function init(): void {
         source.selectionStart = source.selectionEnd = selectionStart + 2;
         workspace.files[workspace.active] = source.value;
         paint();
-        rerender();
+        if (currentMode === 'model') rerender();
       } else {
         // Selection: indent every touched line by two spaces.
         const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
@@ -2152,13 +2319,13 @@ function init(): void {
         source.selectionEnd = lineStart + indented.length;
         workspace.files[workspace.active] = source.value;
         paint();
-        rerender();
+        if (currentMode === 'model') rerender();
       }
       return;
     }
 
     // Enter: auto-indent to match the current line, deepening by two spaces
-    // when the line ends with ':' (block key with no inline value).
+    // when the line ends with ':' (block key with no inline value — YAML only).
     // Shift+Enter inserts a plain newline — useful to escape auto-indent.
     if (event.key === 'Enter' && !event.shiftKey) {
       if (selectionStart !== selectionEnd) return; // let default handle range selections
@@ -2169,9 +2336,8 @@ function init(): void {
       // Leading whitespace of the current line.
       const indent = /^[ \t]*/.exec(currentLine)![0];
 
-      // Deepen when the text up to the cursor ends with ':' — a block mapping
-      // key with nothing after it yet. Covers `hardware:`, `buses:`, etc.
-      const deeper = /:\s*$/.test(currentLine);
+      // Deepen after ':' in YAML only — not meaningful in C++.
+      const deeper = currentMode === 'model' && /:\s*$/.test(currentLine);
 
       event.preventDefault();
       const insertion = '\n' + indent + (deeper ? '  ' : '');
@@ -2179,7 +2345,7 @@ function init(): void {
       source.selectionStart = source.selectionEnd = selectionStart + insertion.length;
       workspace.files[workspace.active] = source.value;
       paint();
-      rerender();
+      if (currentMode === 'model') rerender();
     }
   });
 
