@@ -4,8 +4,10 @@
 #   1. Declares the shared bus once, with SDA/SCL pins.
 #   2. Gives the RTC `type: ds3231`, which auto-populates hour, minute, second
 #      as sensor channels. No explicit `channels:` block needed.
-#   3. Uses `driver: lcd_display` with a format string — {hour}:{minute}:{second}
-#      becomes real snprintf code with %02d zero-padding for time values.
+#   3. Uses `driver: lcd_display` with a format string.
+#      {clock.hour}, {clock.minute}, {clock.second} reference the `clock` device
+#      explicitly — no guessing which device the value comes from.
+#      The codegen produces %02d / snprintf automatically.
 #
 # A single task fires every second: read the clock, then update the display.
 # No guards, no state machine, no C to write.
@@ -53,10 +55,12 @@ actions:
     driver: lcd_display
     params:
       device: display
-      # {hour}, {minute}, {second} are RTC channels — formatted as %02d (zero-padded).
-      # No snprintf to write; the codegen produces it from this format string.
+      # {device.channel} syntax: device name + channel name.
+      # Makes the source unambiguous — {clock.hour} clearly comes from the
+      # `clock` device, not from a parameter or another sensor.
+      # Codegen zero-pads RTC channels automatically (%02d).
       lines:
-        - format: "Time: {hour}:{minute}:{second}"
+        - format: "Time: {clock.hour}:{clock.minute}:{clock.second}"
           row: 0
           col: 0
 
