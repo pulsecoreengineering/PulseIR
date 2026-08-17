@@ -71,7 +71,12 @@ function validateDocument(textDocument: TextDocument): void {
     }
   } catch (err) {
     if (err instanceof ParseError) {
-      const line = Math.max(0, (err.line ?? 1) - 1); // js-yaml lines are 1-based
+      // YAML syntax errors carry a 1-based line from js-yaml; semantic errors
+      // (thrown after a successful parse) don't have one, so we search the
+      // document text for quoted identifiers mentioned in the message.
+      const line = err.line != null
+        ? Math.max(0, err.line - 1)
+        : findLineForError(text, err.message) ?? 0;
       const col  = err.column ?? 0;
       diagnostics.push({
         severity: DiagnosticSeverity.Error,
@@ -79,7 +84,7 @@ function validateDocument(textDocument: TextDocument): void {
           start: { line, character: col },
           end:   { line, character: Number.MAX_SAFE_INTEGER },
         },
-        message: err.message.replace(/^.*\n/, '').trim(), // strip yaml header line
+        message: err.message.replace(/^.*\n/, '').trim(),
         source: 'pulseir',
       });
     }
@@ -166,6 +171,32 @@ connection.onRequest('pulseir/diagram', async (params: DiagramParams): Promise<D
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * When a ParseError has no source position (semantic errors thrown after
+ * YAML parsing succeeds), try to find the relevant line by searching the
+ * document text for quoted identifiers extracted from the error message.
+ *
+ * Returns a 0-based line index, or undefined if nothing matched.
+ */
+function findLineForError(text: string, message: string): number | undefined {
+  const lines = text.split('\n');
+  // Pull out every "quoted" token from the error message.
+  const tokens = [...message.matchAll(/"([^"]+)"/g)].map(m => m[1]);
+  if (tokens.length === 0) return undefined;
+
+  // Try each token from last to first — the final quoted token is usually the
+  // bad value (e.g. the undeclared parameter name), which is more specific than
+  // the entity that references it.
+  for (let qi = tokens.length - 1; qi >= 0; qi--) {
+    const token = tokens[qi];
+    if (token.length < 2) continue;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes(token)) return i;
+    }
+  }
+  return undefined;
+}
 
 function uriToFsPath(uri: string): string | null {
   if (!uri.startsWith('file://')) return null;
