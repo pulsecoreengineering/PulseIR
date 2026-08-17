@@ -28,6 +28,37 @@
   "activationEvents": [],
   "main": "./client/out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "pulseir",
+          "title": "PulseIR",
+          "icon": "images/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "pulseir": [
+        {
+          "id": "pulseir.projectView",
+          "name": "Project"
+        },
+        {
+          "id": "pulseir.modelsView",
+          "name": "Models"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "pulseir.modelsView",
+        "contents": "No PulseIR models found in this workspace.\n\n[New Project](command:pulseir.newProject)\n[Open Folder](command:vscode.openFolder)"
+      },
+      {
+        "view": "pulseir.projectView",
+        "contents": "No PulseIR project open.\n\n[New Project](command:pulseir.newProject)"
+      }
+    ],
     "languages": [
       {
         "id": "pulseir",
@@ -59,6 +90,34 @@
       {
         "command": "pulseir.jumpToStub",
         "title": "PulseIR: Jump to Stub Implementation"
+      },
+      {
+        "command": "pulseir.newProject",
+        "title": "PulseIR: New Project",
+        "icon": "$(add)"
+      },
+      {
+        "command": "pulseir.refreshModels",
+        "title": "PulseIR: Refresh Models",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "pulseir.generateForModel",
+        "title": "PulseIR: Generate Code",
+        "icon": "$(play)"
+      },
+      {
+        "command": "pulseir.showDiagramForModel",
+        "title": "PulseIR: Show Diagram",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "pulseir.selectTarget",
+        "title": "PulseIR: Select Target Framework"
+      },
+      {
+        "command": "pulseir.toggleGenerateOnSave",
+        "title": "PulseIR: Toggle Generate on Save"
       }
     ],
     "menus": {
@@ -72,6 +131,30 @@
           "when": "resourceLangId == pulseir",
           "command": "pulseir.showDiagram",
           "group": "navigation"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "pulseir.newProject",
+          "when": "view == pulseir.modelsView",
+          "group": "navigation"
+        },
+        {
+          "command": "pulseir.refreshModels",
+          "when": "view == pulseir.modelsView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "pulseir.generateForModel",
+          "when": "view == pulseir.modelsView && viewItem == pulseirModel",
+          "group": "inline@1"
+        },
+        {
+          "command": "pulseir.showDiagramForModel",
+          "when": "view == pulseir.modelsView && viewItem == pulseirModel",
+          "group": "inline@2"
         }
       ]
     },
