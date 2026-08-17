@@ -36,8 +36,9 @@ export function activate(context: vscode.ExtensionContext): void {
   // The firstLine grammar rule only fires when `pulseir:` is literally on line 1;
   // most real models start with comments, so we scan the first 3 KB here instead.
   const promoteLanguage = (doc: vscode.TextDocument) => {
-    if (doc.languageId === 'yaml' || doc.languageId === 'yml') {
-      if (/^pulseir\s*:/m.test(doc.getText(3000))) {
+    if (doc.languageId === 'yaml' || doc.languageId === 'yml' || doc.languageId === 'plaintext') {
+      // getText() takes an optional Range, not a number — slice the string instead.
+      if (/^pulseir\s*:/m.test(doc.getText().slice(0, 3000))) {
         vscode.languages.setTextDocumentLanguage(doc, 'pulseir');
       }
     }
