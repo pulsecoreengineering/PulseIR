@@ -5550,9 +5550,10 @@ ${body}
     composeHeader(headerName) {
       const guard = `PULSEIR_${this.sanitizeUpper(this.project.name)}_GENERATED_H`;
       return [
-        this.generateHeader(),
+        this.generateDocComment(),
         `#ifndef ${guard}
 #define ${guard}`,
+        this.backend.platformIncludes(this.hasMachine, this.sizing()),
         this.generateIncludes(),
         this.declInterfaces(),
         this.declEventEnum(),
@@ -5895,7 +5896,7 @@ ${this.generateActionImplementations()}
 #endif  // PULSEHSM_CONFIG_H
 `;
     }
-    generateHeader() {
+    generateDocComment() {
       const { name, version, author } = this.project;
       const date = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
       const authorLine = author ? ` * Author:    ${author}
@@ -5905,7 +5906,7 @@ ${this.generateActionImplementations()}
  *   bool guard_<name>(const SystemContext* ctx)
  *   void action_<name>(SystemContext* ctx)` : ` * Action signatures follow FUNCTION_CONTRACT.md:
  *   void action_<name>(SystemContext* ctx)`;
-      const preamble = `/**
+      return `/**
  * PulseIR Generated Code
  *
  * Project: ${name}
@@ -5919,7 +5920,9 @@ ${runtimeNote}
  *
 ${sigNote}
  */`;
-      return `${preamble}
+    }
+    generateHeader() {
+      return `${this.generateDocComment()}
 
 ${this.backend.platformIncludes(this.hasMachine, this.sizing())}`;
     }

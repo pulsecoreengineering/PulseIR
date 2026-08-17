@@ -359,8 +359,9 @@ export class Codegen {
     const guard = `PULSEIR_${this.sanitizeUpper(this.project.name)}_GENERATED_H`;
 
     return [
-      this.generateHeader(),
+      this.generateDocComment(),
       `#ifndef ${guard}\n#define ${guard}`,
+      this.backend.platformIncludes(this.hasMachine, this.sizing()),
       this.generateIncludes(),
       this.declInterfaces(),
       this.declEventEnum(),
@@ -776,7 +777,7 @@ ${this.generateActionImplementations()}
 `;
   }
 
-  private generateHeader(): string {
+  private generateDocComment(): string {
     const { name, version, author } = this.project;
     const date = new Date().toISOString().split('T')[0];
     const authorLine = author ? ` * Author:    ${author}\n` : '';
@@ -787,7 +788,7 @@ ${this.generateActionImplementations()}
       ? ` * Guard/action signatures follow FUNCTION_CONTRACT.md:\n *   bool guard_<name>(const SystemContext* ctx)\n *   void action_<name>(SystemContext* ctx)`
       : ` * Action signatures follow FUNCTION_CONTRACT.md:\n *   void action_<name>(SystemContext* ctx)`;
 
-    const preamble = `/**
+    return `/**
  * PulseIR Generated Code
  *
  * Project: ${name}
@@ -801,8 +802,10 @@ ${runtimeNote}
  *
 ${sigNote}
  */`;
+  }
 
-    return `${preamble}\n\n${this.backend.platformIncludes(this.hasMachine, this.sizing())}`;
+  private generateHeader(): string {
+    return `${this.generateDocComment()}\n\n${this.backend.platformIncludes(this.hasMachine, this.sizing())}`;
   }
 
   // =========================================================================
