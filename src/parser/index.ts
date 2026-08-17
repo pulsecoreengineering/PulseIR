@@ -1551,7 +1551,7 @@ export class Parser {
   private assertKnownInterface(name: string, iface: string): void {
     const known = [
       'gpio', 'pwm', 'adc', 'uart', 'i2c', 'spi',
-      'can', 'onewire', 'wifi', 'ethernet', 'ble', 'mqtt', 'eeprom', 'littlefs', 'custom',
+      'can', 'onewire', 'wifi', 'ethernet', 'ble', 'mqtt', 'eeprom', 'littlefs', 'ota', 'custom',
     ];
     if (!known.includes(iface)) {
       throw new ParseError(

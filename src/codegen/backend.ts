@@ -42,6 +42,19 @@ export interface PlatformBackend {
   /** C type for storing a millisecond timestamp or duration. */
   timestampType(): string;
 
+  /**
+   * Format a numeric millisecond literal for use in comparisons against nowExpr().
+   * Arduino: `250UL`; Zephyr/ESP-IDF: `INT64_C(250)`.
+   */
+  durationLiteral(ms: number): string;
+
+  /**
+   * Variable/macro name for a GPIO pin, given the sanitized-upper device symbol.
+   * Arduino/ESP-IDF: `${sym}_PIN` (numeric `#define`).
+   * Zephyr Phase 2:  `${sym}_GPIO` (`gpio_dt_spec` struct name).
+   */
+  gpioPinVar(sym: string): string;
+
   // ── Console ───────────────────────────────────────────────────────────────
 
   /** The C identifier for the UART stream on a given port number. */
@@ -84,6 +97,44 @@ export interface PlatformBackend {
    * API generations; other backends emit their own write call.
    */
   ledcWriteLines(pin: string, channel: string, duty: string, board: string): string;
+
+  /**
+   * Multi-line block emitting a PWM duty-cycle write given the sanitized-upper
+   * device symbol and the macros already emitted by the interface backend.
+   *
+   * sym:       sanitized-upper symbol ("HEATER")
+   * freqMacro: C macro for frequency in Hz ("HEATER_FREQUENCY")
+   * resMacro:  C macro for bit resolution ("HEATER_RESOLUTION")
+   * dutyExpr:  C expression for duty value (0 to 2^res-1)
+   * board:     target board string (used by Arduino for LEDC variant selection)
+   *
+   * Returns a multi-line block WITHOUT trailing `(void)ctx;`.
+   * Caller appends `\n  (void)ctx;`.
+   */
+  pwmWriteLines(sym: string, freqMacro: string, resMacro: string, dutyExpr: string, board: string): string;
+
+  /**
+   * Multi-line action body for an HTTP GET request.
+   *
+   * url:   fully-qualified URL string, already JSON-escaped and quoted
+   *        (e.g. `'"http://example.com/api"'`).
+   * board: target board string (used by Arduino for arch guard selection).
+   *
+   * Returns the complete body block including `(void)ctx;`.
+   */
+  httpGetLines(url: string, board: string): string;
+
+  /**
+   * Multi-line action body for an HTTP POST request.
+   *
+   * url:         fully-qualified URL string, JSON-escaped and quoted.
+   * body:        request body string, JSON-escaped and quoted.
+   * contentType: MIME type string, JSON-escaped and quoted.
+   * board:       target board string.
+   *
+   * Returns the complete body block including `(void)ctx;`.
+   */
+  httpPostLines(url: string, body: string, contentType: string, board: string): string;
 
   // ── Hardware interfaces ───────────────────────────────────────────────────
 

@@ -488,6 +488,9 @@ ${this.generateActionImplementations()}
     // that declare an "interrupt:" field.
     this.indexInterrupts();
 
+    // Action-implied libraries (e.g. HTTPClient when http_get/http_post is used).
+    this.indexActionLibraries();
+
     // Declared libraries win, so a model can pin a version or override a header.
     for (const library of this.backend.declaredLibraries(this.project.system.libraries)) {
       this.libraries.set(library.name, library);
@@ -659,6 +662,41 @@ ${this.generateActionImplementations()}
       existing.init.push(
         `attachInterrupt(digitalPinToInterrupt(${pin}), ${isrName}, ${mode});`
       );
+    }
+  }
+
+  /**
+   * Add action-implied libraries to the library map.
+   * Called after all emissions are indexed so action tables are complete.
+   */
+  private indexActionLibraries(): void {
+    const allDrivers = new Set<string>();
+    const collectFrom = (actions: { driver?: string }[] | undefined) => {
+      for (const a of actions || []) {
+        if (a.driver) allDrivers.add(a.driver);
+      }
+    };
+    // Collect drivers from all possible action sites.
+    const collectState = (state: State) => {
+      collectFrom(state.entry);
+      collectFrom(state.exit);
+      const collectRegion = (states: State[]) => states.forEach(collectState);
+      for (const region of state.regions || []) collectRegion(region.states);
+    };
+    for (const state of this.project.system.states || []) collectState(state);
+    this.project.system.transitions.forEach(t => collectFrom(t.actions));
+    for (const task of this.project.system.tasks || []) collectFrom(task.actions);
+    for (const cmd of this.project.system.commands?.commands || []) collectFrom(cmd.actions);
+
+    if (allDrivers.has('http_get') || allDrivers.has('http_post')) {
+      if (!this.libraries.has('HTTPClient')) {
+        this.libraries.set('HTTPClient', {
+          name: 'HTTPClient',
+          include: 'HTTPClient.h',
+          source: 'builtin',
+          reason: 'HTTP client actions (bundled with ESP32/ESP8266 Arduino core)',
+        });
+      }
     }
   }
 
@@ -1446,8 +1484,8 @@ ${body}
       const pinExpr = typeof pin === 'number' ? String(pin) : `HEARTBEAT_PIN`;
       const ivRaw = diag.heartbeat.interval_ms ?? 1000;
       const ivExpr = typeof ivRaw === 'number'
-        ? `${ivRaw}UL`
-        : `(unsigned long)systemParameters.${this.sanitize(String(ivRaw))}`;
+        ? this.backend.durationLiteral(ivRaw)
+        : `(${this.backend.timestampType()})systemParameters.${this.sanitize(String(ivRaw))}`;
 
       if (typeof pin !== 'number') {
         // Named pin — emit a #define so the user can override it.
@@ -1523,8 +1561,8 @@ ${body}
     for (const ch of tel.channels) {
       const ivRaw = ch.interval_ms ?? tel.interval_ms!;
       const ivExpr = typeof ivRaw === 'number'
-        ? `${ivRaw}UL`
-        : `(unsigned long)systemParameters.${this.sanitize(String(ivRaw))}`;
+        ? this.backend.durationLiteral(ivRaw)
+        : `(${this.backend.timestampType()})systemParameters.${this.sanitize(String(ivRaw))}`;
 
       const field = `systemSensors.${this.sanitize(ch.sensor)}`;
       const topicPart = ch.topic
@@ -1736,7 +1774,7 @@ ${this.backend.renderSetup(setupBody)}`;
       const base = this.sanitize(task.name);
       const interval = typeof task.every === 'string'
         ? `(${tsType})systemParameters.${this.sanitize(task.every)}`
-        : `${task.every}UL`;
+        : this.backend.durationLiteral(task.every);
       const source = typeof task.every === 'string' ? `${task.every} (parameter)` : `every ${task.every}ms`;
       const calls = [
         ...task.actions.map(a => `  action_${this.sanitize(a.name)}(&systemContext);`),
@@ -1986,7 +2024,7 @@ static void pollCommands() {
           // Toggle: read the current state and invert it.
           return targets
             .map(t => {
-              const pin = `${this.sanitizeUpper(String(t))}_PIN`;
+              const pin = this.backend.gpioPinVar(this.sanitizeUpper(String(t)));
               return `  ${this.backend.digitalWriteExpr(pin, `!${this.backend.digitalReadExpr(pin)}`)};`;
             })
             .join('\n') + '\n  (void)ctx;';
@@ -2003,7 +2041,7 @@ static void pollCommands() {
         if (valueExpr === null) break;
 
         return targets
-          .map(t => `  ${this.backend.digitalWriteExpr(`${this.sanitizeUpper(String(t))}_PIN`, valueExpr)};`)
+          .map(t => `  ${this.backend.digitalWriteExpr(this.backend.gpioPinVar(this.sanitizeUpper(String(t))), valueExpr)};`)
           .join('\n') + '\n  (void)ctx;';
       }
 
@@ -2026,7 +2064,7 @@ static void pollCommands() {
       case 'gpio_read': {
         const deviceName = String(params.device ?? '');
         if (this.isSensorComponent(deviceName)) {
-          const pin   = `${this.sanitizeUpper(deviceName)}_PIN`;
+          const pin   = this.backend.gpioPinVar(this.sanitizeUpper(deviceName));
           const field = `systemSensors.${this.sanitize(deviceName)}`;
           return `  ${field} = (float)${this.backend.digitalReadExpr(pin)};\n  (void)ctx;`;
         }
@@ -2136,23 +2174,17 @@ static void pollCommands() {
         const device = (this.project.system.components || []).find(c => c.name === deviceName);
         if (!device) break;
 
-        const pinMacro     = `${this.sanitizeUpper(deviceName)}_PIN`;
-        const channelMacro = `${this.sanitizeUpper(deviceName)}_CHANNEL`;
-        const dutyRaw      = params.duty;
-        const dutyParam    = (this.project.system.parameters || []).find(p => p.name === String(dutyRaw));
-        const dutyExpr     = dutyParam
+        const sym       = this.sanitizeUpper(deviceName);
+        const freqMacro = `${sym}_FREQUENCY`;
+        const resMacro  = `${sym}_RESOLUTION`;
+        const dutyRaw   = params.duty;
+        const dutyParam = (this.project.system.parameters || []).find(p => p.name === String(dutyRaw));
+        const dutyExpr  = dutyParam
           ? `ctx->parameters->${this.sanitize(String(dutyRaw))}`
           : dutyRaw !== undefined ? String(dutyRaw) : '0';
 
-        const board   = (this.project.target?.board ?? '').toLowerCase();
-        const isAvr   = /avr|uno|mega|nano|atmega|leonardo/.test(board);
-        const isRp    = /rp2040|pico/.test(board);
-
-        if (isAvr || isRp) {
-          return `  ${this.backend.analogWriteExpr(pinMacro, dutyExpr)};\n  (void)ctx;`;
-        }
-        // ESP32 (explicit or unknown board) — portable guard that compiles everywhere.
-        return this.backend.ledcWriteLines(pinMacro, channelMacro, dutyExpr, board) + '\n  (void)ctx;';
+        const board = (this.project.target?.board ?? '').toLowerCase();
+        return this.backend.pwmWriteLines(sym, freqMacro, resMacro, dutyExpr, board) + '\n  (void)ctx;';
       }
 
       case 'console_help': {
@@ -2161,6 +2193,50 @@ static void pollCommands() {
         const stream = this.consoleStream();
         const list = cmds.length ? cmds.join(', ') : '(no commands declared)';
         return `  ${this.backend.printlnExpr(stream, `"Commands: ${list}"`)};` + '\n  (void)ctx;';
+      }
+
+      case 'sleep_control': {
+        const mode = String(params.mode ?? 'deep_sleep');
+        const durationMs = params.duration_ms !== undefined ? Number(params.duration_ms) : undefined;
+        const wakePin    = params.wake_pin    !== undefined ? String(params.wake_pin)    : undefined;
+        const wakeLevel  = params.wake_level  !== undefined ? Number(params.wake_level)  : 0;
+
+        const lines: string[] = [
+          '  // Requires: ESP32 Arduino core (sleep APIs are built-in)',
+          '  #ifdef ARDUINO_ARCH_ESP32',
+        ];
+        if (durationMs !== undefined) {
+          lines.push(`    esp_sleep_enable_timer_wakeup(${durationMs}ULL * 1000ULL);  // ${durationMs} ms`);
+        }
+        if (wakePin !== undefined) {
+          lines.push(`    esp_sleep_enable_ext0_wakeup((gpio_num_t)${wakePin}, ${wakeLevel});`);
+        }
+        if (mode === 'light_sleep') {
+          lines.push('    esp_light_sleep_start();');
+        } else {
+          lines.push('    esp_deep_sleep_start();  // does not return');
+        }
+        lines.push(
+          '  #else',
+          `    // TODO: sleep_control is ESP32-only. Add your MCU's low-power call here.`,
+          '  #endif',
+          '  (void)ctx;',
+        );
+        return lines.join('\n');
+      }
+
+      case 'http_get': {
+        const url   = params.url !== undefined ? JSON.stringify(String(params.url)) : '"http://example.com/api"';
+        const board = (this.project.target?.board ?? '').toLowerCase();
+        return this.backend.httpGetLines(url, board);
+      }
+
+      case 'http_post': {
+        const url         = params.url          !== undefined ? JSON.stringify(String(params.url))          : '"http://example.com/api"';
+        const body        = params.body         !== undefined ? JSON.stringify(String(params.body))         : '"{}"';
+        const contentType = params.content_type !== undefined ? JSON.stringify(String(params.content_type)) : '"application/json"';
+        const board       = (this.project.target?.board ?? '').toLowerCase();
+        return this.backend.httpPostLines(url, body, contentType, board);
       }
     }
 
@@ -2301,7 +2377,7 @@ ${saveBody}
 
       return c.type === 'analog_input'
         ? `  ${field} = ${this.backend.analogReadExpr(pinMacro)};`
-        : `  ${field} = (float)${this.backend.digitalReadExpr(pinMacro)};`;
+        : `  ${field} = (float)${this.backend.digitalReadExpr(this.backend.gpioPinVar(this.sanitizeUpper(c.name)))};`;
     });
 
     return `// Populate systemSensors before guards and actions read them.
@@ -2602,8 +2678,17 @@ static char _mqttPrefix[96];`,
 
   /** Every action the model actually uses, wherever it was used. */
   private everyUsedAction(): Action[] {
+    const stateActions: Action[] = [];
+    const collectState = (state: State) => {
+      for (const a of state.entry || []) stateActions.push(a);
+      for (const a of state.exit  || []) stateActions.push(a);
+      for (const region of state.regions || []) region.states.forEach(collectState);
+    };
+    for (const state of this.project.system.states || []) collectState(state);
+
     return [
       ...this.project.system.transitions.flatMap(t => t.actions || []),
+      ...stateActions,
       ...(this.project.system.tasks || []).flatMap(t => t.actions),
       ...(this.project.system.commands?.commands || []).flatMap(c => c.actions || []),
     ];
@@ -2736,7 +2821,7 @@ static char _mqttPrefix[96];`,
           const target = this.states[this.resolveEntry(this.resolveRef(t.target!, 'target'))];
           const duration = typeof t.after === 'string'
             ? `(${tsType})systemParameters.${this.sanitize(t.after)}`
-            : `${t.after}UL`;
+            : this.backend.durationLiteral(t.after ?? 0);
           const source = typeof t.after === 'string' ? `${t.after} (parameter)` : `${t.after} ms`;
 
           const calls = (t.actions || [])
@@ -2770,7 +2855,7 @@ ${fire}
           const guard = this.guards.get(idx);
           const interval = typeof t.every === 'string'
             ? `(${tsType})systemParameters.${this.sanitize(t.every)}`
-            : `${t.every}UL`;
+            : this.backend.durationLiteral(t.every ?? 0);
           const source = typeof t.every === 'string' ? `${t.every} (parameter)` : `every ${t.every} ms`;
 
           const dueVar = `dueAt_${this.sanitize(flat.path)}_${i}`;
@@ -2941,6 +3026,13 @@ ${blocks.join('\n\n')}`;
       body.push('  runDiagnostics();');
     }
 
+    // Interface loop hooks (e.g. ArduinoOTA.handle()) — must run every tick.
+    for (const emission of this.emissions.values()) {
+      if (emission.loop && emission.loop.length > 0) {
+        body.push(...emission.loop);
+      }
+    }
+
     // MQTT reconnect + message pump (must come before everything that may
     // dispatch events, so an incoming MQTT message can be acted on this tick).
     const mqttRes = this.mqttResource();
@@ -2956,8 +3048,8 @@ ${blocks.join('\n\n')}`;
       body.push(
         `  // Maintain MQTT connection and pump incoming messages.`,
         `  {`,
-        `    static unsigned long _mqttReconnectAt = 0;`,
-        `    if (!${client}.connected() && ${this.backend.nowExpr()} - _mqttReconnectAt >= 5000UL) {`,
+        `    static ${this.backend.timestampType()} _mqttReconnectAt = 0;`,
+        `    if (!${client}.connected() && ${this.backend.nowExpr()} - _mqttReconnectAt >= ${this.backend.durationLiteral(5000)}) {`,
         `      _mqttReconnectAt = ${this.backend.nowExpr()};`,
         `      connectMqtt();`,
         `    }`,
@@ -2968,8 +3060,8 @@ ${blocks.join('\n\n')}`;
         body.push(
           `  // Publish sensor readings and state periodically.`,
           `  {`,
-          `    static unsigned long _mqttPublishAt = 0;`,
-          `    if (${this.backend.nowExpr()} - _mqttPublishAt >= 5000UL) {`,
+          `    static ${this.backend.timestampType()} _mqttPublishAt = 0;`,
+          `    if (${this.backend.nowExpr()} - _mqttPublishAt >= ${this.backend.durationLiteral(5000)}) {`,
           `      _mqttPublishAt = ${this.backend.nowExpr()};`,
           `      publishMqtt();`,
           `    }`,
@@ -3284,6 +3376,14 @@ ${implementations.join('\n\n')}`;
     };
 
     this.project.system.transitions.forEach((t, idx) => collect(t.actions, `Transition ${idx}`));
+
+    // State entry/exit actions (inline or from catalogue).
+    const collectState = (state: State) => {
+      collect(state.entry, `State "${state.name}" entry`);
+      collect(state.exit,  `State "${state.name}" exit`);
+      for (const region of state.regions || []) region.states.forEach(collectState);
+    };
+    for (const state of this.project.system.states || []) collectState(state);
 
     // Tasks and commands call actions too, and a machine-less project has
     // nothing but those - miss them and it generates no stubs at all.

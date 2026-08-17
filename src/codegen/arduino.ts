@@ -43,6 +43,8 @@ export class ArduinoBackend implements PlatformBackend {
 
   nowExpr(): string { return 'millis()'; }
   timestampType(): string { return 'unsigned long'; }
+  durationLiteral(ms: number): string { return `${ms}UL`; }
+  gpioPinVar(sym: string): string { return `${sym}_PIN`; }
 
   consoleStreamName(port: number): string {
     return port === 0 ? 'Serial' : `Serial${port}`;
@@ -95,6 +97,62 @@ export class ArduinoBackend implements PlatformBackend {
       '#else',
       `  analogWrite(${pin}, ${duty});`,
       '#endif',
+    ].join('\n');
+  }
+
+  pwmWriteLines(sym: string, _freqMacro: string, _resMacro: string, dutyExpr: string, board: string): string {
+    const pin     = `${sym}_PIN`;
+    const channel = `${sym}_CHANNEL`;
+    const isAvr   = /avr|uno|mega|nano|atmega|leonardo/.test(board);
+    const isRp    = /rp2040|pico/.test(board);
+    if (isAvr || isRp) {
+      return `  ${this.analogWriteExpr(pin, dutyExpr)};`;
+    }
+    return this.ledcWriteLines(pin, channel, dutyExpr, board);
+  }
+
+  httpGetLines(url: string, _board: string): string {
+    return [
+      '  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)',
+      '  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+      '  {',
+      '    HTTPClient http;',
+      `    http.begin(${url});`,
+      '    int httpCode = http.GET();',
+      '    if (httpCode == HTTP_CODE_OK) {',
+      '      String payload = http.getString();',
+      '      // TODO: parse payload',
+      '      (void)payload;',
+      '    }',
+      '    http.end();',
+      '  }',
+      '  #else',
+      '    // TODO: http_get is only available on ESP32/ESP8266.',
+      '  #endif',
+      '  (void)ctx;',
+    ].join('\n');
+  }
+
+  httpPostLines(url: string, body: string, contentType: string, _board: string): string {
+    return [
+      '  // Requires: HTTPClient (bundled with ESP32/ESP8266 Arduino core)',
+      '  #if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+      '  {',
+      '    HTTPClient http;',
+      `    http.begin(${url});`,
+      `    http.addHeader("Content-Type", ${contentType});`,
+      `    int httpCode = http.POST(${body});`,
+      '    if (httpCode == HTTP_CODE_OK) {',
+      '      String payload = http.getString();',
+      '      // TODO: parse response',
+      '      (void)payload;',
+      '    }',
+      '    http.end();',
+      '  }',
+      '  #else',
+      '    // TODO: http_post is only available on ESP32/ESP8266.',
+      '  #endif',
+      '  (void)ctx;',
     ].join('\n');
   }
 

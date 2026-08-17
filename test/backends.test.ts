@@ -12,6 +12,8 @@ import { Parser } from '../src/parser/index.js';
 import { Codegen } from '../src/codegen/index.js';
 import { EspIdfBackend } from '../src/codegen/espidf.js';
 import { MicroPythonCodegen } from '../src/codegen/micropython.js';
+import { ZephyrBackend } from '../src/codegen/zephyr.js';
+import { ZephyrProjectEmitter } from '../src/emit/zephyr_project.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -975,6 +977,821 @@ test('ds3231: calls begin() in setupInterfaces()', () => {
 test('ds3231: rtc_read action stub generates commented DateTime example', () => {
   const code = new Codegen().generate(parse(DS3231_YAML));
   has(code, '// DateTime now = clock.now();');
+});
+
+// ---------------------------------------------------------------------------
+// Gap 4 tests: Power management (sleep / wake)
+// ---------------------------------------------------------------------------
+
+const SLEEP_YAML = `
+pulseir: "1"
+project:
+  name: sleep_test
+  version: "1.0"
+
+hardware:
+  devices:
+    btn: { type: digital_input, pin: GPIO0 }
+
+events:
+  wake_up: { source: external }
+
+actions:
+  go_to_sleep:
+    driver: sleep_control
+    params:
+      mode: deep_sleep
+      duration_ms: 10000
+      wake_pin: GPIO0
+      wake_level: 0
+
+machine:
+  states:
+    sleeping:
+      entry: go_to_sleep
+    awake:
+  transitions:
+    - { from: sleeping, on: wake_up, to: awake }
+    - { from: awake,    on: wake_up, to: sleeping }
+`;
+
+const LIGHT_SLEEP_YAML = `
+pulseir: "1"
+project:
+  name: light_sleep_test
+  version: "1.0"
+
+hardware:
+  devices:
+    led: { type: digital_output, pin: GPIO2 }
+
+actions:
+  nap:
+    driver: sleep_control
+    params:
+      mode: light_sleep
+      duration_ms: 500
+
+tasks:
+  tick: { every: 1000, do: nap }
+`;
+
+console.log('\n⚡ Testing Gap 4: Power management (sleep / wake)...\n');
+
+test('sleep_control: deep sleep emits esp_deep_sleep_start', () => {
+  const code = new Codegen().generate(parse(SLEEP_YAML));
+  has(code, 'esp_deep_sleep_start();');
+});
+
+test('sleep_control: timer wakeup uses duration_ms converted to microseconds', () => {
+  const code = new Codegen().generate(parse(SLEEP_YAML));
+  has(code, 'esp_sleep_enable_timer_wakeup(10000ULL * 1000ULL);');
+});
+
+test('sleep_control: GPIO wakeup emits esp_sleep_enable_ext0_wakeup', () => {
+  const code = new Codegen().generate(parse(SLEEP_YAML));
+  has(code, 'esp_sleep_enable_ext0_wakeup((gpio_num_t)GPIO0, 0);');
+});
+
+test('sleep_control: wrapped in #ifdef ARDUINO_ARCH_ESP32 guard', () => {
+  const code = new Codegen().generate(parse(SLEEP_YAML));
+  has(code, '#ifdef ARDUINO_ARCH_ESP32');
+});
+
+test('sleep_control: has fallback TODO for non-ESP32', () => {
+  const code = new Codegen().generate(parse(SLEEP_YAML));
+  has(code, "// TODO: sleep_control is ESP32-only");
+});
+
+test('sleep_control: light sleep emits esp_light_sleep_start', () => {
+  const code = new Codegen().generate(parse(LIGHT_SLEEP_YAML));
+  has(code, 'esp_light_sleep_start();');
+});
+
+test('sleep_control: light sleep does NOT emit deep sleep start', () => {
+  const code = new Codegen().generate(parse(LIGHT_SLEEP_YAML));
+  hasNot(code, 'esp_deep_sleep_start();');
+});
+
+// ---------------------------------------------------------------------------
+// Gap 5 tests: HTTP client & OTA updates
+// ---------------------------------------------------------------------------
+
+const OTA_YAML = `
+pulseir: "1"
+project:
+  name: ota_test
+  version: "1.0"
+
+hardware:
+  buses:
+    net: { interface: wifi, ssid: "MyNetwork" }
+    updater: { interface: ota, hostname: "esp32-device", port: 3232 }
+  devices:
+    led: { type: digital_output, pin: GPIO2 }
+
+tasks:
+  heartbeat: { every: 1000, do: toggle_led }
+
+actions:
+  toggle_led: { driver: gpio_control, params: { device: led } }
+`;
+
+const HTTP_YAML = `
+pulseir: "1"
+project:
+  name: http_test
+  version: "1.0"
+
+hardware:
+  buses:
+    net: { interface: wifi, ssid: "MyNetwork" }
+  devices:
+    led: { type: digital_output, pin: GPIO2 }
+
+events:
+  data_ready: { source: external }
+
+actions:
+  fetch_data:
+    driver: http_get
+    params:
+      url: "http://api.example.com/sensor"
+  send_data:
+    driver: http_post
+    params:
+      url: "http://api.example.com/readings"
+      body: '{"value":42}'
+      content_type: "application/json"
+
+tasks:
+  poll: { every: 5000, do: fetch_data }
+
+machine:
+  states:
+    idle:
+    posting:
+      entry: send_data
+  transitions:
+    - { from: idle,    on: data_ready, to: posting }
+    - { from: posting, on: data_ready, to: idle }
+`;
+
+console.log('\n⚡ Testing Gap 5: HTTP client & OTA updates...\n');
+
+test('ota: includes ArduinoOTA header', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, '#include <ArduinoOTA.h>');
+});
+
+test('ota: calls ArduinoOTA.setHostname in setupInterfaces', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, 'ArduinoOTA.setHostname("esp32-device");');
+});
+
+test('ota: calls ArduinoOTA.setPort in setupInterfaces', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, 'ArduinoOTA.setPort(3232);');
+});
+
+test('ota: calls ArduinoOTA.begin in setupInterfaces', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, 'ArduinoOTA.begin();');
+});
+
+test('ota: wraps init in ESP32/ESP8266 guard', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)');
+});
+
+test('ota: emits ArduinoOTA.handle() in loop()', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, 'ArduinoOTA.handle();');
+});
+
+test('ota: todo reminds user WiFi must be connected first', () => {
+  const code = new Codegen().generate(parse(OTA_YAML));
+  has(code, 'WiFi must be connected before ArduinoOTA.begin()');
+});
+
+test('http_get: emits HTTPClient.begin with url', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'http.begin("http://api.example.com/sensor");');
+});
+
+test('http_get: emits http.GET() call', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'int httpCode = http.GET();');
+});
+
+test('http_get: checks HTTP_CODE_OK', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'if (httpCode == HTTP_CODE_OK)');
+});
+
+test('http_get: calls http.end()', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'http.end();');
+});
+
+test('http_post: emits HTTPClient.begin with url', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'http.begin("http://api.example.com/readings");');
+});
+
+test('http_post: emits http.POST with body', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, `http.POST("{\\\"value\\\":42}");`);
+});
+
+test('http_post: sets Content-Type header', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, 'http.addHeader("Content-Type", "application/json");');
+});
+
+test('http_get/post: includes HTTPClient library header', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, '#include <HTTPClient.h>');
+});
+
+test('http_get: wrapped in ESP32/ESP8266 guard', () => {
+  const code = new Codegen().generate(parse(HTTP_YAML));
+  has(code, '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)');
+});
+
+// ---------------------------------------------------------------------------
+// Zephyr backend — tasks-only model
+// ---------------------------------------------------------------------------
+
+console.log('\n⚡ Testing Zephyr backend...\n');
+
+test('Zephyr: entry point is int main(void) with while(1) + k_msleep(1)', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, 'int main(void)');
+  has(code, 'while (1) {');
+  has(code, 'k_msleep(1)');
+  hasNot(code, 'void setup()');
+  hasNot(code, 'void loop()');
+  hasNot(code, 'app_main');
+  hasNot(code, 'for (;;)');
+});
+
+test('Zephyr: setup is a static helper called once from main', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, 'static void _setup()');
+  has(code, '_setup()');
+});
+
+test('Zephyr: timing uses k_uptime_get(), not millis() or esp_timer_get_time()', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, 'k_uptime_get()');
+  // millis() may appear in platform-agnostic comments — check executable lines only
+  const execLines = code.split('\n')
+    .filter(l => { const t = l.trimStart(); return !t.startsWith('//') && !t.startsWith('*'); })
+    .join('\n');
+  assert(!execLines.includes('millis()'), 'expected no millis() call in Zephyr generated code');
+  hasNot(code, 'esp_timer_get_time()');
+});
+
+test('Zephyr: timestamp variable is typed int64_t, not unsigned long', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, 'int64_t');
+});
+
+test('Zephyr: includes Zephyr kernel, GPIO and UART headers', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, '#include <zephyr/kernel.h>');
+  has(code, '#include <zephyr/drivers/gpio.h>');
+  has(code, '#include <zephyr/drivers/uart.h>');
+  hasNot(code, '#include "freertos/FreeRTOS.h"');
+  hasNot(code, '#include <Arduino.h>');
+});
+
+test('Zephyr: provides pulseIrPrint helpers routing through printk', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  has(code, 'static inline void pulseIrPrint(const char *s)');
+  has(code, 'static inline void pulseIrPrintln(');
+  has(code, 'printk(');
+  hasNot(code, 'Serial.print');
+  hasNot(code, 'printf(');
+});
+
+test('Zephyr: tasks-only model does not include PulseHSM', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(BLINK_YAML));
+  hasNot(code, '#include "PulseHSM.h"');
+  hasNot(code, 'PULSEHSM_MAX_STATES');
+});
+
+// ---------------------------------------------------------------------------
+// Zephyr backend — state machine model
+// ---------------------------------------------------------------------------
+
+test('Zephyr: state machine model includes PulseHSM and sizing macros', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  has(code, '#include "PulseHSM.h"');
+  has(code, 'PULSEHSM_MAX_STATES');
+  has(code, 'PULSEHSM_MAX_EVENTS');
+  has(code, 'PULSEHSM_MAX_DEPTH');
+});
+
+test('Zephyr: sizing macros appear before the Zephyr kernel header', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  const sizingPos = code.indexOf('PULSEHSM_MAX_STATES');
+  const kernelPos = code.indexOf('#include <zephyr/kernel.h>');
+  assert(sizingPos < kernelPos, 'PULSEHSM_MAX_STATES must appear before <zephyr/kernel.h>');
+});
+
+test('Zephyr: GPIO write uses gpio_pin_set_dt with gpio_dt_spec', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  has(code, 'gpio_pin_set_dt(&LAMP_GREEN_GPIO,');
+  has(code, 'gpio_pin_set_dt(&LAMP_RED_GPIO,');
+});
+
+test('Zephyr: GPIO read uses gpio_pin_get_dt with gpio_dt_spec', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  has(code, 'gpio_pin_get_dt(&LAMP_RED_GPIO)');
+});
+
+test('Zephyr: GPIO device declares gpio_dt_spec using DT_PATH(zephyr_user)', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  has(code, 'struct gpio_dt_spec LAMP_GREEN_GPIO = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), lamp_green_gpios)');
+  has(code, 'struct gpio_dt_spec LAMP_RED_GPIO = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), lamp_red_gpios)');
+});
+
+test('Zephyr: state machine model still uses while(1) + k_msleep', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(SIGNAL_YAML));
+  has(code, 'int main(void)');
+  has(code, 'while (1) {');
+  has(code, 'k_msleep(1)');
+});
+
+// ---------------------------------------------------------------------------
+// Zephyr backend — GPIO interface init
+// ---------------------------------------------------------------------------
+
+const GPIO_IFACE_YAML = `
+pulseir: "1"
+project:
+  name: gpio_init_test
+  version: "1.0"
+
+hardware:
+  buses:
+    btn: { interface: gpio, pin: GPIO2, mode: input }
+
+tasks:
+  poll: { every: 100, do: noop }
+
+actions:
+  noop: { driver: logger }
+`;
+
+test('Zephyr: GPIO bus resource generates gpio_pin_configure_dt in setupInterfaces', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(GPIO_IFACE_YAML));
+  has(code, 'gpio_pin_configure_dt(&BTN_GPIO,');
+  has(code, 'GPIO_INPUT');
+});
+
+test('Zephyr: GPIO bus resource declares gpio_dt_spec using DT_PATH(zephyr_user)', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(GPIO_IFACE_YAML));
+  has(code, 'struct gpio_dt_spec BTN_GPIO = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), btn_gpios)');
+});
+
+test('Zephyr: GPIO output mode uses GPIO_OUTPUT_INACTIVE flag', () => {
+  const outputYaml = GPIO_IFACE_YAML.replace('mode: input', 'mode: output');
+  const code = new Codegen(new ZephyrBackend()).generate(parse(outputYaml));
+  has(code, 'GPIO_OUTPUT_INACTIVE');
+});
+
+// ---------------------------------------------------------------------------
+// ZephyrProjectEmitter — CMakeLists.txt and prj.conf
+// ---------------------------------------------------------------------------
+
+console.log('\n⚡ Testing ZephyrProjectEmitter...\n');
+
+test('ZephyrProjectEmitter: cmake starts with cmake_minimum_required and find_package(Zephyr)', () => {
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.cmake, 'cmake_minimum_required(');
+  has(files.cmake, 'find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})');
+  has(files.cmake, 'project(blink)');
+});
+
+test('ZephyrProjectEmitter: cmake uses target_sources(app PRIVATE src/main.cpp)', () => {
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.cmake, 'target_sources(app PRIVATE');
+  has(files.cmake, 'src/main.cpp');
+});
+
+test('ZephyrProjectEmitter: cmake adds PulseHSM.cpp when machine is declared', () => {
+  const project = parse(SIGNAL_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.cmake, 'PulseHSM.cpp');
+});
+
+test('ZephyrProjectEmitter: cmake omits PulseHSM.cpp for machine-less models', () => {
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  hasNot(files.cmake, 'PulseHSM.cpp');
+});
+
+test('ZephyrProjectEmitter: prj.conf always includes C++ support flags', () => {
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.prjConf, 'CONFIG_CPP=y');
+  has(files.prjConf, 'CONFIG_STD_CPP17=y');
+  has(files.prjConf, 'CONFIG_NEWLIB_LIBC=y');
+});
+
+test('ZephyrProjectEmitter: prj.conf adds CONFIG_GPIO=y for digital_output devices', () => {
+  // BLINK_YAML has a digital_output device.
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.prjConf, 'CONFIG_GPIO=y');
+});
+
+test('ZephyrProjectEmitter: prj.conf adds CONFIG_I2C=y for i2c bus resources', () => {
+  const i2cYaml = `
+pulseir: "1"
+project:
+  name: i2c_test
+  version: "1.0"
+hardware:
+  buses:
+    sensor_bus: { interface: i2c, sda: GPIO21, scl: GPIO22 }
+tasks:
+  poll: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`;
+  const project = parse(i2cYaml);
+  const files = new ZephyrProjectEmitter().generate(project);
+  has(files.prjConf, 'CONFIG_I2C=y');
+});
+
+test('ZephyrProjectEmitter: prj.conf does NOT add GPIO for a model with no gpio/devices', () => {
+  const noGpioYaml = `
+pulseir: "1"
+project:
+  name: no_gpio
+  version: "1.0"
+hardware:
+  buses:
+    serial: { interface: uart, port: 0, baud: 115200 }
+tasks:
+  poll: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`;
+  const project = parse(noGpioYaml);
+  const files = new ZephyrProjectEmitter().generate(project);
+  hasNot(files.prjConf, 'CONFIG_GPIO=y');
+  has(files.prjConf, 'CONFIG_SERIAL=y');
+});
+
+test('ZephyrProjectEmitter: overlay is generated for GPIO bus resources', () => {
+  const project = parse(GPIO_IFACE_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  assert(files.overlay !== undefined, 'overlay must be defined for GPIO hardware');
+  has(files.overlay!, 'zephyr,user');
+  has(files.overlay!, 'btn-gpios');
+  has(files.overlay!, '<&gpio0 2 GPIO_ACTIVE_HIGH>');
+});
+
+test('ZephyrProjectEmitter: overlay is generated for GPIO device components', () => {
+  const project = parse(BLINK_YAML);
+  const files = new ZephyrProjectEmitter().generate(project);
+  assert(files.overlay !== undefined, 'overlay must be defined for digital_output devices');
+  has(files.overlay!, 'led-gpios');
+  has(files.overlay!, '<&gpio0 2 GPIO_ACTIVE_HIGH>');
+});
+
+test('ZephyrProjectEmitter: overlay is undefined for non-GPIO models', () => {
+  const noGpioYaml = `
+pulseir: "1"
+project:
+  name: no_gpio
+  version: "1.0"
+hardware:
+  buses:
+    serial: { interface: uart, port: 0, baud: 115200 }
+tasks:
+  poll: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`;
+  const files = new ZephyrProjectEmitter().generate(parse(noGpioYaml));
+  assert(files.overlay === undefined, 'overlay must be absent when no GPIO is declared');
+});
+
+// ---------------------------------------------------------------------------
+// Zephyr Phase 3: PWM via pwm_dt_spec
+// ---------------------------------------------------------------------------
+
+const PWM_YAML = `
+pulseir: "1"
+project:
+  name: pwm_test
+  version: "1.0"
+
+hardware:
+  devices:
+    motor: { type: pwm_output, pin: GPIO18, channel: 0, frequency: 1000, resolution: 8 }
+
+events:
+  RUN:  { source: external }
+  STOP: { source: external }
+
+actions:
+  spin:  { driver: pwm_control, params: { device: motor, duty: 128 } }
+  brake: { driver: pwm_control, params: { device: motor, duty: 0   } }
+
+machine:
+  states:
+    idle:
+    running:
+  transitions:
+    - from: idle
+      on: RUN
+      to: running
+      do: spin
+    - from: running
+      on: STOP
+      to: idle
+      do: brake
+`;
+
+test('Zephyr: pwm_output device emits pwm_dt_spec global', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, 'struct pwm_dt_spec MOTOR_PWM = PWM_DT_SPEC_GET(DT_PATH(zephyr_user), motor_pwms)');
+});
+
+test('Zephyr: pwm_control action body emits pwm_set_dt()', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, 'pwm_set_dt(&MOTOR_PWM, PWM_HZ(MOTOR_FREQUENCY),');
+});
+
+test('Zephyr: pwm_control duty uses resolution macro for scale', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, '(1u << MOTOR_RESOLUTION) - 1u');
+});
+
+test('Zephyr: pwm_output device also emits gpio_dt_spec fallback for gpio_control', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, 'struct gpio_dt_spec MOTOR_GPIO = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), motor_gpios)');
+});
+
+test('Zephyr: generated code includes <zephyr/drivers/pwm.h>', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, '#include <zephyr/drivers/pwm.h>');
+});
+
+test('ZephyrProjectEmitter: prj.conf adds CONFIG_PWM=y for pwm_output devices', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(PWM_YAML));
+  has(files.prjConf, 'CONFIG_PWM=y');
+});
+
+test('ZephyrProjectEmitter: overlay includes gpio entry for pwm_output device', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(PWM_YAML));
+  assert(files.overlay !== undefined, 'overlay must be defined for pwm_output');
+  has(files.overlay!, 'motor-gpios = <&gpio0 18 GPIO_ACTIVE_HIGH>');
+});
+
+test('ZephyrProjectEmitter: overlay includes pwms entry for pwm_output device', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(PWM_YAML));
+  assert(files.overlay !== undefined, 'overlay must be defined for pwm_output');
+  // frequency 1000 Hz → period_ns = 1_000_000 ns; channel 0.
+  has(files.overlay!, 'motor-pwms = <&pwm0 0 1000000 PWM_POLARITY_NORMAL>');
+});
+
+test('Zephyr: FREQUENCY and RESOLUTION macros are emitted for pwm_output', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(PWM_YAML));
+  has(code, '#define MOTOR_FREQUENCY 1000');
+  has(code, '#define MOTOR_RESOLUTION 8');
+});
+
+test('Zephyr: pwm_output without resolution defaults to 8-bit macro', () => {
+  const noResYaml = PWM_YAML.replace('frequency: 1000, resolution: 8', 'frequency: 1000');
+  const code = new Codegen(new ZephyrBackend()).generate(parse(noResYaml));
+  has(code, '#define MOTOR_RESOLUTION 8');
+});
+
+test('Zephyr: pwm_output without frequency defaults to 5000 Hz macro', () => {
+  const noFreqYaml = PWM_YAML.replace('frequency: 1000, resolution: 8', 'resolution: 8');
+  const code = new Codegen(new ZephyrBackend()).generate(parse(noFreqYaml));
+  has(code, '#define MOTOR_FREQUENCY 5000');
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4: WiFi, MQTT, HTTP (Zephyr)
+// ---------------------------------------------------------------------------
+
+const WIFI_YAML = `
+pulseir: "1"
+project:
+  name: wifi_test
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "MyNetwork" }
+tasks:
+  heartbeat: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`;
+
+const WIFI_MQTT_YAML = `
+pulseir: "1"
+project:
+  name: mqtt_test
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "MyNetwork" }
+    broker: { interface: mqtt, host: "192.168.1.100", port: 1883 }
+tasks:
+  heartbeat: { every: 1000, do: noop }
+actions:
+  noop: { driver: logger }
+`;
+
+const HTTP_ZEPHYR_YAML = `
+pulseir: "1"
+project:
+  name: http_zephyr
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "MyNetwork" }
+tasks:
+  poll: { every: 5000, do: fetch }
+actions:
+  fetch:
+    driver: http_get
+    params:
+      url: "http://api.example.com/data"
+`;
+
+const HTTP_POST_ZEPHYR_YAML = `
+pulseir: "1"
+project:
+  name: http_post_zephyr
+  version: "1.0"
+hardware:
+  buses:
+    uplink: { interface: wifi, ssid: "MyNetwork" }
+tasks:
+  upload: { every: 10000, do: send }
+actions:
+  send:
+    driver: http_post
+    params:
+      url: "http://api.example.com/data"
+      body: '{"v":1}'
+      content_type: "application/json"
+`;
+
+console.log('\n⚡ Testing Phase 4: WiFi, MQTT, HTTP (Zephyr)...\n');
+
+// ── WiFi ─────────────────────────────────────────────────────────────────────
+
+test('Zephyr: WiFi interface emits net_if pointer global', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, 'struct net_if *uplink_iface');
+});
+
+test('Zephyr: WiFi interface emits wifi_connect_req_params struct', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, 'struct wifi_connect_req_params uplink_params');
+});
+
+test('Zephyr: WiFi init calls net_mgmt with NET_REQUEST_WIFI_CONNECT', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, 'net_mgmt(NET_REQUEST_WIFI_CONNECT');
+});
+
+test('Zephyr: WiFi params reference SSID_STR macro for ssid field', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, '.ssid        = (const uint8_t *)UPLINK_SSID_STR');
+});
+
+test('Zephyr: WiFi params set WIFI_SECURITY_TYPE_PSK', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, '.security    = WIFI_SECURITY_TYPE_PSK');
+});
+
+test('Zephyr: WiFi generated code includes <zephyr/net/wifi_mgmt.h>', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, '#include <zephyr/net/wifi_mgmt.h>');
+});
+
+test('Zephyr: WiFi generated code includes <zephyr/net/net_if.h>', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_YAML));
+  has(code, '#include <zephyr/net/net_if.h>');
+});
+
+// ── MQTT ─────────────────────────────────────────────────────────────────────
+
+test('Zephyr: MQTT interface emits ZephyrMqttClient shim class', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'class ZephyrMqttClient');
+});
+
+test('Zephyr: MQTT interface emits static ZephyrMqttClient instance', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'static ZephyrMqttClient broker');
+});
+
+test('Zephyr: MQTT shim wraps struct mqtt_client', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'struct mqtt_client  _client');
+});
+
+test('Zephyr: MQTT shim begin() calls mqtt_client_init', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'mqtt_client_init(&_client)');
+});
+
+test('Zephyr: MQTT shim begin() calls mqtt_connect in connect()', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'mqtt_connect(&_client)');
+});
+
+test('Zephyr: MQTT init calls broker.begin() with HOST and PORT macros', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, 'broker.begin(BROKER_HOST');
+  has(code, 'BROKER_PORT');
+});
+
+test('Zephyr: MQTT generated code includes <zephyr/net/mqtt.h>', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(WIFI_MQTT_YAML));
+  has(code, '#include <zephyr/net/mqtt.h>');
+});
+
+// ── HTTP ─────────────────────────────────────────────────────────────────────
+
+test('Zephyr: http_get action emits struct http_request', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_ZEPHYR_YAML));
+  has(code, 'struct http_request _http_req');
+});
+
+test('Zephyr: http_get action sets HTTP_GET method', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_ZEPHYR_YAML));
+  has(code, '_http_req.method       = HTTP_GET');
+});
+
+test('Zephyr: http_get action sets url from model params', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_ZEPHYR_YAML));
+  has(code, '_http_req.url          = "http://api.example.com/data"');
+});
+
+test('Zephyr: http_get action provides recv_buf', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_ZEPHYR_YAML));
+  has(code, '_http_req.recv_buf     = _http_recv');
+});
+
+test('Zephyr: http_get generated code includes <zephyr/net/http/client.h>', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_ZEPHYR_YAML));
+  has(code, '#include <zephyr/net/http/client.h>');
+});
+
+test('Zephyr: http_post action sets HTTP_POST method', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_POST_ZEPHYR_YAML));
+  has(code, '_http_req.method             = HTTP_POST');
+});
+
+test('Zephyr: http_post action sets body from model params', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_POST_ZEPHYR_YAML));
+  has(code, `static const char _http_body[] = `);
+});
+
+test('Zephyr: http_post action sets content_type_value', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_POST_ZEPHYR_YAML));
+  has(code, '_http_req.content_type_value = "application/json"');
+});
+
+test('Zephyr: http_post action sets payload and payload_len', () => {
+  const code = new Codegen(new ZephyrBackend()).generate(parse(HTTP_POST_ZEPHYR_YAML));
+  has(code, '_http_req.payload            = _http_body');
+  has(code, '_http_req.payload_len        = sizeof(_http_body) - 1');
+});
+
+// ── prj.conf: CONFIG_HTTP_CLIENT ─────────────────────────────────────────────
+
+test('ZephyrProjectEmitter: prj.conf adds CONFIG_HTTP_CLIENT=y when http_get is declared', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(HTTP_ZEPHYR_YAML));
+  has(files.prjConf, 'CONFIG_HTTP_CLIENT=y');
+});
+
+test('ZephyrProjectEmitter: prj.conf adds CONFIG_HTTP_CLIENT=y when http_post is declared', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(HTTP_POST_ZEPHYR_YAML));
+  has(files.prjConf, 'CONFIG_HTTP_CLIENT=y');
+});
+
+test('ZephyrProjectEmitter: prj.conf does NOT add CONFIG_HTTP_CLIENT when no HTTP actions', () => {
+  const files = new ZephyrProjectEmitter().generate(parse(WIFI_YAML));
+  hasNot(files.prjConf, 'CONFIG_HTTP_CLIENT=y');
 });
 
 // ---------------------------------------------------------------------------

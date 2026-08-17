@@ -36,6 +36,8 @@ export interface InterfaceEmission {
   libraries: ImpliedLibrary[];
   /** Anything the user must finish themselves. */
   todos: string[];
+  /** Statements to call every loop() iteration (e.g. ArduinoOTA.handle()). */
+  loop?: string[];
 }
 
 /**
@@ -73,6 +75,7 @@ const CONSUMED_KEYS: Record<string, string[]> = {
   mqtt: ['tls'],
   littlefs: ['format_on_fail'],
   adc: ['unit', 'conversion'],
+  ota: ['hostname', 'port'],
 };
 
 /** Binding keys each interface understands; anything else is documented only. */
@@ -92,6 +95,7 @@ const KNOWN_KEYS: Record<string, string[]> = {
   ethernet: ['cs', 'mac'],
   ble: ['name', 'service'],
   mqtt: ['host', 'port', 'prefix', 'tls', 'username', 'password', 'client_id'],
+  ota: ['hostname', 'port', 'password'],
   custom: [],
 };
 
@@ -355,6 +359,37 @@ export class InterfaceBackend {
           '#else',
           `  // TODO: ${resource.name}: add your CAN library initialization here (e.g. MCP2515).`,
           '#endif',
+        );
+        break;
+      }
+
+      case 'ota': {
+        // ArduinoOTA is bundled with the ESP32 and ESP8266 Arduino cores.
+        // Requires: ArduinoOTA — install via Boards Manager (included in esp32/esp8266 core)
+        out.libraries.push(BUILTIN('ArduinoOTA', 'ArduinoOTA.h', 'OTA firmware updates'));
+        const hostname = binding.hostname as string | undefined;
+        const port     = binding.port !== undefined ? Number(binding.port) : undefined;
+        const initLines: string[] = [
+          '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+        ];
+        if (hostname) initLines.push(`  ArduinoOTA.setHostname(${JSON.stringify(hostname)});`);
+        if (port !== undefined) initLines.push(`  ArduinoOTA.setPort(${port});`);
+        // password is caught by SECRET_KEY above and emitted as a TODO; the
+        // user fills it in before ArduinoOTA.begin().
+        initLines.push(
+          '  ArduinoOTA.begin();',
+          '#else',
+          `  // TODO: ${resource.name}: ArduinoOTA is only available on ESP32/ESP8266.`,
+          '#endif',
+        );
+        out.init.push(...initLines);
+        out.loop = [
+          '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+          '  ArduinoOTA.handle();',
+          '#endif',
+        ];
+        out.todos.push(
+          `${resource.name}: WiFi must be connected before ArduinoOTA.begin() runs`
         );
         break;
       }

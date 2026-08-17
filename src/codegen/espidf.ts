@@ -84,6 +84,8 @@ export class EspIdfBackend implements PlatformBackend {
 
   nowExpr(): string   { return '(esp_timer_get_time() / 1000LL)'; }
   timestampType(): string { return 'int64_t'; }
+  durationLiteral(ms: number): string { return `INT64_C(${ms})`; }
+  gpioPinVar(sym: string): string { return `${sym}_PIN`; }
 
   consoleStreamName(port: number): string {
     return port === 0 ? 'UART_NUM_0' : `UART_NUM_${port}`;
@@ -141,6 +143,41 @@ export class EspIdfBackend implements PlatformBackend {
     return [
       `  ledc_set_duty(LEDC_HIGH_SPEED_MODE, (ledc_channel_t)(${channel}), (uint32_t)(${duty}));`,
       `  ledc_update_duty(LEDC_HIGH_SPEED_MODE, (ledc_channel_t)(${channel}));`,
+    ].join('\n');
+  }
+
+  pwmWriteLines(sym: string, _freqMacro: string, _resMacro: string, dutyExpr: string, board: string): string {
+    return this.ledcWriteLines(`${sym}_PIN`, `${sym}_CHANNEL`, dutyExpr, board);
+  }
+
+  httpGetLines(url: string, _board: string): string {
+    return [
+      '  // Requires: esp_http_client (CONFIG_ESP_HTTP_CLIENT_ENABLE=y in sdkconfig)',
+      '  {',
+      '    esp_http_client_config_t _cfg = {};',
+      `    _cfg.url = ${url};`,
+      '    esp_http_client_handle_t _client = esp_http_client_init(&_cfg);',
+      '    esp_http_client_perform(_client);',
+      '    esp_http_client_cleanup(_client);',
+      '  }',
+      '  (void)ctx;',
+    ].join('\n');
+  }
+
+  httpPostLines(url: string, body: string, contentType: string, _board: string): string {
+    return [
+      '  // Requires: esp_http_client (CONFIG_ESP_HTTP_CLIENT_ENABLE=y in sdkconfig)',
+      '  {',
+      '    esp_http_client_config_t _cfg = {};',
+      `    _cfg.url    = ${url};`,
+      '    _cfg.method = HTTP_METHOD_POST;',
+      '    esp_http_client_handle_t _client = esp_http_client_init(&_cfg);',
+      `    esp_http_client_set_header(_client, "Content-Type", ${contentType});`,
+      `    esp_http_client_set_post_field(_client, ${body}, (int)strlen(${body}));`,
+      '    esp_http_client_perform(_client);',
+      '    esp_http_client_cleanup(_client);',
+      '  }',
+      '  (void)ctx;',
     ].join('\n');
   }
 

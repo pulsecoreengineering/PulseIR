@@ -1733,6 +1733,82 @@ tasks:
   tick: { every: 1000, do: read_time }`
   },
 
+  // ── Power / connectivity ─────────────────────────────────────────────────
+  { group: 'Device', label: 'Deep sleep  (ESP32 power-down)',
+    yaml:
+`# Uses the ESP32 Arduino core sleep API — no extra library needed.
+events:
+  wake_up: { source: external }
+
+hardware:
+  devices:
+    wake_btn: { type: digital_input, pin: GPIO0 }
+
+actions:
+  go_to_sleep:
+    driver: sleep_control
+    params:
+      mode: deep_sleep
+      duration_ms: 30000   # wake after 30 s, or on GPIO0 LOW
+      wake_pin: GPIO0
+      wake_level: 0
+
+machine:
+  states:
+    awake:
+    sleeping:
+      entry: go_to_sleep
+  transitions:
+    - { from: awake,    on: wake_up, to: sleeping }
+    - { from: sleeping, on: wake_up, to: awake }`
+  },
+  { group: 'Device', label: 'OTA update  (ArduinoOTA over Wi-Fi)',
+    yaml:
+`# Requires: ArduinoOTA — bundled with the ESP32/ESP8266 Arduino core.
+# WiFi must be connected before ArduinoOTA.begin() runs.
+hardware:
+  buses:
+    net:
+      interface: wifi
+      ssid: \${WIFI_SSID}
+      password: \${WIFI_PASSWORD}
+    updater:
+      interface: ota
+      hostname: "my-esp32"
+      port: 3232
+
+tasks:
+  heartbeat: { every: 1000, do: blink_led }`
+  },
+  { group: 'Device', label: 'HTTP GET / POST  (ESP32/ESP8266)',
+    yaml:
+`# Requires: HTTPClient — bundled with the ESP32/ESP8266 Arduino core.
+hardware:
+  buses:
+    net:
+      interface: wifi
+      ssid: \${WIFI_SSID}
+      password: \${WIFI_PASSWORD}
+
+events:
+  data_ready: { source: external }
+
+actions:
+  fetch_sensor:
+    driver: http_get
+    params:
+      url: "http://api.example.com/sensor/1"
+  post_reading:
+    driver: http_post
+    params:
+      url: "http://api.example.com/readings"
+      body: '{"value":42}'
+      content_type: "application/json"
+
+tasks:
+  poll: { every: 10000, do: fetch_sensor }`
+  },
+
   // ── Logic ────────────────────────────────────────────────────────────────
   { group: 'Logic', label: 'Parameter  (tunable value)',
     yaml:
