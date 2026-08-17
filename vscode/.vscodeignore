@@ -1,0 +1,11 @@
+**/.git/**
+**/.gitignore
+**/node_modules/**
+**/tsconfig.json
+client/src/**
+server/src/**
+build.mjs
+**/*.map
+**/*.ts
+!**/*.d.ts
+images/

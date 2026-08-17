@@ -1,0 +1,86 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "PulseIR",
+  "scopeName": "source.pulseir",
+  "fileTypes": [],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#section-key" },
+    { "include": "#field-key" },
+    { "include": "#device-type-value" },
+    { "include": "#driver-value" },
+    { "include": "#interface-type-value" },
+    { "include": "#target-value" },
+    { "include": "#boolean-value" },
+    { "include": "#null-value" },
+    { "include": "#number-value" },
+    { "include": "#double-quoted-string" },
+    { "include": "#single-quoted-string" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "(?<!['\"])#.*$",
+      "name": "comment.line.number-sign.pulseir"
+    },
+    "section-key": {
+      "match": "^(pulseir|project|hardware|buses|devices|machine|system|parameters|events|actions|states|transitions|tasks|commands|imports|resources|communication|telemetry|safety|diagnostics|interfaces)\\s*(:)",
+      "captures": {
+        "1": { "name": "keyword.control.section.pulseir" },
+        "2": { "name": "punctuation.separator.key-value.pulseir" }
+      }
+    },
+    "field-key": {
+      "match": "^[ \\t]+(name|version|description|author|board|verbose|target|type|class|bus|driver|params|unit|conversion|pin|channel|sda|scl|miso|mosi|sck|cs|address|mode|speed|port|baud|frequency|resolution|bits|host|ssid|password|prefix|topic|size|format_on_fail|initial|entry|exit|from|on|to|do|guard|after|log|every|condition|default|source|map|min|max|range|value|interface|raises|severity|rule|threshold|publish|subscribe|format|namespace|interval|timeout|retries|initial_state|goto|setup|loop|label|alias)\\s*(:)",
+      "captures": {
+        "1": { "name": "support.type.property-name.pulseir" },
+        "2": { "name": "punctuation.separator.key-value.pulseir" }
+      }
+    },
+    "device-type-value": {
+      "match": "(?<=type:\\s*)(digital_output|digital_input|pwm_output|pwm_input|analog_input|i2c_sensor|spi_sensor|onewire_sensor|uart_device)",
+      "name": "support.class.device-type.pulseir"
+    },
+    "driver-value": {
+      "match": "(?<=driver:\\s*)(gpio_control|pwm_control|adc_read|i2c_sensor|spi_sensor|gpio_interrupt|display_text|display_clear|display_draw|sleep_control|http_get|http_post|uart_write|uart_read|can_send|ota)",
+      "name": "support.function.driver.pulseir"
+    },
+    "interface-type-value": {
+      "match": "(?<=interface:\\s*)(uart|i2c|spi|wifi|mqtt|ble|can|ethernet|ota|oled|lcd|tft|onewire|serial|storage)",
+      "name": "support.class.interface-type.pulseir"
+    },
+    "target-value": {
+      "match": "(?<=(?:board|target):\\s*)(arduino|espidf|zephyr|micropython|esp32|esp32s3|esp32s2|esp32c3|esp32h2|arduino_uno|arduino_mega|arduino_nano|rp2040_pico|pico)",
+      "name": "support.constant.target.pulseir"
+    },
+    "boolean-value": {
+      "match": "(?<=:\\s*)\\b(true|false|yes|no)\\b",
+      "name": "constant.language.boolean.pulseir"
+    },
+    "null-value": {
+      "match": "(?<=:\\s*)\\b(null|~)\\b",
+      "name": "constant.language.null.pulseir"
+    },
+    "number-value": {
+      "match": "(?<=:\\s*)(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)\\b",
+      "captures": {
+        "1": { "name": "constant.numeric.pulseir" }
+      }
+    },
+    "double-quoted-string": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.pulseir",
+      "patterns": [
+        {
+          "match": "\\\\.",
+          "name": "constant.character.escape.pulseir"
+        }
+      ]
+    },
+    "single-quoted-string": {
+      "begin": "'",
+      "end": "'",
+      "name": "string.quoted.single.pulseir"
+    }
+  }
+}
