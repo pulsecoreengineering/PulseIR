@@ -5531,10 +5531,21 @@ ${body}
       const headerName = `${base}_generated.h`;
       const guardName = "src/guards.cpp";
       const actionName = "src/actions.cpp";
+      const userLibs = project.system.libraries ?? [];
+      const userLibNames = new Set(userLibs.map((l) => l.name));
+      const userLibDeps = userLibs.map((lib) => {
+        if (lib.source === "git" && lib.url)
+          return lib.url;
+        if (lib.version)
+          return `${lib.name}@${lib.version}`;
+        return lib.name;
+      });
+      const impliedLibDeps = Array.from(this.libraries.values()).filter((l) => l.source === "registry" && !userLibNames.has(l.name)).sort((a, b) => a.name.localeCompare(b.name)).map((l) => l.name);
       return {
         // Only a project with a state machine needs the runtime, the header that
         // sizes it, or a place to put guards - guards live on transitions.
         needsRuntime: this.hasMachine,
+        libDeps: [...userLibDeps, ...impliedLibDeps],
         generated: [
           ...this.hasMachine ? [{ path: "PulseHSM_config.h", contents: this.generateConfigHeader() }] : [],
           { path: headerName, contents: this.composeHeader(headerName) },
@@ -10977,7 +10988,7 @@ ${entry}
     }
     download(`${folder}.zip`, zip(entries), "application/zip");
   }
-  function generatePlatformioIni(project) {
+  function generatePlatformioIni(project, generatedProject) {
     const board = project.target?.board ?? "";
     const BOARD_MAP = {
       esp32: ["espressif32", "esp32dev"],
@@ -10992,14 +11003,7 @@ ${entry}
       teensy41: ["teensy", "teensy41"]
     };
     const [platform, boardId] = BOARD_MAP[board] ?? ["# unknown platform", board || "# set board in target:"];
-    const libs = project.system.libraries ?? [];
-    const libDeps = libs.map((lib) => {
-      if (lib.source === "git" && lib.url)
-        return lib.url;
-      if (lib.version)
-        return `${lib.name}@${lib.version}`;
-      return lib.name;
-    });
+    const { libDeps } = generatedProject;
     const libSection = libDeps.length > 0 ? `lib_deps =
 ${libDeps.map((l) => `    ${l}`).join("\n")}` : "# lib_deps =";
     return `[env:${boardId}]
@@ -11023,7 +11027,7 @@ ${libSection}
         entries[`${folder}/src/${name}`] = contents;
       }
     }
-    entries[`${folder}/platformio.ini`] = generatePlatformioIni(project);
+    entries[`${folder}/platformio.ini`] = generatePlatformioIni(project, generatedProject);
     for (const file of generatedProject.generated) {
       const dest = file.path === "PulseHSM_config.h" ? `${folder}/include/${file.path}` : `${folder}/src/${file.path}`;
       entries[dest] = file.contents;
@@ -11717,7 +11721,7 @@ machine:
       closeDownloadMenu();
       if (!current)
         return;
-      download("platformio.ini", generatePlatformioIni(current.project), "text/plain");
+      download("platformio.ini", generatePlatformioIni(current.project, current.generatedProject), "text/plain");
     });
     source.addEventListener("keydown", (event) => {
       const { selectionStart, selectionEnd, value } = source;
