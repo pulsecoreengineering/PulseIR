@@ -1094,13 +1094,21 @@ SystemSensors systemSensors = {};`;
       c => String(c.class) === 'sensor'
     );
 
-    const fields = sensors.length > 0
-      ? sensors
-          .map(c => {
-            const unitNote = c.config?.unit ? `, unit: ${c.config.unit}` : '';
-            return `  float ${this.sanitize(c.name)};  // driver: ${c.driver}${unitNote}`;
-          })
-          .join('\n')
+    const fieldLines: string[] = [];
+    for (const c of sensors) {
+      if (c.channels?.length) {
+        // Multi-channel device: one field per channel, labeled with the device driver.
+        for (const ch of c.channels) {
+          fieldLines.push(`  float ${this.sanitize(ch.name)};  // ${c.driver}.${ch.measure ?? ch.name}`);
+        }
+      } else {
+        const unitNote = c.config?.unit ? `, unit: ${c.config.unit}` : '';
+        fieldLines.push(`  float ${this.sanitize(c.name)};  // driver: ${c.driver}${unitNote}`);
+      }
+    }
+
+    const fields = fieldLines.length > 0
+      ? fieldLines.join('\n')
       : '  // TODO: Add your sensor readings here (e.g. float temperature;)';
 
     return `// ============================================================================
@@ -2125,7 +2133,19 @@ static void pollCommands() {
         const deviceName = String(params.device ?? '');
         const component  = (this.project.system.components || []).find(c => c.name === deviceName);
         if (component && this.isSensorComponent(deviceName)) {
-          const objVar  = this.sanitize(deviceName);
+          const objVar = this.sanitize(deviceName);
+          if (component.channels?.length) {
+            // Multi-channel: read both temperature and humidity in one action call.
+            const lines = component.channels.map(ch => {
+              const field   = `systemSensors.${this.sanitize(ch.name)}`;
+              const measure = ch.measure ?? ch.name;
+              const readCall = measure === 'humidity'
+                ? `${objVar}.readHumidity()`
+                : `${objVar}.readTemperature()`;
+              return `  ${field} = ${readCall};\n  if (isnan(${field})) { /* read failed */ }`;
+            });
+            return lines.join('\n') + '\n  (void)ctx;';
+          }
           const field   = `systemSensors.${objVar}`;
           const measure = String(component.config?.measure ?? 'temperature');
           const readCall = measure === 'humidity'
@@ -2140,7 +2160,22 @@ static void pollCommands() {
         const deviceName = String(params.device ?? '');
         const component  = (this.project.system.components || []).find(c => c.name === deviceName);
         if (component && this.isSensorComponent(deviceName)) {
-          const objVar  = this.sanitize(deviceName);
+          const objVar = this.sanitize(deviceName);
+          if (component.channels?.length) {
+            // Multi-channel: read every declared channel in one action.
+            const lines = component.channels.map(ch => {
+              const field = `systemSensors.${this.sanitize(ch.name)}`;
+              const measure = ch.measure ?? ch.name;
+              let readCall: string;
+              switch (measure) {
+                case 'humidity': readCall = `${objVar}.readHumidity()`; break;
+                case 'pressure': readCall = `${objVar}.readPressure() / 100.0F`; break;
+                default:         readCall = `${objVar}.readTemperature()`; break;
+              }
+              return `  ${field} = ${readCall};`;
+            });
+            return lines.join('\n') + '\n  (void)ctx;';
+          }
           const field   = `systemSensors.${objVar}`;
           const measure = String(component.config?.measure ?? 'temperature');
           let readCall: string;
@@ -2154,19 +2189,44 @@ static void pollCommands() {
         break;
       }
 
+      case 'lcd_display':
       case 'lcd_print': {
         const deviceName = String(params.device ?? '');
         const device = (this.project.system.components || []).find(c => c.name === deviceName);
         if (!device) break;
-        const objVar = this.sanitize(deviceName);
-        const col = params.col ?? 0;
-        const row = params.row ?? 0;
-        return [
-          `  ${objVar}.setCursor(${col}, ${row});`,
-          `  // ${objVar}.print("your text");        // literal string`,
-          `  // ${objVar}.print(systemSensors.value); // sensor reading`,
-          `  (void)ctx;`,
-        ].join('\n');
+        const objVar  = this.sanitize(deviceName);
+        const bufSize = (typeof device.config?.cols === 'number' ? device.config.cols : 16) + 1;
+        const lines: string[] = [];
+
+        if (params.clear) lines.push(`  ${objVar}.clear();`);
+
+        if (params.lines !== undefined) {
+          // Multi-line form: lines: ["...", {row, col, format}, ...]
+          const rawLines = Array.isArray(params.lines) ? params.lines : [];
+          rawLines.forEach((item, idx) => {
+            const row = (typeof item === 'object' && item && !Array.isArray(item) ? (item as Record<string, unknown>).row : undefined) ?? idx;
+            const col = (typeof item === 'object' && item && !Array.isArray(item) ? (item as Record<string, unknown>).col : undefined) ?? 0;
+            const fmt = typeof item === 'string' ? item : (typeof (item as Record<string, unknown>).format === 'string' ? (item as Record<string, unknown>).format as string : undefined);
+            lines.push(...this.renderLcdLine(String(fmt ?? ''), Number(row), Number(col), objVar, bufSize));
+          });
+        } else if (typeof params.format === 'string') {
+          // Single-line form: format, row, col
+          const row = params.row ?? 0;
+          const col = params.col ?? 0;
+          lines.push(...this.renderLcdLine(params.format, Number(row), Number(col), objVar, bufSize));
+        } else {
+          // No format — legacy stub
+          const col = params.col ?? 0;
+          const row = params.row ?? 0;
+          lines.push(
+            `  ${objVar}.setCursor(${col}, ${row});`,
+            `  // ${objVar}.print("your text");        // literal string`,
+            `  // ${objVar}.print(systemSensors.value); // sensor reading`,
+          );
+        }
+
+        lines.push('  (void)ctx;');
+        return lines.join('\n');
       }
 
       case 'lcd_clear': {
@@ -2198,14 +2258,31 @@ static void pollCommands() {
 
       case 'rtc_read': {
         const deviceName = String(params.device ?? '');
-        const device = (this.project.system.components || []).find(c => c.name === deviceName);
-        if (!device) break;
+        const component = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (!component) break;
         const objVar = this.sanitize(deviceName);
-        return [
-          `  // DateTime now = ${objVar}.now();`,
-          `  // systemSensors.timestamp = (float)now.unixtime();  // Unix seconds`,
-          `  (void)ctx;`,
-        ].join('\n');
+        const channels = component.channels ?? [];
+        if (channels.length === 0) break;  // no channels declared → leave as stub
+
+        const lines: string[] = [`  DateTime _now = ${objVar}.now();`];
+        for (const ch of channels) {
+          const field = `systemSensors.${this.sanitize(ch.name)}`;
+          const measure = ch.measure ?? ch.name;
+          let readExpr: string;
+          switch (measure) {
+            case 'hour':       readExpr = '_now.hour()'; break;
+            case 'minute':     readExpr = '_now.minute()'; break;
+            case 'second':     readExpr = '_now.second()'; break;
+            case 'day':        readExpr = '_now.day()'; break;
+            case 'month':      readExpr = '_now.month()'; break;
+            case 'year':       readExpr = '_now.year()'; break;
+            case 'dayOfWeek':  readExpr = '_now.dayOfTheWeek()'; break;
+            default:           readExpr = `_now.${measure}()`; break;
+          }
+          lines.push(`  ${field} = (float)${readExpr};`);
+        }
+        lines.push('  (void)ctx;');
+        return lines.join('\n');
       }
 
       case 'pwm_control': {
@@ -2506,9 +2583,17 @@ ${reads.join('\n')}
           return { event, seg: this.topicSegment(item.topic ?? item.event!) };
         });
     } else {
-      sensorWires = allComponents
-        .filter(c => String(c.class) === 'sensor')
-        .map(c => ({ name: c.name, seg: this.topicSegment(c.name) }));
+      sensorWires = [];
+      for (const c of allComponents.filter(c => String(c.class) === 'sensor')) {
+        if (c.channels?.length) {
+          // Multi-channel device: publish each channel under its own topic.
+          for (const ch of c.channels) {
+            sensorWires.push({ name: ch.name, seg: this.topicSegment(ch.name) });
+          }
+        } else {
+          sensorWires.push({ name: c.name, seg: this.topicSegment(c.name) });
+        }
+      }
       paramWires = allParameters.map(p => ({ parameter: p, seg: this.topicSegment(p.name) }));
       eventWires = allEvents
         .filter(e => String(e.source) === 'mqtt')
@@ -3572,6 +3657,61 @@ ${implementations.join('\n\n')}`;
 
   private sanitizeUpper(name: string): string {
     return this.sanitize(name).toUpperCase();
+  }
+
+  /** True when channelName comes from an RTC device (values are integers, not floats). */
+  private isRtcChannel(channelName: string): boolean {
+    for (const c of this.project.system.components ?? []) {
+      if (c.driver !== 'rtc_read') continue;
+      if (c.channels?.some(ch => ch.name === channelName)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Convert an lcd format template (e.g. "{hour}:{minute}:{second}") into the
+   * lines of code that write it to the display.
+   *
+   * RTC channels use %02d + (int) cast; other sensors use %.1f.
+   * A literal % in the template is doubled for snprintf.
+   * If the template has no {name} refs, print() is used directly.
+   */
+  private renderLcdLine(fmt: string, row: number, col: number, objVar: string, bufSize: number): string[] {
+    const refs: string[] = [];
+    // Collect refs to decide whether snprintf is needed.
+    const refPattern = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+    let m: RegExpExecArray | null;
+    // eslint-disable-next-line no-cond-assign
+    while ((m = refPattern.exec(fmt)) !== null) refs.push(m[1]);
+
+    const setCursor = `  ${objVar}.setCursor(${col}, ${row});`;
+
+    if (refs.length === 0) {
+      // Pure literal — no snprintf needed.
+      const escaped = fmt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      return [setCursor, `  ${objVar}.print("${escaped}");`];
+    }
+
+    // Build the snprintf format string and argument list.
+    const snprintfFmt = fmt
+      .replace(/%/g, '%%')   // escape literal % before we add our own
+      .replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => {
+        return this.isRtcChannel(name) ? '%02d' : '%.1f';
+      });
+
+    const args = refs.map(name =>
+      this.isRtcChannel(name)
+        ? `(int)systemSensors.${this.sanitize(name)}`
+        : `systemSensors.${this.sanitize(name)}`
+    );
+
+    const escaped = snprintfFmt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return [
+      `  char _lcd_buf[${bufSize}];`,
+      `  snprintf(_lcd_buf, sizeof(_lcd_buf), "${escaped}", ${args.join(', ')});`,
+      setCursor,
+      `  ${objVar}.print(_lcd_buf);`,
+    ];
   }
 }
 

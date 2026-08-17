@@ -101,8 +101,9 @@ const BUILTIN_DEVICE_TYPES: Record<string, { class: string; driver: string }> = 
   // Display and peripheral devices.
   lcd_i2c:        { class: 'actuator', driver: 'lcd_print' },
   oled_i2c:       { class: 'actuator', driver: 'oled_print' },
-  ds3231:         { class: 'service',  driver: 'rtc_read' },
-  ds1307:         { class: 'service',  driver: 'rtc_read' },
+  // RTC modules expose time channels into systemSensors.
+  ds3231:         { class: 'sensor',   driver: 'rtc_read' },
+  ds1307:         { class: 'sensor',   driver: 'rtc_read' },
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -530,7 +531,7 @@ export class Parser {
     this.assertTimedTransitions(transitions, parameters || []);
     this.assertPeriodicTransitions(transitions, parameters || []);
     this.assertTaskIntervals(tasks, parameters || []);
-    this.assertLogRefs(tasks, commands, parameters || [], components || []);
+    this.assertLogRefs(tasks, commands, parameters || [], components || [], actionCatalogue);
     this.assertUsable(states, tasks, commands);
 
     // Buses and devices generate macros from the same name, so a collision
@@ -1204,9 +1205,17 @@ export class Parser {
       );
     }
 
-    const sensorNames = new Set(
-      components.filter(c => String(c.class) === 'sensor').map(c => c.name)
-    );
+    // Valid sensor references include single-value device names AND channel names
+    // from multi-channel devices.
+    const sensorNames = new Set<string>();
+    for (const c of components) {
+      if (String(c.class) !== 'sensor') continue;
+      if (c.channels?.length) {
+        for (const ch of c.channels) sensorNames.add(ch.name);
+      } else {
+        sensorNames.add(c.name);
+      }
+    }
 
     const channels: TelemetryChannel[] = Object.entries(rawChannels as Record<string, unknown>).map(
       ([sensor, def]) => {
@@ -1255,9 +1264,15 @@ export class Parser {
       throw new ParseError('communication: must be a mapping (publish:, subscribe:)');
     }
 
-    const sensorNames = new Set(
-      components.filter(c => String(c.class) === 'sensor').map(c => c.name)
-    );
+    const sensorNames = new Set<string>();
+    for (const c of components) {
+      if (String(c.class) !== 'sensor') continue;
+      if (c.channels?.length) {
+        for (const ch of c.channels) sensorNames.add(ch.name);
+      } else {
+        sensorNames.add(c.name);
+      }
+    }
     const paramNames  = new Set(parameters.map(p => p.name));
     const eventNames  = new Set(events.map(e => e.name));
 
@@ -1519,7 +1534,12 @@ export class Parser {
     return entries.map(([name, def]) => {
       const type = def.type as string;
       if (!type) {
-        throw new ParseError(`Device "${name}" has no "type"`);
+        throw new ParseError(
+          `Device "${name}" has no "type". Every device must declare what it is:\n` +
+          `  hardware:\n    devices:\n      ${name}:\n        type: dht22   # or another type\n\n` +
+          `Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(', ')}.\n` +
+          `For custom hardware, also add: class: sensor  # or actuator, service`
+        );
       }
 
       const builtin = BUILTIN_DEVICE_TYPES[type];
@@ -1534,18 +1554,99 @@ export class Parser {
         );
       }
 
-      const { type: _t, class: _c, bus, description, ...config } = def;
+      const { type: _t, class: _c, bus, description, channels: rawChannels, ...config } = def;
+
+      const channels = this.parseSensorChannels(rawChannels, name);
+
+      // A multi-channel device must be a sensor — channels only apply to sensors.
+      if (channels && (declaredClass ?? builtin?.class) !== 'sensor') {
+        throw new ParseError(
+          `Device "${name}" declares "channels" but is not a sensor. ` +
+          `Channels are only valid on sensor devices (class: sensor).`
+        );
+      }
+
+      const resolvedDriver = (def.driver as string) || builtin?.driver || type;
+
+      // RTC devices get a default channel set when the user doesn't declare any.
+      // The common case (hour/minute/second) is auto-populated; the user can
+      // override with an explicit channels: list to add day, month, year, etc.
+      let resolvedChannels = channels;
+      if (!resolvedChannels && resolvedDriver === 'rtc_read') {
+        resolvedChannels = [
+          { name: 'hour' },
+          { name: 'minute' },
+          { name: 'second' },
+        ];
+      }
 
       return {
         name,
         class: (declaredClass || builtin.class) as any,
-        driver: (def.driver as string) || builtin?.driver || type,
+        driver: resolvedDriver,
         type,
         bus: bus as string | undefined,
         config: Object.keys(config).length > 0 ? config : undefined,
+        channels: resolvedChannels,
         description: description as string | undefined,
       };
     });
+  }
+
+  /**
+   * Parse the optional `channels:` field on a device.
+   *
+   * Accepts two forms:
+   *   channels: [temperature, humidity]          # list of bare names
+   *   channels:                                  # map of name to config
+   *     temperature:
+   *     humidity:
+   *       description: Relative humidity %
+   */
+  private parseSensorChannels(raw: unknown, deviceName: string): import('../model/types.js').SensorChannel[] | undefined {
+    if (raw === undefined || raw === null) return undefined;
+
+    // List form: [temperature, humidity]
+    if (Array.isArray(raw)) {
+      return raw.map((entry, i) => {
+        if (typeof entry !== 'string' || !entry.trim()) {
+          throw new ParseError(
+            `Device "${deviceName}" channels[${i}] must be a string name`
+          );
+        }
+        const n = entry.trim();
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n)) {
+          throw new ParseError(
+            `Device "${deviceName}" channel name "${n}" is not a valid C identifier`
+          );
+        }
+        return { name: n };
+      });
+    }
+
+    // Map form: { temperature: {}, humidity: { description: '...' } }
+    if (isPlainObject(raw)) {
+      return Object.entries(raw as Record<string, unknown>).map(([chName, chDef]) => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(chName)) {
+          throw new ParseError(
+            `Device "${deviceName}" channel name "${chName}" is not a valid C identifier`
+          );
+        }
+        const ch: import('../model/types.js').SensorChannel = { name: chName };
+        if (chDef !== null && isPlainObject(chDef)) {
+          const d = chDef as Record<string, unknown>;
+          if (d.measure !== undefined) ch.measure = String(d.measure);
+          if (d.description !== undefined) ch.description = String(d.description);
+          const { measure: _m, description: _d, ...extra } = d;
+          if (Object.keys(extra).length > 0) ch.config = extra;
+        }
+        return ch;
+      });
+    }
+
+    throw new ParseError(
+      `Device "${deviceName}" channels must be a list or a map, got ${typeof raw}`
+    );
   }
 
   private assertKnownInterface(name: string, iface: string): void {
@@ -1952,12 +2053,19 @@ export class Parser {
     tasks: Task[],
     commands: CommandSet | undefined,
     parameters: Parameter[],
-    components: Component[]
+    components: Component[],
+    actions?: Map<string, Action>
   ): void {
     const known = new Map<string, string>();
     for (const parameter of parameters) known.set(parameter.name, 'parameter');
     for (const device of components) {
-      if (device.class === 'sensor') known.set(device.name, 'sensor');
+      if (device.class !== 'sensor') continue;
+      if (device.channels?.length) {
+        // Multi-channel device: log templates reference channel names, not the device name.
+        for (const ch of device.channels) known.set(ch.name, `sensor channel (${device.name})`);
+      } else {
+        known.set(device.name, 'sensor');
+      }
     }
 
     const check = (template: string | undefined, where: string) => {
@@ -1977,6 +2085,25 @@ export class Parser {
     for (const task of tasks) check(task.log, `Task "${task.name}"`);
     for (const command of commands?.commands || []) {
       check(command.log, `Command "${command.match}"`);
+    }
+
+    // Validate {name} refs in lcd_display / lcd_print action format strings.
+    if (actions) {
+      for (const [actionName, action] of actions) {
+        if (action.driver !== 'lcd_display' && action.driver !== 'lcd_print') continue;
+        const params = action.params ?? {};
+        const checkFmt = (fmt: unknown, hint: string) => {
+          if (typeof fmt !== 'string') return;
+          check(fmt, `Action "${actionName}" ${hint}`);
+        };
+        checkFmt(params.format, 'display format');
+        if (Array.isArray(params.lines)) {
+          params.lines.forEach((line, i) => {
+            if (typeof line === 'string') checkFmt(line, `display line ${i}`);
+            else if (isPlainObject(line)) checkFmt(line.format, `display line ${i}`);
+          });
+        }
+      }
     }
   }
 

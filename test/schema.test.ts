@@ -315,6 +315,214 @@ system: {name: l, events: [], states: [{name: idle, type: simple}], transitions:
 });
 
 // ============================================================================
+// Multi-channel sensor devices
+// ============================================================================
+
+test('"no type" error message lists built-in types and shows a fix hint', () => {
+  let caught = '';
+  try {
+    parse(`${HEAD}
+hardware:
+  devices:
+    air_temp:
+      bus: some_bus
+machine: {states: {idle: {}}, transitions: []}
+`);
+  } catch (e) {
+    caught = e instanceof Error ? e.message : String(e);
+  }
+  assert(caught.includes('has no "type"'), 'mentions missing type');
+  assert(caught.includes('dht22'), 'lists at least one built-in type');
+  assert(caught.includes('class: sensor'), 'hints at explicit class');
+});
+
+test('channels: list form — dht22 with two channels parses correctly', () => {
+  const project = parse(`${HEAD}
+hardware:
+  devices:
+    weather:
+      type: dht22
+      pin: 4
+      channels:
+        - temperature
+        - humidity
+machine: {states: {idle: {}}, transitions: []}
+`);
+  const c = project.system.components!.find(x => x.name === 'weather')!;
+  equal(c.channels?.length, 2, 'two channels');
+  equal(c.channels![0].name, 'temperature', 'first channel name');
+  equal(c.channels![1].name, 'humidity', 'second channel name');
+});
+
+test('channels: map form — bme280 with three channels parses correctly', () => {
+  const project = parse(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    env:
+      type: bme280
+      bus: i2c_bus
+      channels:
+        temperature:
+          description: Celsius
+        humidity:
+        pressure:
+          measure: pressure
+machine: {states: {idle: {}}, transitions: []}
+`);
+  const c = project.system.components!.find(x => x.name === 'env')!;
+  equal(c.channels?.length, 3, 'three channels');
+  equal(c.channels![0].name, 'temperature', 'temperature channel');
+  equal(c.channels![0].description, 'Celsius', 'channel description preserved');
+  equal(c.channels![2].measure, 'pressure', 'explicit measure preserved');
+});
+
+test('channels on a non-sensor device is rejected', () => {
+  expectReject(`${HEAD}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO2, channels: [value]}
+machine: {states: {idle: {}}, transitions: []}
+`, 'not a sensor', 'channels rejected on actuator');
+});
+
+test('channel names must be valid C identifiers', () => {
+  expectReject(`${HEAD}
+hardware:
+  devices:
+    weather: {type: dht22, pin: 4, channels: ["bad-name"]}
+machine: {states: {idle: {}}, transitions: []}
+`, 'valid C identifier', 'hyphenated channel name rejected');
+});
+
+test('log templates accept channel names from multi-channel devices', () => {
+  const project = parse(`${HEAD}
+hardware:
+  devices:
+    weather:
+      type: dht22
+      pin: 4
+      channels: [temperature, humidity]
+tasks:
+  read_weather:
+    every: 5000
+    do: read_sensor
+    log: "T={temperature}C H={humidity}%"
+actions:
+  read_sensor: {driver: dht22}
+machine: {states: {idle: {}}, transitions: []}
+`);
+  equal(project.system.tasks![0].log, 'T={temperature}C H={humidity}%', 'log template accepted');
+});
+
+test('log templates reject device name when channels are declared', () => {
+  expectReject(`${HEAD}
+hardware:
+  devices:
+    weather:
+      type: dht22
+      pin: 4
+      channels: [temperature, humidity]
+tasks:
+  read_weather:
+    every: 5000
+    do: read_sensor
+    log: "W={weather}"
+actions:
+  read_sensor: {driver: dht22}
+machine: {states: {idle: {}}, transitions: []}
+`, 'not a declared parameter or sensor', 'device name rejected in log when channels exist');
+});
+
+// ============================================================================
+// RTC + LCD integration schema tests
+// ============================================================================
+
+test('ds3231 auto-populates hour/minute/second channels when none declared', () => {
+  const project = parse(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock: {type: ds3231, bus: i2c_bus}
+machine: {states: {idle: {}}, transitions: []}
+`);
+  const clock = project.system.components!.find(c => c.name === 'clock')!;
+  equal(String(clock.class), 'sensor', 'ds3231 is a sensor');
+  equal(clock.driver, 'rtc_read', 'driver is rtc_read');
+  equal(clock.channels?.map(c => c.name), ['hour', 'minute', 'second'], 'default channels auto-populated');
+});
+
+test('ds3231 accepts explicit channel override (e.g. adding day/month/year)', () => {
+  const project = parse(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock:
+      type: ds3231
+      bus: i2c_bus
+      channels: [hour, minute, second, day, month, year]
+machine: {states: {idle: {}}, transitions: []}
+`);
+  const clock = project.system.components!.find(c => c.name === 'clock')!;
+  equal(clock.channels?.length, 6, 'six explicit channels');
+  equal(clock.channels?.map(c => c.name), ['hour', 'minute', 'second', 'day', 'month', 'year'], 'all six names');
+});
+
+test('lcd_display format refs are validated against sensors and parameters', () => {
+  // Valid: references declared RTC channels
+  const project = parse(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock: {type: ds3231, bus: i2c_bus}
+    screen: {type: lcd_i2c, bus: i2c_bus, address: 0x27, cols: 16, rows: 2}
+actions:
+  read_clock: {driver: rtc_read, params: {device: clock}}
+  show_time:  {driver: lcd_display, params: {device: screen, row: 0, format: "{hour}:{minute}:{second}"}}
+machine: {states: {idle: {}}, transitions: []}
+`);
+  equal(project.system.components!.find(c => c.name === 'clock')!.channels!.length, 3, 'clock has channels');
+});
+
+test('lcd_display format with unknown ref is rejected', () => {
+  expectReject(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock: {type: ds3231, bus: i2c_bus}
+    screen: {type: lcd_i2c, bus: i2c_bus, address: 0x27, cols: 16, rows: 2}
+actions:
+  show_time: {driver: lcd_display, params: {device: screen, row: 0, format: "{typo}"}}
+machine: {states: {idle: {}}, transitions: []}
+`, 'not a declared parameter or sensor', 'typo in lcd format rejected');
+});
+
+test('lcd_display multi-line form validates each line format string', () => {
+  expectReject(`${HEAD}
+hardware:
+  buses:
+    i2c_bus: {interface: i2c, sda: GPIO21, scl: GPIO22}
+  devices:
+    clock: {type: ds3231, bus: i2c_bus}
+    screen: {type: lcd_i2c, bus: i2c_bus, address: 0x27, cols: 16, rows: 2}
+actions:
+  show_all:
+    driver: lcd_display
+    params:
+      device: screen
+      lines:
+        - "{hour}:{minute}:{second}"
+        - {row: 1, col: 0, format: "{bad_ref}"}
+machine: {states: {idle: {}}, transitions: []}
+`, 'not a declared parameter or sensor', 'bad ref in multi-line lcd format rejected');
+});
+
+// ============================================================================
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} schema test(s) failed`);
