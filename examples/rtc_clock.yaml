@@ -2,11 +2,10 @@
 #
 # Both the DS3231 RTC and the LCD share the same I2C bus. The model:
 #   1. Declares the shared bus once, with SDA/SCL pins.
-#   2. Gives the RTC `type: ds3231`, which auto-populates hour, minute, second
-#      as sensor channels. No explicit `channels:` block needed.
-#   3. Uses `driver: lcd_display` with a format string.
-#      {clock.hour}, {clock.minute}, {clock.second} reference the `clock` device
-#      explicitly — no guessing which device the value comes from.
+#   2. Declares the DS3231 as a sensor with explicit channels: [hour, minute, second].
+#      These channel names are what you reference in format strings below.
+#   3. Uses `driver: lcd_display` with {device.channel} refs —
+#      {clock.hour} means "the hour channel of the clock device".
 #      The codegen produces %02d / snprintf automatically.
 #
 # A single task fires every second: read the clock, then update the display.
@@ -23,7 +22,6 @@ target: esp32
 
 hardware:
   buses:
-    # Bus settings are flat — no `binding:` wrapper.
     i2c_bus:
       interface: i2c
       sda: GPIO21
@@ -31,13 +29,15 @@ hardware:
       frequency: 400000
 
   devices:
-    # DS3231 RTC: auto-populates hour, minute, second as sensor channels.
+    # DS3231 real-time clock.
+    # channels: lists the values this device exposes. These names are
+    # what you use in {device.channel} format refs — {clock.hour} etc.
     clock:
       type: ds3231
       bus: i2c_bus
+      channels: [hour, minute, second]
 
     # 16×2 I2C character LCD (PCF8574 backpack at 0x27).
-    # Device config fields sit flat on the device — no `config:` wrapper.
     display:
       type: lcd_i2c
       bus: i2c_bus
@@ -55,16 +55,13 @@ actions:
     driver: lcd_display
     params:
       device: display
-      # {device.channel} syntax: device name + channel name.
-      # Makes the source unambiguous — {clock.hour} clearly comes from the
-      # `clock` device, not from a parameter or another sensor.
-      # Codegen zero-pads RTC channels automatically (%02d).
+      # {clock.hour} = the `hour` channel of the `clock` device declared above.
+      # RTC channels are zero-padded integers (%02d) — codegen handles that.
       lines:
         - format: "Time: {clock.hour}:{clock.minute}:{clock.second}"
           row: 0
           col: 0
 
-# Tasks are a map keyed by name, not a list.
 tasks:
   clock_tick:
     every: 1000
