@@ -2154,6 +2154,15 @@ static void pollCommands() {
         break;
       }
 
+      case 'dht_read': {
+        // Alias: look up the device type and re-dispatch so users can write
+        // driver: dht_read (intuitive) rather than driver: dht22 (internal name).
+        const deviceName = String(params.device ?? '');
+        const component  = (this.project.system.components || []).find(c => c.name === deviceName);
+        if (!component) break;
+        return this.actionBody({ ...(action as object), driver: component.type } as Action);
+      }
+
       case 'dht22':
       case 'dht11': {
         const deviceName = String(params.device ?? '');
