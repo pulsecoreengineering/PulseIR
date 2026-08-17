@@ -1,0 +1,34 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch PulseIR Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/vscode"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/vscode/client/out/**/*.js",
+        "${workspaceFolder}/vscode/server/out/**/*.js"
+      ],
+      "preLaunchTask": "Build PulseIR Extension"
+    },
+    {
+      "name": "Attach to Language Server",
+      "type": "node",
+      "request": "attach",
+      "port": 6009,
+      "restart": true,
+      "outFiles": [
+        "${workspaceFolder}/vscode/server/out/**/*.js"
+      ]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Extension + Server (debug)",
+      "configurations": ["Launch PulseIR Extension", "Attach to Language Server"]
+    }
+  ]
+}

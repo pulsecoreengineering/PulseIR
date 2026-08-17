@@ -25,17 +25,32 @@ export function activate(context: vscode.ExtensionContext): void {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: 'file', language: 'pulseir' }],
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher('**/*.pulse.{yaml,yml}'),
+      fileEvents: vscode.workspace.createFileSystemWatcher('**/*.{yaml,yml}'),
     },
   };
 
   client = new LanguageClient('pulseir', 'PulseIR Language Server', serverOptions, clientOptions);
   client.start();
 
+  // Auto-detect PulseIR files that VS Code opened as plain YAML.
+  // The firstLine grammar rule only fires when `pulseir:` is literally on line 1;
+  // most real models start with comments, so we scan the first 3 KB here instead.
+  const promoteLanguage = (doc: vscode.TextDocument) => {
+    if (doc.languageId === 'yaml' || doc.languageId === 'yml') {
+      if (/^pulseir\s*:/m.test(doc.getText(3000))) {
+        vscode.languages.setTextDocumentLanguage(doc, 'pulseir');
+      }
+    }
+  };
+
   context.subscriptions.push(
+    vscode.workspace.onDidOpenTextDocument(promoteLanguage),
     vscode.commands.registerCommand('pulseir.generate', () => generateCode(context)),
     vscode.commands.registerCommand('pulseir.showDiagram', () => showDiagram(context)),
   );
+
+  // Promote any documents already open when the extension activates.
+  vscode.workspace.textDocuments.forEach(promoteLanguage);
 }
 
 export function deactivate(): Thenable<void> | undefined {
