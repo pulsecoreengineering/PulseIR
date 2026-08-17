@@ -2,3 +2,5 @@ node_modules/
 client/out/
 server/out/
 *.vsix
+# Commit .vscode/ here — the root .gitignore blocks it globally
+!.vscode/

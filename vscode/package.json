@@ -32,8 +32,9 @@
       {
         "id": "pulseir",
         "aliases": ["PulseIR", "pulseir"],
+        "extensions": [".pulse.yaml", ".pulse.yml"],
         "filenamePatterns": ["*.pulse.yaml", "*.pulse.yml"],
-        "firstLine": "^pulseir:\\s*\"",
+        "firstLine": "^pulseir:\\s",
         "configuration": "./language-configuration.json"
       }
     ],
