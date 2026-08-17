@@ -55,6 +55,10 @@
         "command": "pulseir.showDiagram",
         "title": "PulseIR: Show State Diagram",
         "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "pulseir.jumpToStub",
+        "title": "PulseIR: Jump to Stub Implementation"
       }
     ],
     "menus": {

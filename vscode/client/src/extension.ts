@@ -48,6 +48,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidOpenTextDocument(promoteLanguage),
     vscode.commands.registerCommand('pulseir.generate', () => generateCode(context)),
     vscode.commands.registerCommand('pulseir.showDiagram', () => showDiagram(context)),
+    vscode.commands.registerCommand('pulseir.jumpToStub', jumpToStub),
   );
 
   // Promote any documents already open when the extension activates.
@@ -56,6 +57,19 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): Thenable<void> | undefined {
   return client?.stop();
+}
+
+// ---------------------------------------------------------------------------
+// Jump-to-stub command  (invoked by CodeLens / go-to-definition)
+// ---------------------------------------------------------------------------
+
+async function jumpToStub(filePath: string, lineIndex: number): Promise<void> {
+  const uri    = vscode.Uri.file(filePath);
+  const doc    = await vscode.workspace.openTextDocument(uri);
+  const editor = await vscode.window.showTextDocument(doc);
+  const pos    = new vscode.Position(lineIndex, 0);
+  editor.selection = new vscode.Selection(pos, pos);
+  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
 }
 
 // ---------------------------------------------------------------------------
