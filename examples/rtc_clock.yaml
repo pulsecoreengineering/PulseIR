@@ -1,0 +1,67 @@
+# Real-time clock on an I2C LCD — no manual C required.
+#
+# Both the DS3231 RTC and the LCD share the same I2C bus. The model:
+#   1. Declares the shared bus once, with SDA/SCL pins.
+#   2. Gives the RTC `type: ds3231`, which auto-populates hour, minute, second
+#      as sensor channels. No explicit `channels:` block needed.
+#   3. Uses `driver: lcd_display` with a format string — {hour}:{minute}:{second}
+#      becomes real snprintf code with %02d zero-padding for time values.
+#
+# A single task fires every second: read the clock, then update the display.
+# No guards, no state machine, no C to write.
+
+pulseir: "1"
+
+project:
+  name: rtc_clock
+  version: "1.0"
+  description: DS3231 RTC time displayed on a 16×2 I2C LCD
+
+target: esp32
+
+hardware:
+  buses:
+    - name: i2c_bus
+      interface: i2c
+      binding:
+        sda: 21
+        scl: 22
+        frequency: 400000
+
+  devices:
+    # DS3231 RTC: auto-populates hour, minute, second as sensor channels.
+    - name: clock
+      type: ds3231
+      bus: i2c_bus
+
+    # 16×2 I2C character LCD (PCF8574 backpack at 0x27).
+    - name: display
+      type: lcd_i2c
+      bus: i2c_bus
+      config:
+        address: 0x27
+        cols: 16
+        rows: 2
+
+actions:
+  read_time:
+    driver: rtc_read
+    params:
+      device: clock
+
+  show_time:
+    driver: lcd_display
+    params:
+      device: display
+      # {hour}, {minute}, {second} are RTC channels — formatted as %02d (zero-padded).
+      # No snprintf to write; the codegen produces it from this format string.
+      lines:
+        - format: "Time: {hour}:{minute}:{second}"
+          row: 0
+          col: 0
+
+tasks:
+  - name: clock_tick
+    every: 1000
+    actions: [read_time, show_time]
+    description: Read the RTC and refresh the display every second
