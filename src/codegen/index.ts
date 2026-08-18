@@ -2514,16 +2514,29 @@ ${saveBody}
    * developer adds the object global for their chosen library.
    */
   private generateReadSensors(): string {
-    // Devices targeted by a custom plugin driver own their own sensor read — the
+    // Devices managed by a custom plugin driver own their own sensor read — the
     // plugin action writes systemSensors.<device> itself (e.g. hcsr04_read uses
-    // pulseIn, not digitalRead).  Auto-reading those pins would overwrite the
-    // plugin's result with a raw 0/1 on every loop() pass.
+    // pulseIn on the echo pin, not digitalRead).  Auto-reading those pins in
+    // readSensors() overwrites the plugin result with a raw 0/1 on every loop() pass.
+    //
+    // Detection: a device is plugin-managed when its name appears as the value
+    // of ANY param in an action that uses a custom (non-builtin) plugin driver.
+    // This covers drivers that use "echo:", "sensor:", "device:", etc.
     const BUILTIN_AUTO_READERS = new Set(['gpio_read', 'analog_read']);
+    // Pre-build a set of digital/analog sensor component names for O(1) lookup.
+    const pinSensorNames = new Set(
+      (this.project.system.components || [])
+        .filter(c => String(c.class) === 'sensor' && (c.type === 'analog_input' || c.type === 'digital_input'))
+        .map(c => c.name)
+    );
     const pluginManagedDevices = new Set<string>();
     for (const action of this.everyUsedAction()) {
-      const device = (action.params?.device ?? '') as string;
-      if (device && action.driver && !BUILTIN_AUTO_READERS.has(action.driver) && this.driverPlugins.has(action.driver)) {
-        pluginManagedDevices.add(device);
+      if (!action.driver || BUILTIN_AUTO_READERS.has(action.driver) || !this.driverPlugins.has(action.driver)) continue;
+      // Scan every param value: whichever one names a pin-sensor device is managed by this plugin.
+      for (const paramVal of Object.values(action.params ?? {})) {
+        if (typeof paramVal === 'string' && pinSensorNames.has(paramVal)) {
+          pluginManagedDevices.add(paramVal);
+        }
       }
     }
 
@@ -3262,12 +3275,18 @@ ${blocks.join('\n\n')}`;
     // Mirror the plugin-managed exclusion from generateReadSensors() so we only
     // call readSensors() when the generated function will have at least one line.
     const BUILTIN_AUTO_READERS_LOOP = new Set(['gpio_read', 'analog_read']);
-    const pluginManagedLoop = new Set(
-      this.everyUsedAction()
-        .filter(a => a.driver && !BUILTIN_AUTO_READERS_LOOP.has(a.driver) && this.driverPlugins.has(a.driver))
-        .map(a => (a.params?.device ?? '') as string)
-        .filter(Boolean)
+    const pinSensorNamesLoop = new Set(
+      (this.project.system.components || [])
+        .filter(c => String(c.class) === 'sensor' && (c.type === 'analog_input' || c.type === 'digital_input'))
+        .map(c => c.name)
     );
+    const pluginManagedLoop = new Set<string>();
+    for (const a of this.everyUsedAction()) {
+      if (!a.driver || BUILTIN_AUTO_READERS_LOOP.has(a.driver) || !this.driverPlugins.has(a.driver)) continue;
+      for (const v of Object.values(a.params ?? {})) {
+        if (typeof v === 'string' && pinSensorNamesLoop.has(v)) pluginManagedLoop.add(v);
+      }
+    }
     const hasPinSensors = (this.project.system.components || []).some(
       c => String(c.class) === 'sensor' &&
            (c.type === 'analog_input' || c.type === 'digital_input') &&
