@@ -464,17 +464,15 @@
   <p>Declares the physical hardware attached to the board: communication buses and named device components.</p>
   <pre><span class="yk">hardware</span>:
   <span class="yk">buses</span>:
-    - <span class="yk">name</span>: <span class="ys">i2c_bus</span>
+    <span class="yk">i2c_bus</span>:             <span class="yc"># key = bus name</span>
       <span class="yk">interface</span>: <span class="ys">i2c</span>
-      <span class="yk">binding</span>:
-        <span class="yk">sda</span>: <span class="yn">21</span>
-        <span class="yk">scl</span>: <span class="yn">22</span>
-        <span class="yk">frequency</span>: <span class="yn">400000</span>
+      <span class="yk">sda</span>: <span class="ys">GPIO21</span>
+      <span class="yk">scl</span>: <span class="ys">GPIO22</span>
+      <span class="yk">frequency</span>: <span class="yn">400000</span>
   <span class="yk">devices</span>:
-    - <span class="yk">name</span>: <span class="ys">led</span>
+    <span class="yk">led</span>:                 <span class="yc"># key = device name</span>
       <span class="yk">type</span>: <span class="ys">digital_output</span>
-      <span class="yk">config</span>:
-        <span class="yk">pin</span>: <span class="yn">13</span></pre>
+      <span class="yk">pin</span>: <span class="ys">GPIO13</span></pre>
 
   <!-- Boards -->
   <h3 id="boards">Supported boards</h3>
@@ -499,11 +497,11 @@
 
   <!-- Bus types -->
   <h3 id="buses">Bus types</h3>
-  <p>Each bus entry in <code class="inline">hardware.buses</code> has a <code class="inline">name</code>, an <code class="inline">interface</code> type, and an optional <code class="inline">binding</code> map of interface-specific settings.</p>
+  <p><code class="inline">hardware.buses</code> is a mapping keyed by bus name. Each entry sets <code class="inline">interface:</code> and interface-specific pin/parameter fields directly — there is no <code>binding:</code> wrapper.</p>
 
   <div class="table-wrap">
     <table>
-      <tr><th>Interface</th><th>Common binding keys</th><th>Description</th></tr>
+      <tr><th>Interface</th><th>Direct fields</th><th>Description</th></tr>
       <tr>
         <td><code>i2c</code></td>
         <td><code>sda</code>, <code>scl</code>, <code>frequency</code></td>
@@ -609,43 +607,50 @@
   </div>
 
   <h4>Common device fields</h4>
+  <p><code class="inline">hardware.devices</code> is a mapping keyed by device name (must be a valid C identifier, used as the variable name in generated code). Device-specific fields are written directly — there is no <code>config:</code> wrapper.</p>
   <dl>
-    <dt>name</dt><dd>Unique identifier for this device. <span class="req">required</span>
-      <p>Must be a valid C identifier. Used as the variable name in generated code.</p></dd>
     <dt>type</dt><dd>Built-in device type (see table above). <span class="opt">optional</span>
       <p>When set, <code>class</code> and <code>driver</code> are inferred. Omit when using a custom driver with explicit <code>class</code> and <code>driver</code>.</p></dd>
     <dt>class</dt><dd><code class="inline">sensor</code> | <code class="inline">actuator</code> | <code class="inline">service</code> <span class="opt">optional if type is set</span>
       <p>Required when <code>type</code> is not a built-in. Determines how the codegen treats the device.</p></dd>
     <dt>driver</dt><dd>Driver plugin name. <span class="opt">optional if type is set</span></dd>
+    <dt>pin</dt><dd>GPIO pin for primitive devices (<code>digital_output</code>, <code>digital_input</code>, <code>pwm_output</code>, <code>analog_input</code>, <code>dht22/11</code>). <span class="req">required for pin-owned devices</span></dd>
     <dt>bus</dt><dd>Name of a declared bus. <span class="opt">optional</span>
-      <p>Required for I2C and SPI devices that share a bus.</p></dd>
-    <dt>config</dt><dd>Device-specific configuration map. <span class="opt">optional</span>
-      <p>For GPIO devices: <code>pin</code>. For LCD: <code>address</code>, <code>cols</code>, <code>rows</code>. For OLED: <code>address</code>, <code>width</code>, <code>height</code>.</p></dd>
-    <dt>channels</dt><dd>List of named readings for multi-value sensors. <span class="opt">optional</span>
+      <p>Required for I2C, SPI, and OneWire devices that share a bus resource.</p></dd>
+    <dt>address</dt><dd>I2C address (e.g. <code>0x27</code>, <code>0x3C</code>). Required for LCD and OLED devices. <span class="opt">optional for others</span></dd>
+    <dt>cols / rows</dt><dd>Character LCD dimensions (e.g. <code>16</code> / <code>2</code>). Required for <code>lcd_i2c</code>. <span class="opt">optional</span></dd>
+    <dt>width / height</dt><dd>OLED pixel dimensions (e.g. <code>128</code> / <code>64</code>). Required for <code>oled_i2c</code>. <span class="opt">optional</span></dd>
+    <dt>channels</dt><dd>List of channel names for multi-value sensors (e.g. <code>[temperature, humidity]</code>). <span class="opt">optional</span>
       <p>See <a href="#channels">Multi-channel sensors</a> below.</p></dd>
     <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
   </dl>
 
   <h4>Examples</h4>
-  <pre><span class="yc"># Simple GPIO LED</span>
-- <span class="yk">name</span>: <span class="ys">status_led</span>
-  <span class="yk">type</span>: <span class="ys">digital_output</span>
-  <span class="yk">config</span>:
-    <span class="yk">pin</span>: <span class="yn">13</span>
+  <pre><span class="yk">hardware</span>:
+  <span class="yk">buses</span>:
+    <span class="yk">i2c_bus</span>:
+      <span class="yk">interface</span>: <span class="ys">i2c</span>
+      <span class="yk">sda</span>: <span class="ys">GPIO21</span>
+      <span class="yk">scl</span>: <span class="ys">GPIO22</span>
 
-<span class="yc"># I2C LCD display</span>
-- <span class="yk">name</span>: <span class="ys">display</span>
-  <span class="yk">type</span>: <span class="ys">lcd_i2c</span>
-  <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
-  <span class="yk">config</span>:
-    <span class="yk">address</span>: <span class="yn">0x27</span>
-    <span class="yk">cols</span>: <span class="yn">16</span>
-    <span class="yk">rows</span>: <span class="yn">2</span>
+  <span class="yk">devices</span>:
+    <span class="yc"># Simple GPIO LED — pin is a direct field, no config: wrapper</span>
+    <span class="yk">status_led</span>:
+      <span class="yk">type</span>: <span class="ys">digital_output</span>
+      <span class="yk">pin</span>: <span class="ys">GPIO13</span>
 
-<span class="yc"># DS3231 RTC (channels auto-populated: hour, minute, second)</span>
-- <span class="yk">name</span>: <span class="ys">clock</span>
-  <span class="yk">type</span>: <span class="ys">ds3231</span>
-  <span class="yk">bus</span>: <span class="ys">i2c_bus</span></pre>
+    <span class="yc"># I2C LCD — address/cols/rows are direct fields on the device</span>
+    <span class="yk">display</span>:
+      <span class="yk">type</span>: <span class="ys">lcd_i2c</span>
+      <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
+      <span class="yk">address</span>: <span class="yn">0x27</span>
+      <span class="yk">cols</span>: <span class="yn">16</span>
+      <span class="yk">rows</span>: <span class="yn">2</span>
+
+    <span class="yc"># DS3231 RTC — channels auto-populated: hour, minute, second</span>
+    <span class="yk">clock</span>:
+      <span class="yk">type</span>: <span class="ys">ds3231</span>
+      <span class="yk">bus</span>: <span class="ys">i2c_bus</span></pre>
 
   <!-- Multi-channel sensors -->
   <h3 id="channels">Multi-channel sensors</h3>
@@ -656,36 +661,26 @@
     <span>RTC devices (<code>ds3231</code>, <code>ds1307</code>) automatically populate <code>[hour, minute, second]</code> channels when no explicit <code>channels:</code> are declared.</span>
   </div>
 
-  <h4>List form (ordered channels)</h4>
-  <pre><span class="yk">devices</span>:
-  - <span class="yk">name</span>: <span class="ys">weather</span>
-    <span class="yk">type</span>: <span class="ys">bme280</span>
-    <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
-    <span class="yk">channels</span>:
-      - <span class="yk">name</span>: <span class="ys">temperature</span>
-        <span class="yk">measure</span>: <span class="ys">temperature</span>
-      - <span class="yk">name</span>: <span class="ys">humidity</span>
-        <span class="yk">measure</span>: <span class="ys">humidity</span>
-      - <span class="yk">name</span>: <span class="ys">pressure</span>
-        <span class="yk">measure</span>: <span class="ys">pressure</span></pre>
+  <p><code>channels:</code> is a YAML sequence of channel name strings. Each string becomes a field in the generated <code>SystemSensors</code> struct.</p>
+  <pre><span class="yk">hardware</span>:
+  <span class="yk">devices</span>:
+    <span class="yc"># BME280 — declare all three channels as a list of strings</span>
+    <span class="yk">weather</span>:
+      <span class="yk">type</span>: <span class="ys">bme280</span>
+      <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
+      <span class="yk">channels</span>: [<span class="ys">temperature</span>, <span class="ys">humidity</span>, <span class="ys">pressure</span>]
 
-  <h4>Map form (named channels)</h4>
-  <pre><span class="yk">channels</span>:
-  <span class="yk">temperature</span>:
-    <span class="yk">measure</span>: <span class="ys">temperature</span>
-  <span class="yk">humidity</span>:
-    <span class="yk">measure</span>: <span class="ys">humidity</span></pre>
+    <span class="yc"># DHT22 — two channels</span>
+    <span class="yk">env</span>:
+      <span class="yk">type</span>: <span class="ys">dht22</span>
+      <span class="yk">pin</span>: <span class="ys">GPIO4</span>
+      <span class="yk">channels</span>: [<span class="ys">temperature</span>, <span class="ys">humidity</span>]
 
-  <h4>SensorChannel fields</h4>
-  <dl>
-    <dt>name</dt><dd>Channel identifier. <span class="req">required</span>
-      <p>Must be a valid C identifier. Becomes <code>systemSensors.&lt;name&gt;</code>.</p></dd>
-    <dt>measure</dt><dd>Driver hint for which reading to extract. <span class="opt">optional</span>
-      <p>Defaults to the channel name. Standard values: <code>temperature</code>, <code>humidity</code>, <code>pressure</code>.</p></dd>
-    <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
-    <dt>config</dt><dd>Driver-specific extras. <span class="opt">optional</span>
-      <p>E.g. <code>{ register: 0x04, scale: 0.01 }</code> for Modbus channels.</p></dd>
-  </dl>
+    <span class="yc"># DS3231 — explicit or omit (auto-populated)</span>
+    <span class="yk">clock</span>:
+      <span class="yk">type</span>: <span class="ys">ds3231</span>
+      <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
+      <span class="yk">channels</span>: [<span class="ys">hour</span>, <span class="ys">minute</span>, <span class="ys">second</span>, <span class="ys">day</span>, <span class="ys">month</span>, <span class="ys">year</span>]</pre>
 
   <div class="callout info">
     <span class="callout-icon">ℹ</span>
@@ -979,17 +974,20 @@
 
 <span class="yk">hardware</span>:
   <span class="yk">buses</span>:
-    - <span class="yk">name</span>: <span class="ys">i2c_bus</span>
+    <span class="yk">i2c_bus</span>:
       <span class="yk">interface</span>: <span class="ys">i2c</span>
-      <span class="yk">binding</span>: { <span class="yk">sda</span>: <span class="yn">21</span>, <span class="yk">scl</span>: <span class="yn">22</span> }
+      <span class="yk">sda</span>: <span class="ys">GPIO21</span>
+      <span class="yk">scl</span>: <span class="ys">GPIO22</span>
   <span class="yk">devices</span>:
-    - <span class="yk">name</span>: <span class="ys">clock</span>
+    <span class="yk">clock</span>:
       <span class="yk">type</span>: <span class="ys">ds3231</span>
       <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
-    - <span class="yk">name</span>: <span class="ys">display</span>
+    <span class="yk">display</span>:
       <span class="yk">type</span>: <span class="ys">lcd_i2c</span>
       <span class="yk">bus</span>: <span class="ys">i2c_bus</span>
-      <span class="yk">config</span>: { <span class="yk">address</span>: <span class="yn">0x27</span>, <span class="yk">cols</span>: <span class="yn">16</span>, <span class="yk">rows</span>: <span class="yn">2</span> }
+      <span class="yk">address</span>: <span class="yn">0x27</span>
+      <span class="yk">cols</span>: <span class="yn">16</span>
+      <span class="yk">rows</span>: <span class="yn">2</span>
 
 <span class="yk">actions</span>:
   <span class="yk">read_time</span>:
