@@ -1,0 +1,26 @@
+driver: hcsr04_read
+description: HC-SR04 ultrasonic distance sensor — fires trigger pulse and returns cm via pulseIn / esp_timer
+
+platforms:
+  arduino: |
+    digitalWrite({trigger_pin}, LOW); delayMicroseconds(2);
+    digitalWrite({trigger_pin}, HIGH); delayMicroseconds(10);
+    digitalWrite({trigger_pin}, LOW);
+    long _dur = pulseIn({echo_pin}, HIGH, 30000UL);
+    systemSensors.{echo} = (_dur == 0) ? 999.0f : _dur * 0.0343f / 2.0f;
+
+  espidf: |
+    gpio_set_level((gpio_num_t){trigger_pin}, 0); esp_rom_delay_us(2);
+    gpio_set_level((gpio_num_t){trigger_pin}, 1); esp_rom_delay_us(10);
+    gpio_set_level((gpio_num_t){trigger_pin}, 0);
+    int64_t _t0 = esp_timer_get_time();
+    while (!gpio_get_level((gpio_num_t){echo_pin}) && (esp_timer_get_time() - _t0) < 5000LL);
+    _t0 = esp_timer_get_time();
+    while (gpio_get_level((gpio_num_t){echo_pin}) && (esp_timer_get_time() - _t0) < 30000LL);
+    long _dur = (long)(esp_timer_get_time() - _t0);
+    systemSensors.{echo} = (_dur <= 0) ? 999.0f : _dur * 0.0343f / 2.0f;
+
+  default: |
+    // TODO: implement hcsr04_read for this platform
+    // Trigger on {trigger_pin}, echo on {echo_pin}, write result to systemSensors.{echo}
+    (void)ctx;

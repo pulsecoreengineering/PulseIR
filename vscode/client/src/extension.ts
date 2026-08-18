@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as vscode from 'vscode';
 import {
   LanguageClient,
@@ -122,6 +123,97 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('pulseir.pluginList', () => runPluginCommand(['plugin', 'list'])),
+
+    vscode.commands.registerCommand('pulseir.pluginBrowse', async () => {
+      const driversDir = path.join(context.extensionPath, 'drivers');
+      if (!fs.existsSync(driversDir)) {
+        vscode.window.showErrorMessage('Bundled drivers not found in this extension installation.');
+        return;
+      }
+      const files = fs.readdirSync(driversDir).filter(f => /\.ya?ml$/i.test(f));
+      if (files.length === 0) {
+        vscode.window.showInformationMessage('No bundled driver plugins found.');
+        return;
+      }
+
+      // Parse each plugin to show name + description in the QuickPick
+      const items = files.flatMap(f => {
+        try {
+          const content = fs.readFileSync(path.join(driversDir, f), 'utf8');
+          const lines = content.split('\n');
+          const driver = (lines.find(l => l.startsWith('driver:')) ?? '').replace('driver:', '').trim();
+          const desc   = (lines.find(l => l.startsWith('description:')) ?? '').replace('description:', '').trim();
+          const plats  = lines.filter(l => /^  \w+:/.test(l) && !['  description:', '  driver:'].some(x => l.startsWith(x))).map(l => l.trim().replace(':', ''));
+          if (!driver) return [];
+          return [{ label: driver, description: desc, detail: `platforms: ${plats.join(', ')}`, filePath: path.join(driversDir, f) }];
+        } catch { return []; }
+      });
+
+      const pick = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Select a bundled plugin to install globally',
+        matchOnDescription: true,
+      });
+      if (!pick) return;
+      await runPluginCommand(['plugin', 'install', pick.filePath]);
+      driversProvider.refresh();
+      vscode.window.showInformationMessage(`Plugin "${pick.label}" installed globally.`);
+    }),
+
+    vscode.commands.registerCommand('pulseir.pluginNew', async () => {
+      const name = await vscode.window.showInputBox({
+        prompt: 'Driver name for your plugin (e.g. my_sensor)',
+        placeHolder: 'my_sensor',
+        validateInput: v => /^[a-z][a-z0-9_]*$/.test(v) ? undefined : 'Use lowercase letters, digits, and underscores',
+      });
+      if (!name) return;
+
+      const template = [
+        `driver: ${name}`,
+        `description: Describe what this driver does`,
+        ``,
+        `# Action params: list the params: keys your action uses`,
+        `# Template variables in code:`,
+        `#   {key}      → param value (device name)`,
+        `#   {key_pin}  → generated pin macro (e.g. TRIG_PIN)`,
+        `#   {driver}   → the driver name`,
+        ``,
+        `platforms:`,
+        `  arduino: |`,
+        `    // TODO: Arduino implementation`,
+        `    (void)ctx;`,
+        ``,
+        `  espidf: |`,
+        `    // TODO: ESP-IDF implementation`,
+        `    (void)ctx;`,
+        ``,
+        `  default: |`,
+        `    // TODO: implement {driver} for this platform`,
+        `    (void)ctx;`,
+      ].join('\n');
+
+      const doc = await vscode.workspace.openTextDocument({
+        language: 'yaml',
+        content: template,
+      });
+      await vscode.window.showTextDocument(doc);
+
+      const action = await vscode.window.showInformationMessage(
+        `Edit the plugin, then install it globally.`,
+        'Install from this file…',
+      );
+      if (action !== 'Install from this file…') return;
+
+      // Ask where to save it first
+      const saveUri = await vscode.window.showSaveDialog({
+        defaultUri: vscode.Uri.file(path.join(os.homedir(), `${name}.yaml`)),
+        filters: { 'PulseIR Driver Plugin': ['yaml'] },
+        title: 'Save plugin YAML',
+      });
+      if (!saveUri) return;
+      fs.writeFileSync(saveUri.fsPath, doc.getText());
+      await runPluginCommand(['plugin', 'install', saveUri.fsPath]);
+      driversProvider.refresh();
+    }),
   );
 
   // Promote any documents already open when the extension activates.

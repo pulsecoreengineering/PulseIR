@@ -1,0 +1,48 @@
+driver: neopixel_set
+description: WS2812 / NeoPixel RGB LED strip — fills all pixels with a color from parameters
+
+# Action params:
+#   pin: <device>   digital_output — {pin_pin} is the data pin
+#   r:   <param>    int parameter (0-255), red channel
+#   g:   <param>    int parameter (0-255), green channel
+#   b:   <param>    int parameter (0-255), blue channel
+#
+# Required manual additions:
+#   Add to sketch globals (adjust NEO_COUNT for your strip length):
+#     #include <Adafruit_NeoPixel.h>
+#     #define NEO_COUNT 8
+#     Adafruit_NeoPixel _strip_{pin}({pin_pin}, NEO_COUNT, NEO_GRB + NEO_KHZ800);
+#   Add to setup():
+#     _strip_{pin}.begin();
+#     _strip_{pin}.show();
+#
+# Example model:
+#   parameters:
+#     r: { type: int, default: 0, range: [0, 255] }
+#     g: { type: int, default: 0, range: [0, 255] }
+#     b: { type: int, default: 64, range: [0, 255] }
+#   actions:
+#     set_color:
+#       driver: neopixel_set
+#       params:
+#         pin: led_strip
+#         r: r
+#         g: g
+#         b: b
+
+platforms:
+  arduino: |
+    extern Adafruit_NeoPixel _strip_{pin};
+    uint32_t _color = _strip_{pin}.Color(
+      (uint8_t)systemParameters.{r},
+      (uint8_t)systemParameters.{g},
+      (uint8_t)systemParameters.{b});
+    for (int _i = 0; _i < _strip_{pin}.numPixels(); _i++) {
+      _strip_{pin}.setPixelColor(_i, _color);
+    }
+    _strip_{pin}.show();
+
+  default: |
+    // TODO: implement neopixel_set for this platform
+    // Fill strip on {pin_pin} with color from systemParameters.{r}/{g}/{b}
+    (void)ctx;
