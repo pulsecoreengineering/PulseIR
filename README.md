@@ -392,6 +392,7 @@ link against the real runtime; two deliberately do not, and are built *without*
 |---|---|
 | `blink.yaml` | No state machine at all — one task, one interval |
 | `serial_console.yaml` | Commands over the serial monitor, baud rate from the model |
+| `rtc_clock.yaml` | DS3231 RTC + I2C LCD — no C written at all, just tasks and display actions |
 | `traffic_light.yaml` | Phases, a pedestrian request, a night mode on the parent state |
 | `motor_controller.yaml` | Speed phases with the ramp arithmetic left in C, wildcard trip |
 | `pump_tank.yaml` | Float-switch hysteresis, dry-run and overfill protection |
@@ -450,6 +451,28 @@ The generated sketch gets the `#include` lines plus a header comment listing
 what to install. `--libraries out.json` emits a machine-readable manifest with
 ready-made PlatformIO `lib_deps` (core-bundled libraries excluded, since
 listing them breaks a build).
+
+## VS Code Extension
+
+A first-party VS Code extension ships in `vscode/`. It provides:
+
+- **Syntax highlighting** for `.pulse.yaml` / `.pulse.yml` files
+- **Diagnostics** — the real parser runs inside the language server; errors appear inline as you type
+- **Code generation** from the editor — a command palette entry runs `pulse-ir` on the open model and writes output into the workspace
+- **Sidebar panel** — project and model tree views, one click to open any model file
+
+### Installing from source
+
+```bash
+cd vscode
+npm install
+npm run build      # compiles the language server and client extension
+
+# In VS Code: Extensions → … → Install from VSIX
+# Or use F5 inside VS Code to launch an extension development host
+```
+
+The extension activates on any file whose first line matches `pulseir:`, and on `.pulse.yaml` / `.pulse.yml` extensions, so an existing model is recognized without renaming it.
 
 ## Web Editor
 
@@ -585,6 +608,11 @@ not — `PulseHSM.cpp` is compiled separately and needs the same sizes.
 
 If that header ever goes missing, `setup()` says so on the serial port rather
 than running a machine that is quietly missing states.
+
+## Device and Target References
+
+- **[DEVICES.md](DEVICES.md)** — all device types (digital_output, dht22, ds18b20, bme280, lcd_i2c, etc.), their YAML config, channels, and compatible drivers
+- **[TARGETS.md](TARGETS.md)** — Arduino, ESP-IDF, MicroPython, and Zephyr backends with build instructions and feature matrix
 
 ## What the Compiler Catches
 

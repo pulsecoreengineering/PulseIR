@@ -1,29 +1,30 @@
 # PulseIR Complete Repository Index
 
-**Last Updated**: August 9, 2026  
-**Status**: MVP Complete + Function Contract  
-**Total**: 4500+ lines (code + documentation)
+**Last Updated**: August 2026  
+**Status**: Multi-backend, multi-target — Arduino, ESP-IDF, MicroPython, Zephyr (in progress)  
+**Total**: 8000+ lines (code + documentation)
 
 ---
 
 ## 📚 Documentation (Start Here)
 
 ### For First-Time Users
-1. **README.md** (100 lines) — What is PulseIR?
-2. **QUICKSTART.md** (400 lines) — 5-minute hands-on tutorial
+1. **README.md** — What is PulseIR, backends overview, examples table
+2. **QUICKSTART.md** — Hands-on tutorial: GPIO state machine + sensor/display walkthrough
+3. **DEVICES.md** ⭐ **NEW** — All device types, YAML config, channels, drivers, required libraries
+4. **TARGETS.md** ⭐ **NEW** — Arduino, ESP-IDF, MicroPython, Zephyr: generated output, build steps, feature matrix
 
 ### For Understanding Design
-3. **ARCHITECTURE.md** (500 lines) — Why it's built this way
-4. **FUNCTION_CONTRACT.md** (300 lines) ⭐ — Guard/action binding spec
+5. **ARCHITECTURE.md** — Why it's built this way, layer overview
+6. **FUNCTION_CONTRACT.md** ⭐ — Guard/action binding specification (portable across all targets)
 
 ### For Implementation Details
-5. **INTEGRATION.md** (600 lines) — How codegen uses PulseHSM
-6. **SYSTEMCONTEXT.md** ⭐ **NEW** — How guards/actions receive system state
+7. **INTEGRATION.md** — How codegen integrates with PulseHSM
+8. **SYSTEMCONTEXT.md** — How guards and actions receive system state through `ctx`
 
 ### For Project Status
-6. **PLAN.md** ⭐ **NEW** — Where the project is going, and why
-7. **MILESTONE.md** (200 lines) — What was built, scope, roadmap
-7. **BUILD_SUMMARY.txt** — Visual summary of the MVP
+9. **PLAN.md** — Where the project is going, open decisions
+10. **MILESTONE.md** — What was built, scope, roadmap
 
 ---
 
@@ -43,24 +44,28 @@
   - Error reporting with line numbers
   - Tested ✅
 
-### Layer 3: Code Generator (IR → C++)
-- **src/codegen/index.ts**
-  - Sizes `PULSEHSM_MAX_*` macros from the model (emitted before the include)
+### Layer 3: Code Generator (IR → target code)
+
+- **src/codegen/index.ts** — platform-agnostic IR traversal; delegates platform calls to the injected backend
+  - Sizes `PULSEHSM_MAX_*` macros from the model
   - Registers every state via `addState()`, parents before children
-  - Emits one `onEvent` handler per state; bubbling gives inner-wins precedence
+  - Emits one `onEvent` handler per state
   - Resolves composite targets to a leaf before `transitionTo()`
   - Generates `SystemContext` / `SystemParameters` / `SystemSensors`
-  - Generates guard and action stubs with the FUNCTION_CONTRACT signatures
-  - Tested ✅ (compiled, linked and executed — see test/compile.test.ts)
+  - Generates guard and action stubs
+  - BUS_SENSOR_DEFS registry: ds18b20, dht22, dht11, bme280, lcd_i2c, oled_i2c, ds3231, ds1307
+  - Tested ✅
+
+- **src/codegen/arduino.ts** — Arduino backend (default)
+- **src/codegen/espidf.ts** — ESP-IDF backend (FreeRTOS / app_main)
+- **src/codegen/espidf_interfaces.ts** — ESP-IDF interface emission
+- **src/codegen/micropython.ts** — MicroPython backend (asyncio / main.py)
+- **src/codegen/zephyr.ts** — Zephyr RTOS backend (in progress)
+- **src/codegen/zephyr_interfaces.ts** — Zephyr interface emission
 
 ### Interface Backend (IR → platform calls)
-- **src/codegen/interfaces.ts** ⭐
-  - Turns `Resource` declarations into includes, `#define`s and `begin()` calls
-  - Knows the Arduino platform so the IR does not have to; an ESP-IDF backend
-    would translate the same model differently
-  - Board-specific calls sit behind preprocessor guards rather than assumptions
-  - Credential-shaped binding keys are emitted as blank placeholders, never
-    with a value from the model
+- **src/codegen/interfaces.ts** — `InterfaceEmission` type; shared interface contract
+- **src/codegen/backend.ts** — `PlatformBackend` interface all backends implement
 
 ### Consumer 2: MQTT Topic Manifest (IR → JSON)
 - **src/emit/topics.ts** ⭐
@@ -141,15 +146,20 @@
 - **test/harness/serial.cpp** — provides the `Serial` global
 
 ### Examples
-- **examples/greenhouse/** ⭐ — multi-file model exercising `include`, every
-  interface kind, implied and declared libraries, and an MQTT-triggerable event
-- **examples/boiler.yaml** (180 lines)
-  - Complete industrial system: boiler temperature control
-  - Hierarchical states (running/heating/cooling/maintaining)
-  - Guarded transitions
-  - Multiple actions
-  - Components, resources, parameters
-  - Real-world use case
+
+| Model | What it demonstrates |
+|-------|---------------------|
+| `blink.yaml` | No state machine — one task, one interval |
+| `serial_console.yaml` | `commands:` serial dispatch, baud rate from the model |
+| `rtc_clock.yaml` | DS3231 RTC + I2C LCD — no C written at all |
+| `traffic_light.yaml` | Hierarchical states, pedestrian request, night mode |
+| `motor_controller.yaml` | Speed phases, ramp arithmetic in C, wildcard trip |
+| `pump_tank.yaml` | Float-switch hysteresis, dry-run and overfill protection |
+| `boiler/` | Multi-file model, hierarchy, guarded transitions |
+| `greenhouse/` | All interface kinds, implied libraries, MQTT events |
+| `sensor_gateway/` | Four buses, TLS uplink, sampling while disconnected |
+
+All examples are compiled and run by the test suite. They also open in the web editor from the dropdown unchanged.
 
 ---
 
@@ -178,36 +188,26 @@
 
 ## 📊 Reading Guide by Role
 
-### I'm a Student
-1. Read **QUICKSTART.md**
-2. Write your first YAML
-3. Generate an Arduino sketch
-4. Fill in the action logic
+### I'm new to PulseIR
+1. **QUICKSTART.md** — write YAML, generate a sketch, see it run
+2. **DEVICES.md** — look up the sensor or display you are wiring
+3. **TARGETS.md** — pick the right `--target` and build steps for your toolchain
 
-### I'm an Engineer
-1. Read **ARCHITECTURE.md**
-2. Review **FUNCTION_CONTRACT.md** (binding spec)
-3. Read **INTEGRATION.md** (how it works with PulseHSM)
-4. Review the source code in src/
+### I'm building a state-machine system
+1. **QUICKSTART.md** → "Common Patterns" section
+2. **README.md** → Schema section and examples table
+3. **FUNCTION_CONTRACT.md** → guard/action signatures you must implement
 
-### I'm Integrating with PulseCore IDE
-1. Read **ARCHITECTURE.md** (layers)
-2. Study **FUNCTION_CONTRACT.md** (what the IR needs)
-3. Integrate parser to convert IDE state → YAML
-4. Follow naming/signature conventions
+### I'm integrating with PulseCore IDE
+1. **ARCHITECTURE.md** — layer overview and IR types
+2. **FUNCTION_CONTRACT.md** — what the IR guarantees
+3. Import `PulseProject` types from `src/model/index.ts`
 
-### I'm Building a Simulator (PulseSim)
-1. Read **ARCHITECTURE.md** (IR structure)
-2. Load generated YAML IR
-3. Import PulseModel types
-4. Implement state transitions, event dispatch, guards
-
-### I'm Creating ESP-IDF Codegen
-1. Read **FUNCTION_CONTRACT.md** (binding spec)
-2. Review Arduino codegen in src/codegen/
-3. Replace Arduino scaffolding with ESP-IDF/FreeRTOS
-4. Keep guard/action signatures identical
-5. Follow same naming convention
+### I'm adding a new backend or device type
+1. **ARCHITECTURE.md** — how backends plug in
+2. **src/codegen/backend.ts** — the `PlatformBackend` interface to implement
+3. **src/codegen/index.ts** — `BUS_SENSOR_DEFS` to add a new device type
+4. **TARGETS.md** — what the existing backends cover
 
 ---
 
@@ -220,20 +220,29 @@ npm run build
 # Test
 npm run test
 
-# Generate code
-node dist/src/cli.js examples/boiler.yaml --output boiler.ino
+# Generate Arduino sketch (default target)
+node dist/src/cli.js examples/rtc_clock.yaml --outdir build/rtc_clock
 
-# Generate the MQTT topic manifest for PulseDash
-node dist/src/cli.js examples/boiler.yaml --topics topics.json --namespace pulsecompiler
+# Generate ESP-IDF project
+node dist/src/cli.js examples/boiler/pulse.yaml --target espidf --outdir build/boiler
 
-# Web editor: serve the committed bundle (or just open web/index.html)
+# Generate MicroPython
+node dist/src/cli.js examples/blink.yaml --target micropython --output main.py
+
+# Generate Zephyr (in progress)
+node dist/src/cli.js examples/blink.yaml --target zephyr --outdir build/zephyr_blink
+
+# MQTT topic manifest
+node dist/src/cli.js examples/boiler/pulse.yaml --topics topics.json
+
+# Library manifest (PlatformIO lib_deps)
+node dist/src/cli.js examples/boiler/pulse.yaml --libraries libraries.json
+
+# Web editor (no rebuild needed)
 npm run serve
 
-# Rebuild the bundle first, then serve (needs esbuild)
+# Rebuild editor bundle first, then serve
 npm run web
-
-# View generated code
-cat boiler.ino
 ```
 
 ---
@@ -261,68 +270,91 @@ Deploy
 ## 📋 File Manifest
 
 ```
-pulse-ir/
-├── Documentation/
-│   ├── README.md                    (Overview)
-│   ├── QUICKSTART.md                (Tutorial)
-│   ├── ARCHITECTURE.md              (Design)
-│   ├── FUNCTION_CONTRACT.md         (Binding spec) ⭐
-│   ├── SYSTEMCONTEXT.md             (Context struct) ⭐
-│   ├── INTEGRATION.md               (PulseHSM)
-│   ├── MILESTONE.md                 (Status)
-│   ├── BUILD_SUMMARY.txt            (Visual)
-│   └── INDEX.md                     (This file)
+PulseIR/
+├── README.md                        Overview, backends, examples, schema
+├── QUICKSTART.md                    Tutorial: GPIO + sensor/display walkthrough
+├── DEVICES.md                       ⭐ All device types, drivers, libraries
+├── TARGETS.md                       ⭐ Arduino/ESP-IDF/MicroPython/Zephyr details
+├── ARCHITECTURE.md                  Design rationale and layer overview
+├── FUNCTION_CONTRACT.md             Guard/action binding spec (all targets)
+├── SYSTEMCONTEXT.md                 How guards/actions receive system state
+├── INTEGRATION.md                   How codegen integrates with PulseHSM
+├── PLAN.md                          Roadmap and open decisions
+├── MILESTONE.md                     Build history and scope
+├── INDEX.md                         This file
 │
 ├── src/
 │   ├── model/
-│   │   ├── types.ts                 (IR definitions)
-│   │   └── index.ts                 (Exports)
+│   │   ├── types.ts                 IR type definitions
+│   │   └── index.ts                 Re-exports
 │   ├── parser/
-│   │   └── index.ts                 (YAML → IR)
+│   │   └── index.ts                 YAML → IR + validation
 │   ├── codegen/
-│   │   └── index.ts                 (IR → C++)
+│   │   ├── index.ts                 IR traversal, device registry, driver dispatch
+│   │   ├── backend.ts               PlatformBackend interface
+│   │   ├── interfaces.ts            InterfaceEmission type
+│   │   ├── arduino.ts               Arduino backend
+│   │   ├── espidf.ts                ESP-IDF backend
+│   │   ├── espidf_interfaces.ts     ESP-IDF interface emission
+│   │   ├── micropython.ts           MicroPython backend
+│   │   ├── zephyr.ts                Zephyr backend (in progress)
+│   │   └── zephyr_interfaces.ts     Zephyr interface emission
 │   ├── emit/
-│   │   └── topics.ts                (IR → MQTT manifest) ⭐
+│   │   ├── topics.ts                IR → MQTT topic manifest
+│   │   └── libraries.ts             IR → library manifest (PlatformIO lib_deps)
 │   ├── analysis/
-│   │   └── states.ts                (Shared hierarchy walk)
-│   └── cli.ts                       (CLI)
+│   │   ├── states.ts                Hierarchy walk (leaves, entry descent)
+│   │   └── template.ts              log:/format: template parser
+│   └── cli.ts                       CLI entry point
 │
-├── web/                             (Browser editor) ⭐
-│   ├── index.html                   (UI)
-│   ├── main.ts                      (Glue - runs the real pipeline)
-│   ├── examples.ts                  (Generated from the models on disk)
-│   └── app.js                       (Generated bundle, committed)
+├── vscode/                          VS Code extension
+│   ├── client/                      Extension client (activation, commands)
+│   ├── server/                      Language server (diagnostics, hovers)
+│   ├── syntaxes/                    TextMate grammar for .pulse.yaml
+│   └── package.json                 Extension manifest
+│
+├── web/                             Browser editor
+│   ├── index.html                   UI shell
+│   ├── main.ts                      Glue — runs the real parser + codegen
+│   ├── examples.ts                  Generated example registry
+│   └── app.js                       Committed bundle (npm run web to rebuild)
 │
 ├── scripts/
-│   ├── build-examples.mjs           (Bakes models into the editor)
-│   ├── build-web.mjs                (Bundles the editor)
-│   └── serve.mjs                    (Static server)
+│   ├── build-examples.mjs           Bakes models into the editor bundle
+│   ├── build-web.mjs                Bundles the editor
+│   └── serve.mjs                    Static file server
 │
 ├── test/
-│   ├── parser.test.ts               (Parser smoke test)
-│   ├── codegen.test.ts              (Codegen smoke test)
-│   ├── validation.test.ts           (Reference validation)
-│   ├── topics.test.ts               (MQTT manifest)
-│   ├── analysis.test.ts             (Hierarchy walk)
-│   ├── web.test.ts                  (Editor build freshness)
-│   ├── compile.test.ts              (Compile + link + run) ⭐
+│   ├── parser.test.ts               Parser smoke + boiler model
+│   ├── codegen.test.ts              Codegen smoke test
+│   ├── backends.test.ts             Per-driver output assertions
+│   ├── validation.test.ts           Reference validation (unknown states, events…)
+│   ├── topics.test.ts               MQTT manifest shape
+│   ├── analysis.test.ts             Hierarchy walk
+│   ├── web.test.ts                  Editor freshness check
+│   ├── compile.test.ts              Compile + link + run (catches syntax errors)
 │   ├── fixtures/
-│   │   └── hierarchy.yaml           (Dispatch semantics fixture)
+│   │   └── hierarchy.yaml           Dispatch semantics fixture
 │   └── harness/
-│       ├── Arduino.h                (Host shim)
-│       └── serial.cpp               (Serial global)
+│       ├── Arduino.h                Host shim for g++ builds
+│       └── serial.cpp               Serial global
 │
 ├── examples/
-│   └── boiler.yaml                  (Full example)
+│   ├── blink.yaml                   One task, no state machine
+│   ├── serial_console.yaml          Commands over serial
+│   ├── rtc_clock.yaml               DS3231 + I2C LCD — no C
+│   ├── traffic_light.yaml           Hierarchical states
+│   ├── motor_controller.yaml        Speed phases, wildcard trip
+│   ├── pump_tank.yaml               Hysteresis, protection
+│   ├── boiler/                      Multi-file, hierarchy, guards
+│   ├── greenhouse/                  Interfaces, libraries, MQTT
+│   └── sensor_gateway/              Four buses, TLS uplink
 │
 ├── deps/
-│   ├── PulseHSM.h                   (Runtime reference)
-│   └── PulseHSM.cpp                 (Implementation)
+│   ├── PulseHSM.h                   PulseHSM runtime header
+│   └── PulseHSM.cpp                 PulseHSM implementation
 │
-└── Config
-    ├── package.json
-    ├── tsconfig.json
-    └── .gitignore
+└── package.json / tsconfig.json / .gitignore
 ```
 
 ---
@@ -331,13 +363,15 @@ pulse-ir/
 
 | Metric | Count |
 |--------|-------|
-| TypeScript source lines | ~1000 |
-| Documentation lines | ~1500 |
-| Example/test lines | ~400 |
-| **Total** | ~4500 |
-| **Source files** | 8 |
-| **Doc files** | 8 |
-| **Test files** | 2 |
+| TypeScript source lines | ~4000 |
+| Documentation lines | ~3000 |
+| Example/test lines | ~1500 |
+| **Total** | ~8000+ |
+| **Source files** | 15+ |
+| **Doc files** | 12 |
+| **Test files** | 8 |
+| **Supported targets** | 4 (Arduino, ESP-IDF, MicroPython, Zephyr) |
+| **Supported device types** | 12 (digital, PWM, ADC, DHT, DS18B20, BME280, RTC, LCD, OLED) |
 
 ---
 
@@ -345,16 +379,32 @@ pulse-ir/
 
 - [x] Three-layer architecture (Model → Parser → Codegen)
 - [x] YAML parser with hierarchical reference validation
-- [x] C++ code generator targeting the PulseHSM runtime
+- [x] Arduino backend (production-ready)
+- [x] ESP-IDF backend (production-ready)
+- [x] MicroPython backend (beta)
+- [x] Zephyr RTOS backend (in progress)
+- [x] PlatformBackend plugin interface — new backends are self-contained
+- [x] BUS_SENSOR_DEFS device registry (8 device types)
 - [x] Hierarchical dispatch: entry into composite states, event bubbling
 - [x] SystemContext / SystemParameters / SystemSensors generation
-- [x] Guard and action stubs matching FUNCTION_CONTRACT.md
-- [x] Multiple actions per transition
-- [x] Wildcard (`source: "*"`) transitions via a synthetic root superstate
-- [x] Full documentation (6 guides)
+- [x] Guard and action stubs matching FUNCTION_CONTRACT.md (portable across all targets)
+- [x] Multiple actions per transition; wildcard transitions
+- [x] `tasks:` scheduling (exact-rate, resyncing)
+- [x] `commands:` serial console with non-blocking line assembly
+- [x] `log:` template printing (sensor + parameter refs, no printf-float)
+- [x] Interrupts (ISR stubs + `attachInterrupt`)
+- [x] DHT22/DHT11, DS18B20, BME280, DS3231/DS1307 sensor drivers
+- [x] LCD I2C and OLED SSD1306 display drivers
+- [x] HTTP client (`http_get` / `http_post`)
+- [x] Deep sleep / light sleep control
+- [x] NVS parameter persistence (ESP32)
+- [x] Multi-file models with `imports:`
+- [x] VS Code extension with diagnostics and code generation
+- [x] Web editor (real parser + codegen in browser, multi-file, offline)
+- [x] MQTT topic manifest emitter
+- [x] Library manifest emitter (PlatformIO lib_deps)
 - [x] Compile-and-run test coverage
-- [x] Real-world example (boiler system)
-- [x] CLI interface
+- [x] Nine worked examples, all compiled by the test suite
 
 ---
 
@@ -443,7 +493,6 @@ When extending PulseIR:
 
 ## 📝 Last Updated
 
-Generated: August 9, 2026  
-Status: MVP Complete  
-Location: /home/claude/pulse-ir/  
-Ready for: Production use & extension
+August 2026  
+Status: Multi-backend, multi-target; VS Code extension; nine examples  
+Ready for: Production use on Arduino and ESP-IDF; beta MicroPython; Zephyr in progress
