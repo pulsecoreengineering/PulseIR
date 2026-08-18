@@ -2514,9 +2514,23 @@ ${saveBody}
    * developer adds the object global for their chosen library.
    */
   private generateReadSensors(): string {
+    // Devices targeted by a custom plugin driver own their own sensor read — the
+    // plugin action writes systemSensors.<device> itself (e.g. hcsr04_read uses
+    // pulseIn, not digitalRead).  Auto-reading those pins would overwrite the
+    // plugin's result with a raw 0/1 on every loop() pass.
+    const BUILTIN_AUTO_READERS = new Set(['gpio_read', 'analog_read']);
+    const pluginManagedDevices = new Set<string>();
+    for (const action of this.everyUsedAction()) {
+      const device = (action.params?.device ?? '') as string;
+      if (device && action.driver && !BUILTIN_AUTO_READERS.has(action.driver) && this.driverPlugins.has(action.driver)) {
+        pluginManagedDevices.add(device);
+      }
+    }
+
     const sensors = (this.project.system.components || []).filter(
       c => String(c.class) === 'sensor' &&
-           (c.type === 'analog_input' || c.type === 'digital_input')
+           (c.type === 'analog_input' || c.type === 'digital_input') &&
+           !pluginManagedDevices.has(c.name)
     );
     if (sensors.length === 0) return '';
 
@@ -3245,9 +3259,19 @@ ${blocks.join('\n\n')}`;
     }
 
     // Sensor reads come first: guards and actions in the same pass see fresh values.
+    // Mirror the plugin-managed exclusion from generateReadSensors() so we only
+    // call readSensors() when the generated function will have at least one line.
+    const BUILTIN_AUTO_READERS_LOOP = new Set(['gpio_read', 'analog_read']);
+    const pluginManagedLoop = new Set(
+      this.everyUsedAction()
+        .filter(a => a.driver && !BUILTIN_AUTO_READERS_LOOP.has(a.driver) && this.driverPlugins.has(a.driver))
+        .map(a => (a.params?.device ?? '') as string)
+        .filter(Boolean)
+    );
     const hasPinSensors = (this.project.system.components || []).some(
       c => String(c.class) === 'sensor' &&
-           (c.type === 'analog_input' || c.type === 'digital_input')
+           (c.type === 'analog_input' || c.type === 'digital_input') &&
+           !pluginManagedLoop.has(c.name)
     );
     if (hasPinSensors) body.push('  readSensors();');
 
