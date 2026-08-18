@@ -1,0 +1,42 @@
+driver: vl53l0x_read
+description: VL53L0X Time-of-Flight laser distance sensor — returns distance in mm over I2C
+
+# Action params:
+#   dist: <device>   digital_input or analog_input — systemSensors.{dist} receives mm (float)
+#                    Returns 9999.0 on timeout or out-of-range.
+#
+# Required manual additions:
+#   Add to sketch globals:
+#     #include <VL53L0X.h>
+#     VL53L0X _vl53;
+#   Add to setup():
+#     Wire.begin();
+#     _vl53.init();
+#     _vl53.startContinuous();
+#
+# Example model:
+#   hardware:
+#     devices:
+#       dist: { type: digital_input, pin: GPIO21 }  # pin unused; gives systemSensors.dist
+#   actions:
+#     measure:
+#       driver: vl53l0x_read
+#       params:
+#         dist: dist
+
+platforms:
+  arduino: |
+    extern VL53L0X _vl53;
+    uint16_t _raw = _vl53.readRangeContinuousMillimeters();
+    systemSensors.{dist} = (_vl53.timeoutOccurred() || _raw >= 8190) ? 9999.0f : (float)_raw;
+
+  espidf: |
+    extern VL53L0X _vl53;
+    uint16_t _raw = _vl53.readRangeContinuousMillimeters();
+    systemSensors.{dist} = (_vl53.timeoutOccurred() || _raw >= 8190) ? 9999.0f : (float)_raw;
+
+  default: |
+    // TODO: implement vl53l0x_read for this platform
+    // Read distance in mm from VL53L0X and write to systemSensors.{dist}
+    // Return 9999.0 on timeout or out-of-range.
+    (void)ctx;

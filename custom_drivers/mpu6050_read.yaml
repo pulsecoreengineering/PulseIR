@@ -1,0 +1,50 @@
+driver: mpu6050_read
+description: MPU-6050 6-axis accelerometer + gyroscope over I2C
+
+# Action params:
+#   accel_x: <device>   analog_input or digital_input — systemSensors.<device> receives ax in g
+#   accel_y: <device>   analog_input or digital_input — systemSensors.<device> receives ay in g
+#   accel_z: <device>   analog_input or digital_input — systemSensors.<device> receives az in g
+#
+# Required manual additions:
+#   Add to sketch globals:
+#     #include <MPU6050.h>
+#     MPU6050 _mpu;
+#   Add to setup():
+#     Wire.begin();
+#     _mpu.initialize();
+#
+# Example model action:
+#   read_imu:
+#     driver: mpu6050_read
+#     params:
+#       accel_x: ax
+#       accel_y: ay
+#       accel_z: az
+
+platforms:
+  arduino: |
+    extern MPU6050 _mpu;
+    int16_t _ax_raw, _ay_raw, _az_raw, _gx_raw, _gy_raw, _gz_raw;
+    _mpu.getMotion6(&_ax_raw, &_ay_raw, &_az_raw, &_gx_raw, &_gy_raw, &_gz_raw);
+    systemSensors.{accel_x} = _ax_raw / 16384.0f;
+    systemSensors.{accel_y} = _ay_raw / 16384.0f;
+    systemSensors.{accel_z} = _az_raw / 16384.0f;
+
+  espidf: |
+    // ESP-IDF: use I2C driver directly. See ESP-IDF I2C docs for full init.
+    // extern i2c_port_t _i2c_port;  // set to I2C_NUM_0 in your setup
+    uint8_t _buf[14];
+    uint8_t _reg = 0x3B;
+    i2c_master_write_read_device(_i2c_port, 0x68, &_reg, 1, _buf, 14, pdMS_TO_TICKS(10));
+    int16_t _ax_raw = (_buf[0] << 8) | _buf[1];
+    int16_t _ay_raw = (_buf[2] << 8) | _buf[3];
+    int16_t _az_raw = (_buf[4] << 8) | _buf[5];
+    systemSensors.{accel_x} = _ax_raw / 16384.0f;
+    systemSensors.{accel_y} = _ay_raw / 16384.0f;
+    systemSensors.{accel_z} = _az_raw / 16384.0f;
+
+  default: |
+    // TODO: implement mpu6050_read for this platform
+    // Write acceleration in g to: systemSensors.{accel_x}, .{accel_y}, .{accel_z}
+    (void)ctx;

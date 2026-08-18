@@ -1,0 +1,52 @@
+driver: servo_write
+description: Servo motor — set angle (0-180°) from a parameter
+
+# Action params:
+#   pin:   <device>   digital_output — {pin_pin} is the servo signal pin
+#   angle: <param>    float or int parameter (degrees, 0-180)
+#
+# Required manual additions:
+#   Add to sketch globals:
+#     #include <Servo.h>
+#     Servo _servo_{pin};
+#   Add to setup():
+#     _servo_{pin}.attach({pin_pin});
+#   Note: on ESP32 with Arduino core, use ESP32Servo library instead.
+#
+# Example model:
+#   hardware:
+#     devices:
+#       gripper: { type: digital_output, pin: GPIO13 }
+#   parameters:
+#     angle_deg: { type: float, default: 90.0, range: [0, 180], unit: deg }
+#   actions:
+#     move_gripper:
+#       driver: servo_write
+#       params:
+#         pin: gripper
+#         angle: angle_deg
+
+platforms:
+  arduino: |
+    extern Servo _servo_{pin};
+    int _angle_clamped = (int)systemParameters.{angle};
+    if (_angle_clamped < 0)   _angle_clamped = 0;
+    if (_angle_clamped > 180) _angle_clamped = 180;
+    _servo_{pin}.write(_angle_clamped);
+
+  espidf: |
+    // ESP-IDF: use LEDC to generate PWM servo signal (50 Hz, 1-2 ms pulse).
+    const uint32_t _servo_freq = 50;
+    const uint32_t _servo_res  = 16;
+    const uint32_t _servo_full = (1 << _servo_res) - 1;
+    float _angle_f = (float)systemParameters.{angle};
+    if (_angle_f < 0.0f)   _angle_f = 0.0f;
+    if (_angle_f > 180.0f) _angle_f = 180.0f;
+    uint32_t _duty = (uint32_t)((_servo_full / 20.0f) * (1.0f + _angle_f / 180.0f));
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, _duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
+
+  default: |
+    // TODO: implement servo_write for this platform
+    // Write angle (0-180 degrees) to servo on {pin_pin}
+    (void)ctx;
