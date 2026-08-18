@@ -1,6 +1,6 @@
 # PulseIR Quick Start
 
-**TL;DR**: Write YAML, get Arduino code. 5 minutes.
+**TL;DR**: Describe your system in YAML (one file or many), get firmware. 5 minutes.
 
 ---
 
@@ -471,25 +471,47 @@ the hierarchy, so an enclosing state may still handle it.
 
 ## File Structure
 
+**Single-file project** — fine for simple systems:
+
 ```
 my_system/
 ├── my_system.yaml          ← Write this
-├── my_system.ino           ← Generated
-└── notes.txt               ← Your implementation notes
+└── my_system/              ← Generated with --outdir
+    ├── my_system.ino       ← Do not edit
+    ├── my_system.h         ← Do not edit
+    └── src/
+        ├── guards.cpp      ← Your code — never overwritten
+        └── actions.cpp     ← Your code — never overwritten
 ```
 
-Then upload `my_system.ino` to Arduino IDE.
+**Multi-file project** — the recommended layout for anything beyond a few actions:
+
+```
+my_system/
+├── pulse.yaml              ← Entry file (project: + imports:)
+├── hardware.yaml           ← buses and devices
+├── parameters.yaml         ← tunable values
+├── machine.yaml            ← events, states, transitions, actions
+└── src/                    ← your guards and actions in C++
+```
+
+Generate with `--outdir` and the entry file is enough — the importer resolves the rest:
+
+```bash
+node dist/src/cli.js my_system/pulse.yaml --outdir build/my_system
+```
 
 ---
 
 ## Workflow
 
 ```
-1. Write YAML (describe your system)
+1. Write YAML (one file or a directory of files with imports:)
    ↓
-2. Generate code (node dist/src/cli.js ... --output ...)
+2. Generate code
+     node dist/src/cli.js pulse.yaml --outdir build/my_system
    ↓
-3. Implement actions (fill in the stubs)
+3. Implement actions (fill in the stubs in build/my_system/src/)
    ↓
 4. Add event triggers (fill in loop() with sensor logic)
    ↓
@@ -497,7 +519,7 @@ Then upload `my_system.ino` to Arduino IDE.
    ↓
 6. Debug with Serial Monitor
    ↓
-7. Done!
+7. Tune parameters in the model, regenerate — stubs are never overwritten
 ```
 
 ---
@@ -531,6 +553,99 @@ void action_my_action(SystemContext* ctx) {
 ```
 
 ---
+
+---
+
+## Splitting a Model Across Files
+
+A single YAML file is fine for small systems. As a model grows, splitting it by concern keeps each file reviewable and lets team members work on hardware wiring, parameters, and behaviour independently.
+
+### Directory layout
+
+```
+boiler/
+├── pulse.yaml          ← entry file; the only one that declares `project:`
+├── hardware.yaml       ← buses and devices
+├── parameters.yaml     ← tunable values
+├── machine.yaml        ← events, states, transitions, actions
+└── src/                ← your C++ (guards.cpp, actions.cpp)
+```
+
+### Entry file
+
+Only the entry file declares `project:` and lists what to import:
+
+```yaml
+# pulse.yaml
+pulseir: "1"
+
+project:
+  name: boiler_control
+  version: "1.0"
+
+target:
+  board: esp32
+
+imports:
+  - hardware.yaml
+  - parameters.yaml
+  - machine.yaml
+```
+
+### Imported files
+
+Each imported file is a partial model. Name-keyed sections (`events:`, `actions:`, `hardware.devices:`, etc.) merge across files — a name declared in two files is an error, not a silent override. Transitions concatenate in import order, with the importing file's transitions last.
+
+```yaml
+# hardware.yaml
+hardware:
+  buses:
+    i2c_bus:
+      interface: i2c
+      sda: GPIO21
+      scl: GPIO22
+
+  devices:
+    sensor: { type: dht22, pin: GPIO4, channels: [temperature, humidity] }
+    screen:  { type: lcd_i2c, bus: i2c_bus, address: 0x27, cols: 16, rows: 2 }
+```
+
+```yaml
+# parameters.yaml
+parameters:
+  report_ms: { type: int, default: 2000, range: [500, 60000], unit: ms }
+```
+
+```yaml
+# machine.yaml
+events:
+  BUTTON: { source: external }
+
+actions:
+  read_climate:
+    driver: dht_read
+    params: { device: sensor, measure: [temperature, humidity] }
+
+tasks:
+  poll: { every: report_ms, do: read_climate }
+```
+
+### Generate from a multi-file model
+
+Pass the entry file — the one with `project:`:
+
+```bash
+node dist/src/cli.js boiler/pulse.yaml --outdir build/boiler
+```
+
+### Rules
+
+- Paths in `imports:` resolve relative to the file that lists them, so you can nest subdirectories.
+- Only the entry file may declare `project:`.
+- Importing a file that imports another file works — full transitive merging, with cycle detection.
+- A missing file or a cycle is reported by name, including which file asked for it.
+
+See `examples/boiler/` and `examples/sensor_gateway/` for real multi-file models.
 
 ---
 
@@ -623,11 +738,12 @@ The `dht_read` driver knows how to call `sensor.readTemperature()` and `sensor.r
 
 ## Next Steps
 
-- See `DEVICES.md` for all supported device types and their YAML configuration
-- See `TARGETS.md` for Arduino, ESP-IDF, MicroPython, and Zephyr backend details
-- See `ARCHITECTURE.md` for full design details
-- See `examples/boiler/` for a multi-file system with a state machine
-- See `examples/rtc_clock.yaml` for DS3231 RTC + LCD without any C code
+- See **DEVICES.md** for all supported device types and their YAML configuration
+- See **TARGETS.md** for Arduino, ESP-IDF, MicroPython, and Zephyr backend details
+- See **ARCHITECTURE.md** for full design details
+- See `examples/boiler/` for a real multi-file model with state machine, guards, and multi-file imports
+- See `examples/sensor_gateway/` for a complex multi-file model (four buses, MQTT, TLS)
+- See `examples/rtc_clock.yaml` for DS3231 RTC + LCD with no C code
 - Run tests: `npm run build && npm test`
 
 ---

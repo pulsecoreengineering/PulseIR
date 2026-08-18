@@ -2,6 +2,8 @@
 
 All device types recognised by PulseIR's code generator, their YAML configuration, the sensors/channels they expose, the drivers that operate them, and the Arduino libraries they require.
 
+> **Multi-file note**: In real projects, hardware declarations live in their own file (typically `hardware.yaml`) and the entry file imports it with `imports: [hardware.yaml]`. Everything here applies identically whether you write it inline or split it out. See QUICKSTART.md → "Splitting a Model Across Files" for the import syntax.
+
 ---
 
 ## Table of Contents
