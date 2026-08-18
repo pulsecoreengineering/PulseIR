@@ -532,12 +532,104 @@ void action_my_action(SystemContext* ctx) {
 
 ---
 
-## Next Steps
+---
 
-- See `ARCHITECTURE.md` for full design details
-- See `examples/boiler.yaml` for a complete system
-- Run tests: `npm run build && node dist/test/codegen.test.js`
+## Sensors and Displays
+
+The GPIO example above has no external sensors. Here is a complete model that reads a DHT22 temperature/humidity sensor and shows the values on an I2C LCD — no C to write.
+
+### The model
+
+```yaml
+pulseir: "1"
+
+project:
+  name: climate_display
+  version: "1.0"
+
+target: esp32
+
+hardware:
+  buses:
+    i2c_bus:
+      interface: i2c
+      sda: GPIO21
+      scl: GPIO22
+
+  devices:
+    sensor:
+      type: dht22
+      pin: GPIO4
+      channels: [temperature, humidity]
+
+    screen:
+      type: lcd_i2c
+      bus: i2c_bus
+      address: 0x27
+      cols: 16
+      rows: 2
+
+actions:
+  read_climate:
+    driver: dht_read
+    params:
+      device: sensor
+      measure: [temperature, humidity]
+
+  update_display:
+    driver: lcd_display
+    params:
+      device: screen
+      clear: true
+      lines:
+        - format: "Temp: {sensor.temperature}C"
+          row: 0
+          col: 0
+        - format: "Hum:  {sensor.humidity}%"
+          row: 1
+          col: 0
+
+tasks:
+  poll:
+    every: 2000
+    do: [read_climate, update_display]
+    description: Read DHT22 and refresh LCD every 2 s
+```
+
+### Generate and build
+
+```bash
+node dist/src/cli.js climate_display.yaml --outdir build/climate_display
+```
+
+Open `build/climate_display/climate_display.ino` in the Arduino IDE. Install the libraries listed in the `// Requires:` header comments:
+
+- **DHT sensor library** (Adafruit)
+- **LiquidCrystal_I2C**
+
+Upload and open the serial monitor. The LCD updates every two seconds — no action stubs to fill in.
+
+### How the format string works
+
+`{sensor.temperature}` in the `format:` string means "the `temperature` channel of the `sensor` device". PulseIR generates `display.print(systemSensors.temperature, 1)` — one decimal place, using the Arduino `Print` class, which works correctly on all boards including AVR (Arduino Uno).
+
+RTC time channels (`hour`, `minute`, `second`) are zero-padded automatically. See `examples/rtc_clock.yaml` for a clock example.
+
+### Why no C?
+
+The `dht_read` driver knows how to call `sensor.readTemperature()` and `sensor.readHumidity()` and write the results to `systemSensors`. The `lcd_display` driver knows how to format those values and call `screen.setCursor()` + `screen.print()`. The model is just data — which sensor, which display, which format, which rate.
 
 ---
 
-**Happy state machine building!** 🎯
+## Next Steps
+
+- See `DEVICES.md` for all supported device types and their YAML configuration
+- See `TARGETS.md` for Arduino, ESP-IDF, MicroPython, and Zephyr backend details
+- See `ARCHITECTURE.md` for full design details
+- See `examples/boiler/` for a multi-file system with a state machine
+- See `examples/rtc_clock.yaml` for DS3231 RTC + LCD without any C code
+- Run tests: `npm run build && npm test`
+
+---
+
+**Happy building!**
