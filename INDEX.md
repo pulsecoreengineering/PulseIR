@@ -13,6 +13,7 @@
 2. **QUICKSTART.md** — Hands-on tutorial: GPIO state machine + sensor/display walkthrough
 3. **DEVICES.md** ⭐ **NEW** — All device types, YAML config, channels, drivers, required libraries
 4. **TARGETS.md** ⭐ **NEW** — Arduino, ESP-IDF, MicroPython, Zephyr: generated output, build steps, feature matrix
+5. **CUSTOM_DRIVERS.md** ⭐ **NEW** — How to add any unsupported hardware without touching the codegen
 
 ### For Understanding Design
 5. **ARCHITECTURE.md** — Why it's built this way, layer overview
@@ -275,6 +276,7 @@ PulseIR/
 ├── QUICKSTART.md                    Tutorial: GPIO + sensor/display walkthrough
 ├── DEVICES.md                       ⭐ All device types, drivers, libraries
 ├── TARGETS.md                       ⭐ Arduino/ESP-IDF/MicroPython/Zephyr details
+├── CUSTOM_DRIVERS.md                ⭐ Custom hardware without touching codegen
 ├── ARCHITECTURE.md                  Design rationale and layer overview
 ├── FUNCTION_CONTRACT.md             Guard/action binding spec (all targets)
 ├── SYSTEMCONTEXT.md                 How guards/actions receive system state
