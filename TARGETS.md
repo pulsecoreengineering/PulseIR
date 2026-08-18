@@ -6,19 +6,40 @@ PulseIR generates firmware from the same YAML model for multiple embedded platfo
 
 ## Selecting a target
 
+Pass `--target` to the CLI, or let the model's `target:` field imply one:
+
 ```bash
 # Default (Arduino)
-node dist/src/cli.js my_model.yaml --output my_sketch/
+node dist/src/cli.js my_model.yaml --outdir build/my_project
 
 # Explicit target
-node dist/src/cli.js my_model.yaml --target espidf  --output my_sketch/
+node dist/src/cli.js my_model.yaml --target espidf      --outdir build/my_project
 node dist/src/cli.js my_model.yaml --target micropython --output main.py
-node dist/src/cli.js my_model.yaml --target zephyr --output my_app/
+node dist/src/cli.js my_model.yaml --target zephyr      --outdir build/my_project
 ```
 
 `--target` accepts: `arduino`, `espidf`, `micropython`, `zephyr`.
 
-The `target:` section of the model also records the intended board:
+### Multi-file models
+
+In real projects the model is split across several YAML files linked by `imports:`. Pass the **entry file** (the one that declares `project:`) to the CLI — the importer resolves everything else relative to it:
+
+```
+boiler/
+├── pulse.yaml      ← pass this to the CLI
+├── hardware.yaml
+├── parameters.yaml
+└── machine.yaml
+```
+
+```bash
+# Single command regardless of how many files the model spans:
+node dist/src/cli.js boiler/pulse.yaml --target espidf --outdir build/boiler
+```
+
+The target flag applies to the whole merged model. See QUICKSTART.md → "Splitting a Model Across Files" for merge rules.
+
+### The `target:` field in the model
 
 ```yaml
 target: esp32          # shorthand
@@ -27,7 +48,7 @@ target:
   board: esp32
 ```
 
-The board hint influences pin naming conventions (GPIO vs D-prefix) but does not override `--target`.
+The board hint influences pin naming conventions (GPIO vs D-prefix) but does not override `--target`. Use `--target` to switch backends; use `target.board` to record which physical board the model is designed for.
 
 ---
 

@@ -356,6 +356,7 @@
     <a href="#intro">Introduction</a>
     <a href="#structure">Top-level structure</a>
     <a href="#versioning">Schema versioning</a>
+    <a href="#imports">Multi-file models</a>
   </div>
   <div class="nav-group">
     <div class="nav-group-label">Hardware</div>
@@ -402,7 +403,7 @@
 <section id="intro">
   <h1>PulseIR Schema Reference</h1>
   <div class="hero">
-    <p><strong>PulseIR</strong> is a YAML-to-embedded-C++ compiler. You describe your hardware, logic, and behaviour in a single YAML file; the toolchain generates a complete, buildable Arduino sketch. The schema supports GPIO, I2C/SPI sensors, LCD and OLED displays, state machines, MQTT, telemetry, safety rules, and more — all without writing C by hand for the common cases.</p>
+    <p><strong>PulseIR</strong> is a YAML-to-firmware compiler. You describe your hardware, logic, and behaviour in one YAML file or a directory of files linked by <code class="inline">imports:</code>; the toolchain generates complete, buildable firmware for Arduino, ESP-IDF, MicroPython, or Zephyr RTOS. The schema supports GPIO, I2C/SPI sensors, LCD and OLED displays, state machines, MQTT, telemetry, safety rules, and more — all without writing C by hand for the common cases.</p>
   </div>
 </section>
 
@@ -1248,17 +1249,37 @@
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 <section id="imports">
   <h2>imports:</h2>
-  <p>Include other YAML files into this model. List sections (<code>events</code>, <code>states</code>, <code>transitions</code>, <code>components</code>, <code>resources</code>, <code>parameters</code>, <code>libraries</code>) are merged in declaration order; the importing file always overrides imported content on conflicts.</p>
+  <p>Split a model across multiple YAML files. The entry file (the one with <code class="inline">project:</code>) lists what to include; the toolchain merges everything before compiling.</p>
+
   <pre><span class="yk">imports</span>:
-  - <span class="ys">shared/sensors.yaml</span>
-  - <span class="ys">shared/comm.yaml</span></pre>
+  - <span class="ys">hardware.yaml</span>
+  - <span class="ys">parameters.yaml</span>
+  - <span class="ys">machine.yaml</span></pre>
+
+  <p>Typical directory layout for a real project:</p>
+  <pre><span class="yc">boiler/</span>
+<span class="yc">├── pulse.yaml       ← entry file (project: + imports:)</span>
+<span class="yc">├── hardware.yaml    ← buses and devices</span>
+<span class="yc">├── parameters.yaml  ← tuneable values</span>
+<span class="yc">└── machine.yaml     ← events, states, transitions, actions</span></pre>
+
+  <p><strong>Merge semantics</strong></p>
+  <dl>
+    <dt>Name-keyed sections</dt>
+    <dd><code>hardware.devices</code>, <code>hardware.buses</code>, <code>events</code>, <code>actions</code>, <code>parameters</code>, <code>tasks</code>, <code>machine.states</code> — merged by name. Declaring the same name in two files is a <strong>parse error</strong>, not a silent override.</dd>
+    <dt>List sections</dt>
+    <dd><code>machine.transitions</code>, <code>libraries</code> — concatenated in import order; the importing file's entries come last.</dd>
+    <dt><code>project:</code></dt>
+    <dd>Only the entry file may declare it. A second declaration in an imported file is an error.</dd>
+  </dl>
 
   <div class="callout warn">
     <span class="callout-icon">⚠</span>
-    <span>Circular imports are detected and reported as a parse error. The maximum import depth is 32 levels.</span>
+    <span>Circular imports are detected and reported as a parse error, naming every file in the cycle. The maximum import depth is 32 levels.</span>
   </div>
 
-  <p>Paths are resolved relative to the importing file's location. The <code>imports</code> list must be a top-level key.</p>
+  <p>Paths resolve relative to the importing file, so subdirectories work. Pass the entry file to the CLI — the importer resolves the rest:</p>
+  <pre>node dist/src/cli.js boiler/pulse.yaml --outdir build/boiler</pre>
 </section>
 
 <hr>
