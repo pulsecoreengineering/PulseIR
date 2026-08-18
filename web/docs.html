@@ -353,6 +353,7 @@
 <nav id="sidebar">
   <div class="nav-group">
     <div class="nav-group-label">Overview</div>
+    <a href="#quickstart">Quick Start</a>
     <a href="#intro">Introduction</a>
     <a href="#structure">Top-level structure</a>
     <a href="#versioning">Schema versioning</a>
@@ -393,6 +394,7 @@
     <a href="#diagnostics">diagnostics:</a>
     <a href="#libraries">libraries:</a>
     <a href="#imports">imports:</a>
+    <a href="#errors">Common Errors</a>
   </div>
 </nav>
 
@@ -404,6 +406,48 @@
   <h1>PulseIR Schema Reference</h1>
   <div class="hero">
     <p><strong>PulseIR</strong> is a YAML-to-firmware compiler. You describe your hardware, logic, and behaviour in one YAML file or a directory of files linked by <code class="inline">imports:</code>; the toolchain generates complete, buildable firmware for Arduino, ESP-IDF, MicroPython, or Zephyr RTOS. The schema supports GPIO, I2C/SPI sensors, LCD and OLED displays, state machines, MQTT, telemetry, safety rules, and more — all without writing C by hand for the common cases.</p>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="quickstart">
+  <h2>Quick Start</h2>
+  <p>The smallest useful model: one LED, one task, no state machine. Save this as <code class="inline">blink.yaml</code>:</p>
+  <pre><span class="yk">pulseir</span>: <span class="ys">"1"</span>
+
+<span class="yk">project</span>:
+  <span class="yk">name</span>: <span class="ys">blink</span>
+
+<span class="yk">target</span>: <span class="ys">esp32</span>
+
+<span class="yk">hardware</span>:
+  <span class="yk">devices</span>:
+    <span class="yk">led</span>: { <span class="yk">type</span>: <span class="ys">digital_output</span>, <span class="yk">pin</span>: <span class="ys">GPIO2</span> }
+
+<span class="yk">parameters</span>:
+  <span class="yk">blink_ms</span>: { <span class="yk">type</span>: <span class="ys">int</span>, <span class="yk">default</span>: <span class="yn">500</span>, <span class="yk">range</span>: [<span class="yn">50</span>, <span class="yn">10000</span>], <span class="yk">unit</span>: <span class="ys">ms</span> }
+
+<span class="yk">actions</span>:
+  <span class="yk">toggle_led</span>: { <span class="yk">driver</span>: <span class="ys">gpio_control</span>, <span class="yk">params</span>: { <span class="yk">device</span>: <span class="ys">led</span>, <span class="yk">value</span>: <span class="ys">toggle</span> } }
+
+<span class="yk">tasks</span>:
+  <span class="yk">blink</span>:
+    <span class="yk">every</span>: <span class="ys">blink_ms</span>     <span class="yc"># reads the parameter every tick — change at runtime</span>
+    <span class="yk">do</span>: <span class="ys">toggle_led</span></pre>
+
+  <p>Generate the Arduino sketch:</p>
+  <pre>node dist/src/cli.js blink.yaml --target arduino</pre>
+
+  <div class="callout ok">
+    <span class="callout-icon">✓</span>
+    <span>Output: <code>blink/blink.ino</code> + <code>blink/blink_types.h</code> — open in the Arduino IDE and upload.</span>
+  </div>
+
+  <p>A state machine is completely optional. If your project only needs periodic tasks and/or serial commands, omit <code class="inline">machine:</code> entirely — the generated sketch will be plain Arduino with no HSM overhead.</p>
+
+  <div class="callout info">
+    <span class="callout-icon">ℹ</span>
+    <span><strong>Key shape rules:</strong> <code>actions:</code>, <code>parameters:</code>, <code>events:</code>, <code>tasks:</code>, and <code>machine.states:</code> are all <em>mappings</em> keyed by name (not lists). <code>machine.transitions:</code> is the one true list. The parser reports a clear error if you use the wrong shape.</span>
   </div>
 </section>
 
@@ -498,6 +542,10 @@
   <!-- Bus types -->
   <h3 id="buses">Bus types</h3>
   <p><code class="inline">hardware.buses</code> is a mapping keyed by bus name. Each entry sets <code class="inline">interface:</code> and interface-specific pin/parameter fields directly — there is no <code>binding:</code> wrapper.</p>
+  <div class="callout info">
+    <span class="callout-icon">ℹ</span>
+    <span><strong>Implicit vs. explicit buses:</strong> Simple pin-based devices (<code>digital_input</code>, <code>digital_output</code>, <code>pwm_output</code>, <code>analog_input</code>, <code>dht22/11</code>) do <em>not</em> need a bus entry — the codegen infers the GPIO/PWM/ADC interface from the device type and its <code>pin:</code>. Only shared bus protocols (I2C, SPI, OneWire, UART) and network interfaces (WiFi, MQTT, BLE) need an explicit <code>buses:</code> entry.</span>
+  </div>
 
   <div class="table-wrap">
     <table>
@@ -692,17 +740,21 @@
 <section id="events">
   <h2>events:</h2>
   <p>Named system events that drive the state machine. Events from sensors, timers, GPIO, or MQTT can all be declared here.</p>
+  <div class="callout warn">
+    <span class="callout-icon">⚠</span>
+    <span><code>events:</code> is a <strong>mapping</strong> keyed by event name — not a list. A list causes a parse error.</span>
+  </div>
   <pre><span class="yk">events</span>:
-  - <span class="yk">name</span>: <span class="ys">BUTTON_PRESSED</span>
+  <span class="yk">BUTTON_PRESSED</span>:
     <span class="yk">source</span>: <span class="ys">external</span>
     <span class="yk">description</span>: <span class="ys">User pressed the main button</span>
-  - <span class="yk">name</span>: <span class="ys">TEMP_HIGH</span>
+  <span class="yk">TEMP_HIGH</span>:
     <span class="yk">source</span>: <span class="ys">sensor</span>
-  - <span class="yk">name</span>: <span class="ys">CMD_START</span>
+  <span class="yk">CMD_START</span>:
     <span class="yk">source</span>: <span class="ys">mqtt</span></pre>
 
   <dl>
-    <dt>name</dt><dd>Event identifier. <span class="req">required</span>
+    <dt><em>EVENT_NAME</em></dt><dd>Event identifier (the mapping key). <span class="req">required</span>
       <p>Conventionally UPPER_SNAKE_CASE.</p></dd>
     <dt>source</dt><dd><span class="type">enum</span> <span class="req">required</span>
       <p>One of: <code>external</code>, <code>timer</code>, <code>sensor</code>, <code>mqtt</code>, <code>internal</code>, <code>custom</code>.</p></dd>
@@ -719,8 +771,7 @@
   <span class="yk">temp_threshold</span>:
     <span class="yk">type</span>: <span class="ys">float</span>
     <span class="yk">default</span>: <span class="yn">75.0</span>
-    <span class="yk">min</span>: <span class="yn">0.0</span>
-    <span class="yk">max</span>: <span class="yn">120.0</span>
+    <span class="yk">range</span>: [<span class="yn">0.0</span>, <span class="yn">120.0</span>]   <span class="yc"># or: min: 0.0  max: 120.0</span>
     <span class="yk">unit</span>: <span class="ys">°C</span>
     <span class="yk">description</span>: <span class="ys">Temperature at which cooling starts</span>
     <span class="yk">persist</span>: <span class="yn">true</span></pre>
@@ -729,13 +780,14 @@
     <dt>type</dt><dd><span class="type">enum</span> <span class="req">required</span>
       <p>One of: <code>float</code>, <code>int</code>, <code>bool</code>, <code>string</code>.</p></dd>
     <dt>default</dt><dd>Initial value. <span class="req">required</span></dd>
-    <dt>min / max</dt><dd>Clamp bounds for numeric types. <span class="opt">optional</span></dd>
+    <dt>range</dt><dd><code>[min, max]</code> clamp bounds for numeric types. <span class="opt">optional</span>
+      <p>Preferred form. Equivalent to separate <code>min:</code> and <code>max:</code> keys, which are also accepted.</p></dd>
     <dt>unit</dt><dd>Display unit string (documentation only). <span class="opt">optional</span></dd>
     <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
     <dt>persist</dt><dd><span class="type">bool</span> <span class="opt">optional</span>
       <p>When true, the value is loaded from NVS/EEPROM at boot and saved when changed.</p></dd>
   </dl>
-  <p>Parameter names are referenced in log strings and action params as <code class="inline">{param_name}</code>.</p>
+  <p>Parameter names are referenced in log strings and action params as <code class="inline">{param_name}</code>. See also: <a href="#tasks">tasks:</a> (<code>every:</code> accepts a parameter name as its interval).</p>
 </section>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
@@ -1002,9 +1054,9 @@
       <span class="yk">col</span>: <span class="yn">3</span>
 
 <span class="yk">tasks</span>:
-  - <span class="yk">name</span>: <span class="ys">clock_tick</span>
+  <span class="yk">clock_tick</span>:
     <span class="yk">every</span>: <span class="yn">1000</span>
-    <span class="yk">actions</span>: [<span class="ys">read_time</span>, <span class="ys">show_time</span>]</pre>
+    <span class="yk">do</span>: [<span class="ys">read_time</span>, <span class="ys">show_time</span>]</pre>
     </div>
   </div>
 </section>
@@ -1012,20 +1064,28 @@
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 <section id="tasks">
   <h2>tasks:</h2>
-  <p>Periodic background work. Each task runs its action list on a fixed interval. Tasks work with or without a state machine.</p>
+  <p>Periodic background work. Each task runs its actions on a fixed interval. Tasks work with or without a state machine.</p>
+
+  <div class="callout warn">
+    <span class="callout-icon">⚠</span>
+    <span><code>tasks:</code> is a <strong>mapping</strong> keyed by task name — not a list. The action key is <code>do:</code>, not <code>actions:</code>. Both mistakes cause parse errors.</span>
+  </div>
+
   <pre><span class="yk">tasks</span>:
-  - <span class="yk">name</span>: <span class="ys">sensor_poll</span>
-    <span class="yk">every</span>: <span class="yn">2000</span>            <span class="yc"># milliseconds, or a parameter name</span>
-    <span class="yk">actions</span>: [<span class="ys">read_temp</span>, <span class="ys">check_limits</span>]
+  <span class="yk">sensor_poll</span>:
+    <span class="yk">every</span>: <span class="yn">2000</span>            <span class="yc"># milliseconds, or the name of an int parameter</span>
+    <span class="yk">do</span>: [<span class="ys">read_temp</span>, <span class="ys">check_limits</span>]
     <span class="yk">log</span>: <span class="ys">T={temperature} H={humidity}</span>
     <span class="yk">description</span>: <span class="ys">Poll weather sensors every 2 seconds</span></pre>
 
   <dl>
-    <dt>name</dt><dd>Task identifier. <span class="req">required</span></dd>
-    <dt>every</dt><dd><span class="type">int | string</span> Interval in milliseconds, or the name of an <code>int</code> parameter. <span class="req">required</span></dd>
-    <dt>actions</dt><dd>List of action names to run each tick. <span class="req">required</span></dd>
+    <dt><em>task_name</em></dt><dd>Task identifier (the mapping key). <span class="req">required</span></dd>
+    <dt>every</dt><dd><span class="type">int | string</span> Interval in milliseconds, or the name of an <code>int</code> parameter. <span class="req">required</span>
+      <p>Using a parameter name (e.g. <code>every: report_ms</code>) makes the interval runtime-tuneable. See <a href="#parameters">parameters:</a>.</p></dd>
+    <dt>do</dt><dd>Action name or list of action names to run each tick. <span class="req">required (unless log: is set)</span>
+      <p>Names must be declared in the top-level <a href="#actions-ref">actions:</a> catalogue.</p></dd>
     <dt>log</dt><dd>Format string printed after actions run. <span class="opt">optional</span>
-      <p>Supports <code>{name}</code> template refs. Requires a UART console bus.</p></dd>
+      <p>Supports <code>{sensor_name}</code> and <code>{parameter_name}</code> template refs. All refs are validated at parse time. Requires a UART console bus.</p></dd>
     <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
   </dl>
 </section>
@@ -1034,28 +1094,38 @@
 <section id="commands">
   <h2>commands:</h2>
   <p>Line-oriented command dispatch, typically over UART serial. Incoming lines are matched exactly; the matching entry runs its actions and/or raises an event.</p>
+  <div class="callout warn">
+    <span class="callout-icon">⚠</span>
+    <span>Commands use a <strong><code>map:</code></strong> key (not a <code>commands:</code> list). Each entry in <code>map:</code> is keyed by the exact text the user types. The option flag is <code>report_unknown:</code> (underscore), not <code>reportUnknown</code>.</span>
+  </div>
+
   <pre><span class="yk">commands</span>:
-  <span class="yk">source</span>: <span class="ys">console</span>           <span class="yc"># name of a UART bus; defaults to the console</span>
-  <span class="yk">reportUnknown</span>: <span class="yn">true</span>      <span class="yc"># print "unknown command" when nothing matches</span>
-  <span class="yk">commands</span>:
-    - <span class="yk">match</span>: <span class="ys">start</span>
-      <span class="yk">actions</span>: [<span class="ys">turn_on_pump</span>]
+  <span class="yk">source</span>: <span class="ys">console</span>           <span class="yc"># name of a UART bus; defaults to the first declared UART</span>
+  <span class="yk">report_unknown</span>: <span class="yn">true</span>     <span class="yc"># print "unknown command" when nothing matches</span>
+  <span class="yk">map</span>:
+    <span class="yc"># Short form: just a single action name (or a list)</span>
+    <span class="yk">on</span>: <span class="ys">led_on</span>
+    <span class="yk">off</span>: <span class="ys">led_off</span>
+    <span class="yc"># Long form: run actions, raise an event, and/or print a reply</span>
+    <span class="yk">start</span>:
+      <span class="yk">do</span>: [<span class="ys">turn_on_pump</span>]
       <span class="yk">event</span>: <span class="ys">CMD_START</span>
       <span class="yk">log</span>: <span class="ys">Pump started</span>
-    - <span class="yk">match</span>: <span class="ys">stop</span>
-      <span class="yk">event</span>: <span class="ys">CMD_STOP</span></pre>
+    <span class="yk">status</span>:
+      <span class="yk">log</span>: <span class="ys">temp={temperature} degC</span></pre>
 
   <dl>
     <dt>source</dt><dd>Name of a declared UART interface. <span class="opt">optional</span>
       <p>Defaults to the project's console (first UART bus).</p></dd>
-    <dt>reportUnknown</dt><dd><span class="type">bool</span> Print an error line when input doesn't match any command. <span class="opt">optional, default true</span></dd>
-    <dt>commands</dt><dd>Array of command entries. <span class="req">required</span></dd>
+    <dt>report_unknown</dt><dd><span class="type">bool</span> Print an error line when input doesn't match any command. <span class="opt">optional, default true</span></dd>
+    <dt>map</dt><dd>Mapping of command string → handler. <span class="req">required</span></dd>
   </dl>
 
-  <h4>Command entry fields</h4>
+  <h4>Command entry fields (long form)</h4>
   <dl>
-    <dt>match</dt><dd>Exact string to match (after trimming whitespace). <span class="req">required</span></dd>
-    <dt>actions</dt><dd>Action names to run when matched. <span class="opt">optional</span></dd>
+    <dt><em>command text</em></dt><dd>The exact string the user types (mapping key, trimmed). <span class="req">required</span></dd>
+    <dt>do</dt><dd>Action name or list of action names to run when matched. <span class="opt">optional</span>
+      <p>Short form: set the entry value directly — <code>on: led_on</code> or <code>on: [led_on, beep]</code>.</p></dd>
     <dt>event</dt><dd>Event name to raise when matched (requires a state machine). <span class="opt">optional</span></dd>
     <dt>log</dt><dd>Reply line to print, with <code>{name}</code> template refs. <span class="opt">optional</span></dd>
     <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
@@ -1066,60 +1136,66 @@
 <section id="machine">
   <h2>machine:</h2>
   <p>An optional hierarchical state machine (HSM). The machine section targets the PulseHSM runtime on Arduino. You can have tasks and commands without a machine, but a machine requires at least one state and one transition.</p>
+  <div class="callout warn">
+    <span class="callout-icon">⚠</span>
+    <span><code>machine.states:</code> is a <strong>mapping</strong> keyed by state name — not a list. <code>machine.transitions:</code> is the one true list. Transition trigger fields are <code>on:</code>, <code>after:</code>, <code>every:</code> — <strong>not</strong> <code>event:</code>, <code>source:</code>, <code>target:</code>. The action field is <code>do:</code>.</span>
+  </div>
+
   <pre><span class="yk">machine</span>:
   <span class="yk">states</span>:
-    - <span class="yk">name</span>: <span class="ys">idle</span>
+    <span class="yk">idle</span>:
       <span class="yk">entry</span>: [<span class="ys">turn_off_led</span>]
-    - <span class="yk">name</span>: <span class="ys">running</span>
+    <span class="yk">running</span>:
       <span class="yk">entry</span>: [<span class="ys">turn_on_led</span>]
-      <span class="yk">exit</span>: [<span class="ys">log_stop</span>]
+      <span class="yk">exit</span>:  [<span class="ys">log_stop</span>]
   <span class="yk">transitions</span>:
-    - <span class="yk">source</span>: <span class="ys">idle</span>
-      <span class="yk">target</span>: <span class="ys">running</span>
-      <span class="yk">event</span>: <span class="ys">CMD_START</span>
-    - <span class="yk">source</span>: <span class="ys">running</span>
-      <span class="yk">target</span>: <span class="ys">idle</span>
-      <span class="yk">after</span>: <span class="yn">30000</span>          <span class="yc"># timeout in ms</span></pre>
+    - <span class="yk">from</span>: <span class="ys">idle</span>
+      <span class="yk">to</span>:   <span class="ys">running</span>
+      <span class="yk">on</span>:   <span class="ys">CMD_START</span>
+    - <span class="yk">from</span>: <span class="ys">running</span>
+      <span class="yk">to</span>:   <span class="ys">idle</span>
+      <span class="yk">after</span>: <span class="yn">30000</span>         <span class="yc"># timeout in ms</span>
+      <span class="yk">do</span>:   [<span class="ys">log_stop</span>]</pre>
 
   <h3 id="states">States</h3>
+  <p><code>machine.states:</code> is a mapping — each key is the state name. Composite states nest child states under a <code>states:</code> sub-mapping.</p>
   <dl>
-    <dt>name</dt><dd>State identifier. <span class="req">required</span></dd>
-    <dt>type</dt><dd><span class="type">enum</span> <code>simple</code> (default), <code>composite</code>, <code>orthogonal</code>. <span class="opt">optional</span></dd>
-    <dt>entry</dt><dd>Action names run when the machine enters this state. <span class="opt">optional</span></dd>
-    <dt>exit</dt><dd>Action names run when the machine exits this state. <span class="opt">optional</span></dd>
-    <dt>initial</dt><dd>Initial child state name (composite states only). <span class="opt">optional</span></dd>
-    <dt>regions</dt><dd>Child regions (composite/orthogonal states). <span class="opt">optional</span></dd>
+    <dt><em>state_name</em></dt><dd>State identifier (the mapping key). <span class="req">required</span></dd>
+    <dt>entry</dt><dd>Action name or list of action names run on entering this state. <span class="opt">optional</span></dd>
+    <dt>exit</dt><dd>Action name or list of action names run on leaving this state. <span class="opt">optional</span></dd>
+    <dt>initial</dt><dd>Initial child state name (required when <code>states:</code> is present). <span class="opt">optional</span></dd>
+    <dt>states</dt><dd>Child state mapping — makes this a composite state. <span class="opt">optional</span></dd>
+    <dt>every / do</dt><dd>State-level periodic shorthand — equivalent to a self-transition with <code>every: N</code> and <code>do: [...]</code>. <span class="opt">optional</span></dd>
     <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
   </dl>
 
-  <h4>Nested states</h4>
-  <pre><span class="yk">states</span>:
-  - <span class="yk">name</span>: <span class="ys">operating</span>
-    <span class="yk">type</span>: <span class="ys">composite</span>
-    <span class="yk">initial</span>: <span class="ys">heating</span>
-    <span class="yk">regions</span>:
-      - <span class="yk">initial</span>: <span class="ys">heating</span>
-        <span class="yk">states</span>:
-          - <span class="yk">name</span>: <span class="ys">heating</span>
-          - <span class="yk">name</span>: <span class="ys">cooling</span></pre>
+  <h4>Nested states example</h4>
+  <pre><span class="yk">machine</span>:
+  <span class="yk">states</span>:
+    <span class="yk">operating</span>:
+      <span class="yk">initial</span>: <span class="ys">heating</span>
+      <span class="yk">states</span>:
+        <span class="yk">heating</span>:
+        <span class="yk">cooling</span>:</pre>
 
   <p>Nested state paths use <code class="inline">/</code> as separator: <code class="inline">operating/heating</code>.</p>
 
   <h3 id="transitions">Transitions</h3>
+  <p><code>machine.transitions:</code> is a list. Exactly one trigger key (<code>on:</code>, <code>after:</code>, or <code>every:</code>) is required per entry.</p>
   <dl>
-    <dt>source</dt><dd>Source state path. Use <code>*</code> for wildcard (any state). <span class="req">required</span></dd>
-    <dt>target</dt><dd>Destination state path. <span class="opt">optional for <code>every:</code> transitions</span></dd>
-    <dt>event</dt><dd>Event name that triggers this transition. <span class="opt">see below</span></dd>
-    <dt>after</dt><dd><span class="type">int | string</span> Fire this many ms after entering the source state. <span class="opt">mutually exclusive with event</span></dd>
-    <dt>every</dt><dd><span class="type">int | string</span> Repeat actions every N ms without leaving the state. <span class="opt">mutually exclusive with event/after</span></dd>
+    <dt>from</dt><dd>Source state path. Use <code>*</code> for wildcard (any state). <span class="req">required</span></dd>
+    <dt>to</dt><dd>Destination state path. <span class="opt">omit for <code>every:</code> in-place transitions</span></dd>
+    <dt>on</dt><dd>Event name that triggers this transition. <span class="opt">one of on/after/every</span></dd>
+    <dt>after</dt><dd><span class="type">int | string</span> Fire N ms after entering the source state. <span class="opt">one of on/after/every</span></dd>
+    <dt>every</dt><dd><span class="type">int | string</span> Repeat <code>do:</code> actions every N ms without leaving the state. <span class="opt">one of on/after/every</span></dd>
     <dt>guard</dt><dd>Named C guard function that must return <code>true</code> for the transition to fire. <span class="opt">optional</span></dd>
-    <dt>actions</dt><dd>Action names to run during the transition. <span class="opt">optional</span></dd>
+    <dt>do</dt><dd>Action name or list of action names to run during the transition. <span class="opt">optional</span></dd>
     <dt>description</dt><dd>Human-readable note. <span class="opt">optional</span></dd>
   </dl>
 
   <div class="callout info">
     <span class="callout-icon">ℹ</span>
-    <span>Guard functions are C stubs you implement: <code>bool guard_&lt;name&gt;(const SystemContext* ctx)</code>. Guards live in C where they can be debugged and type-checked — PulseIR deliberately has no expression language.</span>
+    <span>Guard functions are C stubs you implement: <code>bool guard_&lt;name&gt;(const SystemContext* ctx)</code>. Guards live in C where they can be debugged and type-checked — PulseIR deliberately has no expression language. See <a href="#actions-ref">actions:</a> for the action catalogue they reference.</span>
   </div>
 </section>
 
@@ -1278,6 +1354,65 @@
 
   <p>Paths resolve relative to the importing file, so subdirectories work. Pass the entry file to the CLI — the importer resolves the rest:</p>
   <pre>node dist/src/cli.js boiler/pulse.yaml --outdir build/boiler</pre>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="errors">
+  <h2>Common Errors</h2>
+  <p>The parser produces specific, actionable error messages. Here are the most frequent mistakes and what they mean.</p>
+
+  <h3>Shape errors — list vs. mapping</h3>
+  <div class="callout err" style="background:var(--err-bg);color:var(--err-fg);border:1px solid color-mix(in srgb,var(--err-fg) 18%,transparent)">
+    <span class="callout-icon">✗</span>
+    <span><code>"tasks" is a list, but this schema keys it by name</code></span>
+  </div>
+  <p>You wrote <code>tasks:</code> (or <code>events:</code>, <code>actions:</code>, <code>parameters:</code>, <code>machine.states:</code>) as a YAML list (lines starting with <code>-</code>). Change it to a mapping keyed by name:</p>
+  <pre><span class="yc"># Wrong:</span>
+<span class="yk">tasks</span>:
+  - <span class="yk">name</span>: <span class="ys">poll</span>
+    <span class="yk">every</span>: <span class="yn">1000</span>
+    <span class="yk">actions</span>: [<span class="ys">read_sensor</span>]
+
+<span class="yc"># Correct:</span>
+<span class="yk">tasks</span>:
+  <span class="yk">poll</span>:
+    <span class="yk">every</span>: <span class="yn">1000</span>
+    <span class="yk">do</span>: [<span class="ys">read_sensor</span>]</pre>
+
+  <h3>Unknown key in log/format string</h3>
+  <div class="callout err" style="background:var(--err-bg);color:var(--err-fg);border:1px solid color-mix(in srgb,var(--err-fg) 18%,transparent)">
+    <span class="callout-icon">✗</span>
+    <span><code>Task "poll" log references unknown name "temp_c"</code></span>
+  </div>
+  <p>All <code>{name}</code> references in <code>log:</code>, <code>format:</code>, and <code>lines[].format</code> are validated at parse time against declared sensors, channels, and parameters. Check the exact spelling — it must match a device or channel name (e.g. <code>{temperature}</code> for a channel named <code>temperature</code>), or a parameter name.</p>
+
+  <h3>Missing trigger on transition</h3>
+  <div class="callout err" style="background:var(--err-bg);color:var(--err-fg);border:1px solid color-mix(in srgb,var(--err-fg) 18%,transparent)">
+    <span class="callout-icon">✗</span>
+    <span><code>Transition 2 has neither "on", "after", nor "every"</code></span>
+  </div>
+  <p>Every transition needs exactly one trigger. The old names <code>event:</code>, <code>source:</code>, and <code>target:</code> are not recognised — use <code>on:</code>, <code>from:</code>, and <code>to:</code>.</p>
+
+  <h3>Task has no "every"</h3>
+  <div class="callout err" style="background:var(--err-bg);color:var(--err-fg);border:1px solid color-mix(in srgb,var(--err-fg) 18%,transparent)">
+    <span class="callout-icon">✗</span>
+    <span><code>Task "poll" has no "every". A task runs on an interval</code></span>
+  </div>
+  <p><code>every:</code> is required for every task. It must be a positive integer (milliseconds) or the name of an <code>int</code> parameter. <code>"200ms"</code> is not valid — write <code>200</code>.</p>
+
+  <h3>Action not in catalogue</h3>
+  <div class="callout err" style="background:var(--err-bg);color:var(--err-fg);border:1px solid color-mix(in srgb,var(--err-fg) 18%,transparent)">
+    <span class="callout-icon">✗</span>
+    <span><code>State "idle" entry does "turn_on", which is not in the actions catalogue</code></span>
+  </div>
+  <p>All action names used in <code>do:</code>, state <code>entry:</code>/<code>exit:</code>, and transitions must be declared in the top-level <a href="#actions-ref">actions:</a> section first.</p>
+
+  <h3>commands: declares no "map"</h3>
+  <div class="callout err" style="background:var(--err-bg);color:var(--err-fg);border:1px solid color-mix(in srgb,var(--err-fg) 18%,transparent)">
+    <span class="callout-icon">✗</span>
+    <span><code>commands: declares no "map", so no command would ever be recognised</code></span>
+  </div>
+  <p>The <a href="#commands">commands:</a> block uses a <code>map:</code> key (not <code>commands:</code>) to list the dispatch table. See the commands section for the correct shape.</p>
 </section>
 
 <hr>
