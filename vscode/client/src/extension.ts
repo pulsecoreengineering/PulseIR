@@ -14,6 +14,7 @@ import { runNewProjectWizard } from './wizard.js';
 let client: LanguageClient;
 
 export function activate(context: vscode.ExtensionContext): void {
+  _extensionPath = context.extensionPath;
   const serverModule = context.asAbsolutePath(path.join('server', 'out', 'server.js'));
 
   const serverOptions: ServerOptions = {
@@ -228,13 +229,42 @@ export function deactivate(): Thenable<void> | undefined {
 // Plugin CLI helper
 // ---------------------------------------------------------------------------
 
+/**
+ * Locate the pulse-ir CLI. Tried in order:
+ *
+ *  1. dist/src/cli.js bundled inside the installed extension package
+ *     (extensionPath/dist/src/cli.js — set by vsce when packaging)
+ *  2. dist/src/cli.js relative to __dirname for dev/source installs
+ *     (__dirname is vscode/client/out/, three levels up is the repo root)
+ *  3. 'pulse-ir' on PATH  (npm install -g pulse-ir)
+ */
+let _extensionPath = '';  // set in activate()
+
+function findCli(): { cmd: string; isNode: boolean } {
+  // 1. Packaged extension: extensionPath/dist/src/cli.js
+  if (_extensionPath) {
+    const p = path.join(_extensionPath, 'dist', 'src', 'cli.js');
+    if (fs.existsSync(p)) return { cmd: p, isNode: true };
+  }
+
+  // 2. Dev / source install: repo-root/dist/src/cli.js
+  //    __dirname = vscode/client/out/  →  ../../../ = repo root
+  const devPath = path.resolve(__dirname, '..', '..', '..', 'dist', 'src', 'cli.js');
+  if (fs.existsSync(devPath)) return { cmd: devPath, isNode: true };
+
+  // 3. Global npm install
+  return { cmd: 'pulse-ir', isNode: false };
+}
+
 async function runPluginCommand(args: string[]): Promise<void> {
-  // The extension lives at vscode/client/out/extension.js; the CLI is three
-  // levels up at dist/src/cli.js relative to the repo root.
-  const cliPath = path.resolve(__dirname, '..', '..', '..', '..', 'dist', 'src', 'cli.js');
-  const terminal = vscode.window.createTerminal({ name: 'PulseIR Plugins', hideFromUser: false });
+  const { cmd, isNode } = findCli();
+  const invocation = isNode
+    ? `node "${cmd}" ${args.map(a => JSON.stringify(a)).join(' ')}`
+    : `pulse-ir ${args.map(a => JSON.stringify(a)).join(' ')}`;
+
+  const terminal = vscode.window.createTerminal({ name: 'PulseIR Plugins' });
   terminal.show(true);
-  terminal.sendText(`node "${cliPath}" ${args.map(a => JSON.stringify(a)).join(' ')}`);
+  terminal.sendText(invocation);
 }
 
 // ---------------------------------------------------------------------------
