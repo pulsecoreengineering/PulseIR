@@ -1,97 +1,200 @@
 # PulseIR Custom Drivers
 
-PulseIR's built-in driver list covers the most common hardware — GPIOs, DHT22, BME280, DS18B20, RTCs, LCDs, OLEDs, and more. For anything else, **custom drivers let you attach any hardware without touching the codegen**.
+PulseIR's built-in driver list covers the most common hardware — GPIOs, DHT22, BME280, DS18B20, RTCs, LCDs, OLEDs, and more. For anything else, custom drivers let you attach any hardware without touching the codegen.
 
 ---
 
-## How it works
+## The idea in one sentence
 
-The driver dispatch in PulseIR is a switch on the `driver:` string. Any name that does not match a built-in falls through to a generated TODO stub in `src/actions.cpp`:
-
-```cpp
-void action_measure_distance(SystemContext* ctx) {
-  // Declared params for this action (documentation only):
-  //   trigger: "trig"   -> TRIG_PIN
-  //   echo: "distance"  -> DISTANCE_PIN
-  //
-  // Available on ctx:
-  //   ctx->parameters->alert_cm   (float, cm)
-  //   ctx->sensors->distance      (float) - you fill this in
-  //   ctx->currentState, ctx->previousState   (compare with S_*)
-  //
-  // TODO: Implement the hardware calls for this action.
-  (void)ctx;
-}
-```
-
-That `src/actions.cpp` file is **yours**. PulseIR never overwrites it on subsequent regenerations — it prints `· src/actions.cpp (kept - your code)` instead. You write the hardware calls once; they survive every future model change.
-
-The same applies to `src/guards.cpp`.
+Use any string as `driver:`. PulseIR generates a C++ function stub; you fill it in. That's the full contract — no codegen changes, no build-system changes.
 
 ---
 
-## Step-by-step: HC-SR04 ultrasonic sensor
+## Quick start: HC-SR04 ultrasonic sensor
 
-The HC-SR04 measures distance by timing an echo pulse — not a built-in device type. Here's how to wire it into a PulseIR project using a custom driver.
+A three-step example with no state machine — just a task that runs on a timer.
 
-### 1. Declare the hardware
-
-Declare the trigger and echo pins using the closest matching primitive types. PulseIR sets up `pinMode()` for them; your stub handles the rest.
+### 1. The YAML model
 
 ```yaml
+pulseir: "1"
+project:
+  name: hcsr04_demo
+target: esp32
+
 hardware:
   devices:
     trig:
       type: digital_output
-      pin: GPIO5      # trigger output
-
+      pin: GPIO5
     distance:
       type: digital_input
-      pin: GPIO18     # echo input — named "distance" so systemSensors.distance
-                      # holds the computed cm reading
-```
+      pin: GPIO18     # named "distance" → systemSensors.distance
 
-The generated header will include:
-
-```cpp
-#define TRIG_PIN     5   // GPIO5
-#define DISTANCE_PIN 18  // GPIO18
-
-struct SystemSensors {
-  float distance;   // your custom driver writes here
-};
-```
-
-### 2. Declare the action with a custom driver name
-
-Use any string that isn't a built-in driver name. PulseIR will generate a stub for it.
-
-```yaml
-actions:
-  measure_distance:
-    driver: hcsr04_read          # not built-in → stub is generated
-    params:
-      trigger: trig
-      echo: distance
-    description: Fire HC-SR04 trigger and write cm into systemSensors.distance
-```
-
-### 3. Wire it into tasks and the state machine
-
-```yaml
 parameters:
   alert_cm:
     type: float
     default: 30.0
     unit: cm
 
-events:
-  OBJECT_NEAR: { source: sensor }
+actions:
+  measure_distance:
+    driver: hcsr04_read   # unknown driver → stub is generated
+    params:
+      trigger: trig
+      echo: distance
 
 tasks:
   poll:
     every: 250
     do: [measure_distance]
+```
+
+No `machine:` block — just a repeating task. You read `systemSensors.distance` in your own code.
+
+### 2. Generate
+
+```bash
+node dist/src/cli.js hcsr04.yaml --target arduino --outdir build/hcsr04
+```
+
+```
+✓ Parsed project: hcsr04_demo
+🔨 Generating sketch folder...
+  ✓ hcsr04_demo.ino
+  ✓ src/actions.cpp  (yours to fill in)
+```
+
+### 3. Fill in `src/actions.cpp`
+
+The generated stub has every macro and field you need in a comment at the top:
+
+```cpp
+void action_measure_distance(SystemContext* ctx) {
+  //   trigger: "trig"     -> TRIG_PIN
+  //   echo: "distance"    -> DISTANCE_PIN
+  //   ctx->parameters->alert_cm   (float, cm)
+  //   ctx->sensors->distance      (float) — you fill this in
+  //
+  // TODO: Implement the hardware calls for this action.
+  (void)ctx;
+}
+```
+
+Replace the TODO:
+
+```cpp
+void action_measure_distance(SystemContext* ctx) {
+  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration_us = pulseIn(DISTANCE_PIN, HIGH, 30000UL);
+  systemSensors.distance = (duration_us == 0) ? 999.0f : duration_us * 0.0343f / 2.0f;
+  (void)ctx;
+}
+```
+
+That's it. Your main sketch reads `systemSensors.distance` whenever it likes.
+
+### 4. Regenerate safely
+
+Make any model change and regenerate. PulseIR never overwrites `src/actions.cpp`:
+
+```
+  · src/actions.cpp  (kept - your code)
+```
+
+---
+
+## Driver plugins — write once, reuse everywhere
+
+A **driver plugin** is a YAML file that ships platform-specific code with the driver name. Add it to your model with a `plugins:` list and PulseIR emits the real hardware code instead of a stub — no manual editing of `src/actions.cpp` at all.
+
+### Plugin file format
+
+```yaml
+driver: hcsr04_read
+description: HC-SR04 ultrasonic distance sensor
+
+platforms:
+  arduino: |
+    digitalWrite({trigger_pin}, LOW); delayMicroseconds(2);
+    digitalWrite({trigger_pin}, HIGH); delayMicroseconds(10);
+    digitalWrite({trigger_pin}, LOW);
+    long _dur = pulseIn({echo_pin}, HIGH, 30000UL);
+    systemSensors.{echo} = (_dur == 0) ? 999.0f : _dur * 0.0343f / 2.0f;
+
+  espidf: |
+    gpio_set_level((gpio_num_t){trigger_pin}, 0); esp_rom_delay_us(2);
+    gpio_set_level((gpio_num_t){trigger_pin}, 1); esp_rom_delay_us(10);
+    gpio_set_level((gpio_num_t){trigger_pin}, 0);
+    // ... echo timing with esp_timer_get_time ...
+    systemSensors.{echo} = (_dur <= 0) ? 999.0f : _dur * 0.0343f / 2.0f;
+
+  default: |
+    // TODO: implement hcsr04_read for this platform
+    (void)ctx;
+```
+
+**Template variables** — filled in from the action's `params:`:
+
+| Variable | Expands to |
+|----------|-----------|
+| `{key}` | The param value (device name, e.g. `"distance"`) |
+| `{key_pin}` | The generated pin macro (e.g. `DISTANCE_PIN`) |
+| `{driver}` | The driver name itself |
+
+For `params: { trigger: trig, echo: distance }`:
+- `{trigger}` → `trig`, `{trigger_pin}` → `TRIG_PIN`
+- `{echo}` → `distance`, `{echo_pin}` → `DISTANCE_PIN`
+
+### Using a plugin in your model
+
+```yaml
+plugins:
+  - ../custom_drivers/hcsr04_read.yaml   # path relative to this YAML file
+  - ../custom_drivers/my_sensor.yaml
+```
+
+PulseIR reports each plugin it loads:
+
+```
+🔌 Loaded plugin: hcsr04_read (from ../custom_drivers/hcsr04_read.yaml)
+```
+
+The generated `src/actions.cpp` contains the expanded code — no stub, no manual editing.
+
+### The HC-SR04 plugin is ready to use
+
+The file `custom_drivers/hcsr04_read.yaml` ships with PulseIR. It has Arduino and ESP-IDF implementations. Point your model at it and generate:
+
+```bash
+node dist/src/cli.js examples/hcsr04.yaml --target arduino --outdir build/hcsr04
+```
+
+Generated `src/actions.cpp`:
+
+```cpp
+void action_measure_distance(SystemContext* ctx) {
+  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long _dur = pulseIn(DISTANCE_PIN, HIGH, 30000UL);
+  systemSensors.distance = (_dur == 0) ? 999.0f : _dur * 0.0343f / 2.0f;
+}
+```
+
+No manual editing required.
+
+---
+
+## State machine (optional)
+
+If you need the firmware to react to your sensor — e.g. alert when an object comes near — add a `machine:` block:
+
+```yaml
+events:
+  OBJECT_NEAR: { source: sensor }
 
 machine:
   initial: watching
@@ -105,187 +208,68 @@ machine:
       to:    alerting
     - from: alerting
       on:    OBJECT_NEAR
-      guard: { name: is_far, description: distance above alert_cm }
+      guard: { name: is_far,  description: distance above alert_cm }
       to:    watching
 ```
 
-### 4. Generate the project
-
-```bash
-node dist/src/cli.js examples/hcsr04.yaml --target arduino --outdir build/hcsr04
-```
-
-Output:
-
-```
-✓ Parsed project: hcsr04_demo
-🔨 Generating sketch folder...
-  ✓ hcsr04_demo.ino
-  ✓ src/guards.cpp   (yours to fill in)
-  ✓ src/actions.cpp  (yours to fill in)
-```
-
-### 5. Fill in `src/actions.cpp`
-
-Replace the TODO stub with real hardware calls. The generated comment tells you exactly what variables are available.
+Then in `src/actions.cpp` fire the event when appropriate:
 
 ```cpp
-void action_measure_distance(SystemContext* ctx) {
-  // Send a 10 µs trigger pulse
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  // Measure echo duration and convert to centimetres
-  long duration_us = pulseIn(DISTANCE_PIN, HIGH, 30000UL);  // 30 ms timeout
-  float cm = duration_us * 0.0343f / 2.0f;
-
-  // Write into the generated sensor slot — guards and the FSM read from here
-  systemSensors.distance = (duration_us == 0) ? 999.0f : cm;
-
-  // Fire OBJECT_NEAR when an object is close — the FSM picks it up
-  if (systemSensors.distance < ctx->parameters->alert_cm) {
+  if (systemSensors.distance < ctx->parameters->alert_cm)
     fsm.sendEvent(EVENT_OBJECT_NEAR);
-  }
-
-  (void)ctx;
-}
 ```
 
-### 6. Fill in `src/guards.cpp`
+And fill in `src/guards.cpp`:
 
 ```cpp
 bool guard_is_close(const SystemContext* ctx) {
   return ctx->sensors->distance < ctx->parameters->alert_cm;
 }
-
 bool guard_is_far(const SystemContext* ctx) {
   return ctx->sensors->distance >= ctx->parameters->alert_cm;
 }
 ```
 
-### 7. Regenerate safely
-
-Make a model change (add a parameter, add a task) and regenerate:
-
-```bash
-node dist/src/cli.js examples/hcsr04.yaml --target arduino --outdir build/hcsr04
-```
-
-Output confirms your implementation is kept:
-
-```
-  · src/actions.cpp  (kept - your code)
-  · src/guards.cpp   (kept - your code)
-```
-
-Your HC-SR04 implementation is untouched.
+The state machine is completely optional — start without it, add it later if you need it.
 
 ---
 
 ## What the generated header gives you
 
-Every generated project exposes these in `<name>_generated.h`, which `src/actions.cpp` already includes:
+Every project exposes these in `<name>_generated.h`:
 
 | Symbol | What it is |
 |--------|-----------|
-| `TRIG_PIN` | `#define` for each `digital_output` device's pin number |
-| `DISTANCE_PIN` | `#define` for each `digital_input` / `analog_input` device's pin |
-| `systemSensors.distance` | `float` field for each declared sensor/input device |
-| `systemParameters.alert_cm` | `float` / `int` / `bool` for each declared parameter |
-| `fsm` | The PulseHSM state machine instance — call `fsm.sendEvent(EVENT_…)` |
-| `EVENT_<NAME>` | Enum value for each declared event |
-| `S_<STATE>` | Integer constant for each state — compare with `ctx->currentState` |
+| `TRIG_PIN` | `#define` for each declared device's pin number |
+| `systemSensors.distance` | `float` field per sensor/input device |
+| `systemParameters.alert_cm` | `float` / `int` / `bool` per declared parameter |
+| `fsm` | PulseHSM instance — `fsm.sendEvent(EVENT_…)` |
+| `EVENT_<NAME>` | Enum value per declared event |
+| `S_<STATE>` | Integer constant per state |
 
-Pin `#define` naming: `<DEVICE_NAME_UPPERCASE>_PIN`. Device `trig` → `TRIG_PIN`. Device `distance` → `DISTANCE_PIN`.
-
+Pin macro naming: `<DEVICE_NAME_UPPERCASE>_PIN`. Device `trig` → `TRIG_PIN`.
 Sensor field naming: `systemSensors.<device_name>`. Device `distance` → `systemSensors.distance`.
 
 ---
 
-## Device declarations for custom drivers
+## Device declarations
 
-When your custom driver fully owns a pin's timing (like HC-SR04's echo pulse), you still benefit from declaring the pin as a primitive device: PulseIR emits the `pinMode()` call in `setup()` and generates the `#define` macro for your stub to use.
+Declare every pin so PulseIR generates `pinMode()` and the `#define` macro:
 
-| Your device needs | Declare as | What PulseIR generates |
-|-------------------|-----------|----------------------|
-| Output pin (drive HIGH/LOW) | `digital_output` | `pinMode(PIN, OUTPUT)` + `PIN_PIN` macro |
-| Input pin (read or time) | `digital_input` | `pinMode(PIN, INPUT)` + `PIN_PIN` macro + `systemSensors.name` field |
-| Analog read | `analog_input` | `PIN_PIN` macro + `systemSensors.name` field |
-| No initialization needed | Omit the device — hardcode the pin number in the stub | — |
-
-If you declare a `digital_input` device but your custom action completely replaces the normal `gpio_read` logic (as HC-SR04 does), the `systemSensors.name` field is simply a float you write to yourself — the generated poll task that would normally call `gpio_read` won't be emitted because no `gpio_read` action is declared.
-
----
-
-## Cross-platform custom drivers
-
-A custom stub defaults to Arduino API calls. To support multiple targets, use preprocessor guards:
-
-```cpp
-void action_measure_distance(SystemContext* ctx) {
-  // Trigger pulse — same on all platforms
-  long duration_us;
-
-#if defined(ARDUINO)
-  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-  duration_us = pulseIn(DISTANCE_PIN, HIGH, 30000UL);
-
-#elif defined(IDF_VER)
-  // ESP-IDF: gpio_set_level + esp_timer_get_time based timing
-  gpio_set_level((gpio_num_t)TRIG_PIN, 0); esp_rom_delay_us(2);
-  gpio_set_level((gpio_num_t)TRIG_PIN, 1); esp_rom_delay_us(10);
-  gpio_set_level((gpio_num_t)TRIG_PIN, 0);
-  // ... echo timing with gpio_get_level + esp_timer_get_time
-  duration_us = 0; // fill in
-#endif
-
-  float cm = duration_us * 0.0343f / 2.0f;
-  systemSensors.distance = (duration_us == 0) ? 999.0f : cm;
-  if (systemSensors.distance < ctx->parameters->alert_cm)
-    fsm.sendEvent(EVENT_OBJECT_NEAR);
-  (void)ctx;
-}
-```
-
----
-
-## The complete example file
-
-See `examples/hcsr04.yaml` for the full working model — generate and run it with:
-
-```bash
-# Arduino / ESP32
-node dist/src/cli.js examples/hcsr04.yaml --target arduino --outdir build/hcsr04
-
-# ESP-IDF
-node dist/src/cli.js examples/hcsr04.yaml --target espidf --outdir build/hcsr04
-```
-
-Then fill in `src/actions.cpp` and `src/guards.cpp` as shown above. No other file needs editing.
-
----
-
-## Limitations
-
-| What you can't do | Workaround |
-|-------------------|-----------|
-| Have PulseIR auto-select platform API (like `digitalWriteExpr` does for GPIO) | Use `#ifdef ARDUINO` / `#ifdef IDF_VER` in the stub |
-| Add a new entry to `systemSensors` without declaring a device | Declare a `digital_input` or `analog_input` device whose pin slot you repurpose for the computed value |
-| Have PulseIR emit your library's `#include` and object declaration | Add the `#include` and any global variables at the top of `actions.cpp` directly |
-| Emit your driver's setup code into `setup()` | Add an `actions:` entry with your `driver:` name and call it from a one-shot task `every: 1` — or add the setup code to the generated `.ino`'s `// USER SETUP` comment block |
+| Your device needs | Declare as | PulseIR generates |
+|-------------------|-----------|-------------------|
+| Output pin | `digital_output` | `pinMode(PIN, OUTPUT)` + `PIN_PIN` macro |
+| Input pin (read or time) | `digital_input` | `pinMode(PIN, INPUT)` + `PIN_PIN` macro + `systemSensors.name` |
+| Analog read | `analog_input` | `PIN_PIN` macro + `systemSensors.name` |
+| No init needed | Omit — hardcode in stub | — |
 
 ---
 
 ## Summary
 
-1. Pick any `driver:` name that isn't in the built-in list.
-2. Generate — PulseIR creates a TODO stub in `src/actions.cpp`.
-3. Fill in the stub. It has the pin macros, sensor fields, and parameters it needs.
-4. Regenerate freely — the stub is never overwritten.
+1. Pick any `driver:` name not in the built-in list.
+2. Generate — PulseIR creates a stub in `src/actions.cpp` with every macro already documented.
+3. Fill in the stub (or add a plugin so it's filled in automatically).
+4. Regenerate freely — `src/actions.cpp` is yours and never overwritten.
 
-That's it. No codegen changes, no plugin system, no build system changes.
+To reuse a driver across projects, write a plugin YAML once, store it in `custom_drivers/`, and point any model at it with `plugins:`.

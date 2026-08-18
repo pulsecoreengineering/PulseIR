@@ -1,82 +1,42 @@
 pulseir: "1"
 
-# Custom driver example: HC-SR04 ultrasonic distance sensor.
-#
-# The built-in driver list doesn't include HC-SR04. Instead of modifying
-# the codegen, we declare the action with driver: hcsr04_read — an unknown
-# driver name — and PulseIR generates a TODO stub in src/actions.cpp that
-# we fill in once.
-#
-# The _actions.cpp file is never overwritten on regeneration, so the
-# implementation persists across every future model change.
-#
-# Device naming trick:
-#   trig    → digital_output on GPIO5  → PulseIR emits pinMode(TRIG_PIN, OUTPUT)
-#   distance → digital_input on GPIO18 → PulseIR emits pinMode(DISTANCE_PIN, INPUT)
-#                                         and creates systemSensors.distance (float)
-#
-# Our custom action uses both pins directly (TRIG_PIN, DISTANCE_PIN) and
-# writes the computed centimetre reading into systemSensors.distance.
-
 project:
   name: hcsr04_demo
-  description: HC-SR04 ultrasonic distance sensor — custom driver example
 
 target: esp32
+
+# Load the HC-SR04 driver plugin so PulseIR emits real hardware code
+# instead of a TODO stub. The path is relative to this file.
+plugins:
+  - ../custom_drivers/hcsr04_read.yaml
 
 hardware:
   devices:
     trig:
       type: digital_output
-      pin: GPIO5
+      pin: GPIO5       # trigger output
+
     distance:
       type: digital_input
-      pin: GPIO18
+      pin: GPIO18      # echo input — systemSensors.distance holds the cm reading
 
 parameters:
   alert_cm:
     type: float
     default: 30.0
     unit: cm
-    description: Distance below which OBJECT_NEAR fires
-
-events:
-  OBJECT_NEAR:
-    source: sensor
-    description: An object is closer than alert_cm centimetres
 
 actions:
-  # Custom driver: codegen generates a TODO stub; we fill it in below.
   measure_distance:
     driver: hcsr04_read
     params:
-      trigger: trig
-      echo: distance
-    description: Fire the HC-SR04 trigger pulse; write cm value to systemSensors.distance
+      trigger: trig    # {trigger} -> "trig"  / {trigger_pin} -> TRIG_PIN
+      echo: distance   # {echo}    -> "distance" / {echo_pin} -> DISTANCE_PIN
 
+# Simple task-only model — no state machine required.
+# The measurement runs every 250 ms; your application code reads
+# systemSensors.distance and systemParameters.alert_cm as needed.
 tasks:
   poll:
     every: 250
     do: [measure_distance]
-
-machine:
-  initial: watching
-
-  states:
-    watching:
-    alerting:
-
-  transitions:
-    - from: watching
-      on: OBJECT_NEAR
-      guard:
-        name: is_close
-        description: distance reading is below alert_cm
-      to: alerting
-
-    - from: alerting
-      on: OBJECT_NEAR
-      guard:
-        name: is_far
-        description: distance reading is above alert_cm
-      to: watching

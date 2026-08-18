@@ -42,6 +42,8 @@ import type {
 import { parseTemplate } from '../analysis/template.js';
 import type { ImpliedLibrary, InterfaceEmission } from './interfaces.js';
 import type { PlatformBackend, Sizing } from './backend.js';
+import type { DriverPlugin } from './driver-plugin.js';
+import { resolvePluginBody } from './driver-plugin.js';
 import { ArduinoBackend } from './arduino.js';
 
 export class CodegenError extends Error {
@@ -258,6 +260,8 @@ export class Codegen {
   private periodicBySource: Map<number, number[]> = new Map();
 
   private readonly backend: PlatformBackend;
+  /** Custom driver plugins loaded from the model's plugins: list. */
+  private readonly driverPlugins: Map<string, DriverPlugin>;
   /** resource name → what its interface contributes to the sketch */
   private emissions: Map<string, InterfaceEmission> = new Map();
   /** Every library needed, deduplicated by name. */
@@ -272,8 +276,9 @@ export class Codegen {
   /** Setup lines (one per native-timer task) injected into _setup(). */
   private nativeTimerSetupLines: string[] = [];
 
-  constructor(backend: PlatformBackend = new ArduinoBackend()) {
+  constructor(backend: PlatformBackend = new ArduinoBackend(), plugins: DriverPlugin[] = []) {
     this.backend = backend;
+    this.driverPlugins = new Map(plugins.map(p => [p.driver, p]));
   }
 
   /**
@@ -2388,6 +2393,12 @@ static void pollCommands() {
         const board       = (this.project.target?.board ?? '').toLowerCase();
         return this.backend.httpPostLines(url, body, contentType, board);
       }
+    }
+
+    // Check user-supplied driver plugins before falling back to a TODO stub.
+    if (driver && this.driverPlugins.has(driver)) {
+      const plugin = this.driverPlugins.get(driver)!;
+      return resolvePluginBody(plugin, params, this.backend.name);
     }
 
     // Unknown or custom driver — the user writes the body.

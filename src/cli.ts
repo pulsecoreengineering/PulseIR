@@ -26,6 +26,7 @@ import { FileResolver } from './parser/fs-resolver.js';
 import type { SourceResolver } from './parser/resolver.js';
 import { Codegen } from './codegen/index.js';
 import type { GeneratedProject } from './codegen/index.js';
+import type { DriverPlugin } from './codegen/driver-plugin.js';
 import type { PulseProject } from './model/index.js';
 import type { PlatformBackend } from './codegen/backend.js';
 import { ArduinoBackend } from './codegen/arduino.js';
@@ -36,6 +37,7 @@ import { TopicEmitter } from './emit/topics.js';
 import { LibraryEmitter } from './emit/libraries.js';
 import { DiagramEmitter } from './emit/diagram.js';
 import { CmakeEmitter } from './emit/cmake.js';
+import * as yaml from 'js-yaml';
 import { ZephyrProjectEmitter } from './emit/zephyr_project.js';
 import { Validator } from './analysis/validate.js';
 import { loadBoard, resolveBoard, checkFrameworkCompatibility, checkPinCapabilities } from './parser/board-resolver.js';
@@ -94,6 +96,42 @@ Generate options:
 
 A model may "include" other files; paths are resolved relative to the file
 that lists them. With --watch, all included files are watched.`;
+
+// ---------------------------------------------------------------------------
+// Plugin loader — reads driver plugin YAML files listed under plugins:
+// ---------------------------------------------------------------------------
+
+function loadPlugins(modelFile: string): DriverPlugin[] {
+  try {
+    const raw = fs.readFileSync(path.resolve(modelFile), 'utf8');
+    const doc = (yaml.load(raw) ?? {}) as Record<string, unknown>;
+    const pluginPaths = Array.isArray(doc.plugins) ? (doc.plugins as string[]) : [];
+    if (pluginPaths.length === 0) return [];
+
+    const baseDir = path.dirname(path.resolve(modelFile));
+    const plugins: DriverPlugin[] = [];
+
+    for (const rel of pluginPaths) {
+      const fullPath = path.resolve(baseDir, rel);
+      try {
+        const content = fs.readFileSync(fullPath, 'utf8');
+        const plugin = yaml.load(content) as DriverPlugin;
+        if (!plugin?.driver) {
+          console.warn(`⚠️  Plugin "${rel}" has no "driver:" field — skipped`);
+          continue;
+        }
+        plugins.push(plugin);
+        console.log(`🔌 Loaded plugin: ${plugin.driver} (from ${rel})`);
+      } catch (err) {
+        console.error(`❌ Could not load plugin "${rel}": ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    return plugins;
+  } catch {
+    return [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -370,7 +408,7 @@ async function cmdGenerate(args: string[]): Promise<void> {
       if (outDir) {
         console.log('🔨 Generating sketch folder...');
         const resolvedOutDir = path.resolve(outDir);
-        writeProject(resolvedOutDir, new Codegen(backend!).generateFiles(project));
+        writeProject(resolvedOutDir, new Codegen(backend!, loadPlugins(inputFile)).generateFiles(project));
 
         if (emitCmake && isEspIdf) {
           writeCmake(resolvedOutDir, project);
@@ -383,7 +421,7 @@ async function cmdGenerate(args: string[]): Promise<void> {
 
       if (outputFile || !(outDir || topicsFile || librariesFile || diagramFile)) {
         console.log('🔨 Generating C++ code...');
-        const codegen = new Codegen(backend!);
+        const codegen = new Codegen(backend!, loadPlugins(inputFile));
         const cppCode = codegen.generate(project);
 
         if (outputFile) {
