@@ -21,8 +21,16 @@ The schema has no expression field. This is enforced, not merely stated.
 ## 2. System Architecture
 
 ```
-YAML model(s)
-    ↓ Parser (src/parser/)
+YAML model (one file or a directory linked by imports:)
+    │
+    ├─ pulse.yaml    ← entry file (project: + imports:)
+    ├─ hardware.yaml
+    ├─ parameters.yaml
+    └─ machine.yaml
+    │
+    ↓ SourceResolver  (FsResolver on disk; MemoryResolver in browser)
+    ↓ Merge           (keyed sections merged; transitions concatenated)
+    ↓ Parser (src/parser/index.ts)
 PulseProject IR                ← runtime-neutral, platform-neutral
     ↓ Board Resolver            logical pin names → physical GPIO
     ↓ Validator                 semantic rules, pin conflicts
@@ -66,9 +74,50 @@ never requires touching the backends.
 
 ## 4. Layer 2 — Parser and Board Resolver (`src/parser/`)
 
-### 4.1 Parser (`index.ts`)
+### 4.1 Multi-file models and the SourceResolver
 
-Two-pass:
+A model can be a single YAML file or a directory of files linked by `imports:`. Both produce the same `PulseProject` IR — the rest of the pipeline never sees files, only the merged result.
+
+```
+pulse.yaml          ← entry file (must declare project:)
+  imports:
+    hardware.yaml   ← buses and devices
+    parameters.yaml ← tunable values
+    machine.yaml    ← events, states, transitions, actions
+```
+
+The `SourceResolver` interface (`resolver.ts`) abstracts "give me the content of this path". Two implementations ship:
+
+| Class | File | Used by |
+|-------|------|---------|
+| `FsResolver` | `fs-resolver.ts` | CLI — reads from disk relative to the importing file |
+| `MemoryResolver` | `resolver.ts` | Web editor — reads from the open tab buffers |
+
+Keeping the abstraction at the `SourceResolver` boundary means the parser and merge logic are shared; only the I/O layer differs.
+
+**Merge semantics**
+
+| Section | Rule |
+|---------|------|
+| `project:` | Only the entry file may declare it; a second declaration is an error |
+| `hardware.devices:`, `events:`, `actions:`, `parameters:`, `tasks:`, `commands:` | Keyed by name — names merge across files; the same name in two files is an error, not a silent override |
+| `hardware.buses:` | Same as above |
+| `machine.states:` | Keyed by name, same rules |
+| `machine.transitions:` | Concatenated in import order, importing file last |
+| `libraries:` | Concatenated; duplicates by name are deduplicated |
+| `imports:` | Resolved relative to the declaring file; transitive (A imports B imports C is fine); cycles are detected and reported naming every file in the cycle |
+
+**What the error messages look like**
+
+```
+hardware.yaml:12: device "sensor" already declared in parameters.yaml:3
+pulse.yaml:5: import cycle: pulse.yaml → hardware.yaml → pulse.yaml
+sensor_gateway/hardware.yaml:8: missing import target: "modbus.yaml"
+```
+
+### 4.2 Parser (`index.ts`)
+
+Two-pass per file, applied after merging:
 1. Load YAML; map each section to IR types
 2. Validate all references (unknown events, unknown states, transition targets,
    action catalogue membership, pin conflicts, import cycles)
@@ -76,7 +125,7 @@ Two-pass:
 Errors include file + section context. `Parser.warnings` carries soft notices
 (deprecated shapes, possible oversights) that the CLI prints as `⚠️` lines.
 
-### 4.2 Board Resolver (`board-resolver.ts`)
+### 4.4 Board Resolver (`board-resolver.ts`)
 
 Translates **logical pin names** to **physical GPIO identifiers** before
 codegen runs. A model that says `pin: LED_BUILTIN` becomes `pin: GPIO2` when
@@ -115,7 +164,7 @@ The resolver catches:
 **Adding a new board**: copy any `boards/*.yaml`, fill in real vendor data
 (not from memory — cite the datasheet), add a test in `test/compile.test.ts`.
 
-### 4.3 Known board profiles
+### 4.5 Known board profiles
 
 | Board ID | Framework | Zephyr target |
 |---|---|---|
