@@ -64,7 +64,7 @@
       },
       {
         "view": "pulseir.driversView",
-        "contents": "No driver plugins installed.\n\n[Install Plugin](command:pulseir.pluginInstall)"
+        "contents": "No driver plugins installed.\n\n[Browse built-in plugins](command:pulseir.pluginBrowse)\n[Install from file](command:pulseir.pluginInstall)\n[Create a new plugin](command:pulseir.pluginNew)"
       }
     ],
     "languages": [
@@ -145,6 +145,16 @@
         "command": "pulseir.refreshDrivers",
         "title": "PulseIR: Refresh Driver Plugins",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "pulseir.pluginBrowse",
+        "title": "PulseIR: Browse Built-in Plugins",
+        "icon": "$(library)"
+      },
+      {
+        "command": "pulseir.pluginNew",
+        "title": "PulseIR: New Driver Plugin",
+        "icon": "$(new-file)"
       }
     ],
     "menus": {
@@ -172,14 +182,24 @@
           "group": "navigation"
         },
         {
-          "command": "pulseir.pluginInstall",
+          "command": "pulseir.pluginBrowse",
           "when": "view == pulseir.driversView",
           "group": "navigation@1"
         },
         {
-          "command": "pulseir.refreshDrivers",
+          "command": "pulseir.pluginInstall",
           "when": "view == pulseir.driversView",
           "group": "navigation@2"
+        },
+        {
+          "command": "pulseir.pluginNew",
+          "when": "view == pulseir.driversView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "pulseir.refreshDrivers",
+          "when": "view == pulseir.driversView",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [

@@ -20,6 +20,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as https from 'https';
+import * as http from 'http';
 import { fileURLToPath } from 'url';
 import { Parser } from './parser/index.js';
 import { FileResolver } from './parser/fs-resolver.js';
@@ -74,7 +76,7 @@ const USAGE = `Usage: pulse-ir <command> [args] [options]
 Commands:
   init [name]          Scaffold a new project YAML (name defaults to "my_project")
   validate <file>      Parse and validate; print diagnostics; no codegen
-  plugin install <f>   Install a driver plugin globally (~/.pulseir/drivers/)
+  plugin install <f>   Install a driver plugin from a file or URL
   plugin list          List all globally installed driver plugins
   plugin remove <name> Uninstall a driver plugin by driver name
   <file>               Generate C++ from a model (default command)
@@ -172,13 +174,55 @@ function loadPlugins(modelFile: string): DriverPlugin[] {
 // pulse-ir plugin install | list | remove
 // ---------------------------------------------------------------------------
 
+function cmdPluginInstallUrl(url: string, dir: string): void {
+  const client = url.startsWith('https://') ? https : http;
+  console.log(`⬇️  Fetching ${url}...`);
+  client.get(url, (res) => {
+    if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+      cmdPluginInstallUrl(res.headers.location, dir);
+      return;
+    }
+    if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+      console.error(`❌ HTTP ${res.statusCode ?? '?'} fetching ${url}`);
+      process.exit(1);
+    }
+    const chunks: Buffer[] = [];
+    res.on('data', (chunk: Buffer) => chunks.push(chunk));
+    res.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8');
+      let plugin: DriverPlugin;
+      try {
+        plugin = yaml.load(text) as DriverPlugin;
+        if (!plugin?.driver) throw new Error('Missing "driver:" field');
+        if (!plugin.platforms) throw new Error('Missing "platforms:" map');
+      } catch (e) {
+        console.error(`❌ Plugin parse error: ${e instanceof Error ? e.message : e}`);
+        process.exit(1);
+      }
+      fs.mkdirSync(dir, { recursive: true });
+      const dest = path.join(dir, `${plugin.driver}.yaml`);
+      fs.writeFileSync(dest, text);
+      console.log(`✓ Installed "${plugin.driver}" → ${dest}`);
+      if (plugin.description) console.log(`  ${plugin.description}`);
+    });
+    res.on('error', (err: Error) => {
+      console.error(`❌ Network error: ${err.message}`);
+      process.exit(1);
+    });
+  }).on('error', (err: Error) => {
+    console.error(`❌ Network error: ${err.message}`);
+    process.exit(1);
+  });
+}
+
 function cmdPlugin(args: string[]): void {
   const sub = args[0];
 
   if (!sub || sub === '--help' || sub === '-h') {
     console.log(
       'Usage:\n' +
-      '  pulse-ir plugin install <path.yaml>   Install a driver plugin globally\n' +
+      '  pulse-ir plugin install <path.yaml>   Install a driver plugin from a local file\n' +
+      '  pulse-ir plugin install <url>         Install a driver plugin from a URL\n' +
       '  pulse-ir plugin list                  List installed plugins\n' +
       '  pulse-ir plugin remove <driver>       Uninstall a plugin by driver name\n' +
       '\n' +
@@ -192,9 +236,17 @@ function cmdPlugin(args: string[]): void {
   if (sub === 'install') {
     const src = args[1];
     if (!src) {
-      console.error('❌ Usage: pulse-ir plugin install <path.yaml>');
+      console.error('❌ Usage: pulse-ir plugin install <path.yaml|url>');
       process.exit(1);
     }
+
+    // URL install
+    if (src.startsWith('http://') || src.startsWith('https://')) {
+      cmdPluginInstallUrl(src, dir);
+      return;
+    }
+
+    // Local file install
     const fullSrc = path.resolve(src);
     if (!fs.existsSync(fullSrc)) {
       console.error(`❌ File not found: ${fullSrc}`);
