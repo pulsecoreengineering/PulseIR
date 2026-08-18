@@ -214,6 +214,16 @@
     color: #fff; cursor: pointer; font-size: 13px; white-space: nowrap;
   }
   .keyword-add button:hover { opacity: .88; }
+  /* ── Plugin list ────────────────────────────────────────────────────────── */
+  .plugin-empty { font-size: 12px; color: var(--dim); margin: 0 0 6px; }
+  .plugin-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .plugin-row:last-child { border-bottom: none; }
+  .plugin-info { flex: 1; min-width: 0; font-size: 12px; line-height: 1.6; }
+  .plugin-name { font-family: monospace; font-size: 12.5px; font-weight: 600; color: var(--accent); }
+  .plugin-desc { color: var(--dim); }
+  .plugin-plats { color: var(--dim); font-size: 11px; }
+  .plugin-remove-btn { flex: 0 0 auto; font-size: 11px; padding: 2px 8px; color: var(--err-fg, #e05252); border-color: var(--err-fg, #e05252); background: transparent; cursor: pointer; }
+  .plugin-remove-btn:hover { background: var(--err-bg, #fdf0f0); }
   .reset-btn {
     background: none; border: none; cursor: pointer;
     color: var(--dim); font-size: 12px; text-decoration: underline; padding: 0;
@@ -770,6 +780,36 @@
             <button id="keyword-add-btn" type="button">Add</button>
           </div>
           <button id="keyword-reset-btn" class="reset-btn" type="button">Reset to defaults</button>
+        </section>
+      </div>
+
+      <!-- ── Driver plugins ─────────────────────────────────────────────── -->
+      <div class="settings-group">
+        <div class="settings-group-label">Driver Plugins</div>
+        <section class="modal-section">
+          <h3>Installed plugins</h3>
+          <p class="hint">
+            Driver plugins emit real hardware code instead of a TODO stub.
+            Installed plugins are saved in the browser and applied to every
+            project you generate here.
+          </p>
+          <div id="plugin-list"></div>
+        </section>
+        <section class="modal-section">
+          <h3>Install from file</h3>
+          <p class="hint">Choose a <code>.yaml</code> driver plugin file from your computer.</p>
+          <label class="plugin-file-label">
+            <input id="plugin-file-input" type="file" accept=".yaml,.yml" style="display:none">
+            <button type="button" onclick="document.getElementById('plugin-file-input').click()">Choose file…</button>
+          </label>
+        </section>
+        <section class="modal-section">
+          <h3>Install by pasting YAML</h3>
+          <p class="hint">Paste a plugin YAML below and click Install.</p>
+          <textarea id="plugin-paste-area" rows="6"
+            placeholder="driver: my_sensor&#10;platforms:&#10;  arduino: |&#10;    // your code here"
+            autocomplete="off" spellcheck="false" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12px;resize:vertical;background:var(--code);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px;"></textarea>
+          <button id="plugin-paste-install-btn" type="button" style="margin-top:6px;">Install</button>
         </section>
       </div>
 

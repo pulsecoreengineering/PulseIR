@@ -917,8 +917,9 @@ function render(): void {
   let libraries: string;
   try {
     const backend = currentFramework === 'espidf' ? new EspIdfBackend() : new ArduinoBackend();
-    sketch = new Codegen(backend).generate(project);
-    generatedProject = new Codegen(backend).generateFiles(project);
+    const plugins = getDriverPlugins();
+    sketch = new Codegen(backend, plugins).generate(project);
+    generatedProject = new Codegen(backend, plugins).generateFiles(project);
     topics = new TopicEmitter().toJSON(project, namespaceInput.value.trim() || undefined);
     libraries = new LibraryEmitter().toJSON(project);
   } catch (error) {
@@ -1052,8 +1053,116 @@ function saveKeywords(): void {
 let activeKeywords: Set<string> = loadKeywords();
 
 // ---------------------------------------------------------------------------
+// Web plugin registry  (localStorage, browser-only)
+// ---------------------------------------------------------------------------
+
+import type { DriverPlugin } from '../src/codegen/driver-plugin.js';
+import * as yaml from 'js-yaml';
+
+const PLUGIN_STORAGE_KEY = 'pulseir.webPlugins';
+
+interface StoredPlugin { driver: string; description?: string; platforms: Record<string, string>; raw: string; }
+
+function loadWebPlugins(): StoredPlugin[] {
+  try {
+    const raw = localStorage.getItem(PLUGIN_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed as StoredPlugin[];
+  } catch { /* fall through */ }
+  return [];
+}
+
+function saveWebPlugins(plugins: StoredPlugin[]): void {
+  localStorage.setItem(PLUGIN_STORAGE_KEY, JSON.stringify(plugins));
+}
+
+let webPlugins: StoredPlugin[] = loadWebPlugins();
+
+function parsePluginYaml(text: string): StoredPlugin | string {
+  try {
+    const doc = yaml.load(text) as Record<string, unknown>;
+    if (!doc?.driver || typeof doc.driver !== 'string') return 'Missing "driver:" field.';
+    if (!doc.platforms || typeof doc.platforms !== 'object') return 'Missing "platforms:" map.';
+    return {
+      driver: doc.driver as string,
+      description: typeof doc.description === 'string' ? doc.description : undefined,
+      platforms: doc.platforms as Record<string, string>,
+      raw: text,
+    };
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+function getDriverPlugins(): DriverPlugin[] {
+  return webPlugins.map(p => ({ driver: p.driver, description: p.description, platforms: p.platforms }));
+}
+
+// ---------------------------------------------------------------------------
 // Settings modal
 // ---------------------------------------------------------------------------
+
+const pluginList = $<HTMLDivElement>('plugin-list');
+const pluginFileInput = $<HTMLInputElement>('plugin-file-input');
+const pluginPasteArea = $<HTMLTextAreaElement>('plugin-paste-area');
+const pluginPasteBtn = $<HTMLButtonElement>('plugin-paste-install-btn');
+
+function renderPluginList(): void {
+  pluginList.replaceChildren();
+  if (webPlugins.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'plugin-empty';
+    empty.textContent = 'No plugins installed. Install one below.';
+    pluginList.append(empty);
+    return;
+  }
+  for (const p of webPlugins) {
+    const row = document.createElement('div');
+    row.className = 'plugin-row';
+
+    const info = document.createElement('div');
+    info.className = 'plugin-info';
+    const name = document.createElement('code');
+    name.className = 'plugin-name';
+    name.textContent = p.driver;
+    const desc = document.createElement('span');
+    desc.className = 'plugin-desc';
+    desc.textContent = p.description ? ` — ${p.description}` : '';
+    const plats = document.createElement('span');
+    plats.className = 'plugin-plats';
+    plats.textContent = `platforms: ${Object.keys(p.platforms).join(', ')}`;
+    info.append(name, desc, document.createElement('br'), plats);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'plugin-remove-btn';
+    removeBtn.textContent = 'Remove';
+    removeBtn.title = `Remove ${p.driver}`;
+    removeBtn.addEventListener('click', () => {
+      webPlugins = webPlugins.filter(x => x.driver !== p.driver);
+      saveWebPlugins(webPlugins);
+      renderPluginList();
+      render();
+    });
+
+    row.append(info, removeBtn);
+    pluginList.append(row);
+  }
+}
+
+function installPluginFromText(text: string): boolean {
+  const result = parsePluginYaml(text);
+  if (typeof result === 'string') {
+    alert(`Plugin parse error: ${result}`);
+    return false;
+  }
+  webPlugins = webPlugins.filter(p => p.driver !== result.driver);
+  webPlugins.push(result);
+  saveWebPlugins(webPlugins);
+  renderPluginList();
+  render();
+  return true;
+}
 
 function renderKeywordChips(): void {
   keywordChips.replaceChildren();
@@ -1091,6 +1200,8 @@ function addKeyword(): void {
 
 function openSettings(): void {
   renderKeywordChips();
+  renderPluginList();
+  pluginPasteArea.value = '';
   settingsModal.hidden = false;
   keywordInput.value = '';
   keywordInput.focus();
@@ -2270,6 +2381,25 @@ function init(): void {
   $<HTMLButtonElement>('keyword-add-btn').addEventListener('click', addKeyword);
   keywordInput.addEventListener('keydown', event => {
     if (event.key === 'Enter') addKeyword();
+  });
+
+  // Plugin file install
+  pluginFileInput.addEventListener('change', () => {
+    const file = pluginFileInput.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = reader.result as string;
+      if (installPluginFromText(text)) pluginFileInput.value = '';
+    };
+    reader.readAsText(file);
+  });
+
+  // Plugin paste install
+  pluginPasteBtn.addEventListener('click', () => {
+    const text = pluginPasteArea.value.trim();
+    if (!text) return;
+    if (installPluginFromText(text)) pluginPasteArea.value = '';
   });
   $<HTMLButtonElement>('keyword-reset-btn').addEventListener('click', () => {
     activeKeywords = new Set(DEFAULT_KEYWORDS);

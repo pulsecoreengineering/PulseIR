@@ -7,7 +7,7 @@ import {
   ServerOptions,
   TransportKind,
 } from 'vscode-languageclient/node';
-import { PulseIRModelsProvider, PulseIRProjectProvider, ModelItem } from './sidebar.js';
+import { PulseIRModelsProvider, PulseIRProjectProvider, PulseIRDriversProvider, DriverItem, ModelItem } from './sidebar.js';
 import { runNewProjectWizard } from './wizard.js';
 
 let client: LanguageClient;
@@ -49,8 +49,10 @@ export function activate(context: vscode.ExtensionContext): void {
   // Sidebar tree providers
   const modelsProvider  = new PulseIRModelsProvider(context);
   const projectProvider = new PulseIRProjectProvider(context);
+  const driversProvider = new PulseIRDriversProvider();
   vscode.window.registerTreeDataProvider('pulseir.modelsView',  modelsProvider);
   vscode.window.registerTreeDataProvider('pulseir.projectView', projectProvider);
+  vscode.window.registerTreeDataProvider('pulseir.driversView', driversProvider);
 
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument(promoteLanguage),
@@ -90,6 +92,36 @@ export function activate(context: vscode.ExtensionContext): void {
                        vscode.ConfigurationTarget.Workspace);
       projectProvider.refresh();
     }),
+
+    // Driver / plugin commands
+    vscode.commands.registerCommand('pulseir.refreshDrivers', () => driversProvider.refresh()),
+
+    vscode.commands.registerCommand('pulseir.pluginInstall', async () => {
+      const uris = await vscode.window.showOpenDialog({
+        canSelectFiles: true, canSelectMany: false,
+        filters: { 'PulseIR Driver Plugin': ['yaml', 'yml'] },
+        title: 'Select a driver plugin YAML file',
+      });
+      if (!uris || uris.length === 0) return;
+      const src = uris[0].fsPath;
+      await runPluginCommand(['plugin', 'install', src]);
+      driversProvider.refresh();
+    }),
+
+    vscode.commands.registerCommand('pulseir.pluginRemove', async (item?: DriverItem) => {
+      const name = item?.driverName ?? await vscode.window.showInputBox({
+        prompt: 'Driver name to remove', placeHolder: 'e.g. hcsr04_read',
+      });
+      if (!name) return;
+      const confirm = await vscode.window.showWarningMessage(
+        `Remove plugin "${name}"?`, { modal: true }, 'Remove',
+      );
+      if (confirm !== 'Remove') return;
+      await runPluginCommand(['plugin', 'remove', name]);
+      driversProvider.refresh();
+    }),
+
+    vscode.commands.registerCommand('pulseir.pluginList', () => runPluginCommand(['plugin', 'list'])),
   );
 
   // Promote any documents already open when the extension activates.
@@ -98,6 +130,19 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): Thenable<void> | undefined {
   return client?.stop();
+}
+
+// ---------------------------------------------------------------------------
+// Plugin CLI helper
+// ---------------------------------------------------------------------------
+
+async function runPluginCommand(args: string[]): Promise<void> {
+  // The extension lives at vscode/client/out/extension.js; the CLI is three
+  // levels up at dist/src/cli.js relative to the repo root.
+  const cliPath = path.resolve(__dirname, '..', '..', '..', '..', 'dist', 'src', 'cli.js');
+  const terminal = vscode.window.createTerminal({ name: 'PulseIR Plugins', hideFromUser: false });
+  terminal.show(true);
+  terminal.sendText(`node "${cliPath}" ${args.map(a => JSON.stringify(a)).join(' ')}`);
 }
 
 // ---------------------------------------------------------------------------

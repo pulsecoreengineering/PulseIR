@@ -46,6 +46,10 @@
         {
           "id": "pulseir.modelsView",
           "name": "Models"
+        },
+        {
+          "id": "pulseir.driversView",
+          "name": "Driver Plugins"
         }
       ]
     },
@@ -57,6 +61,10 @@
       {
         "view": "pulseir.projectView",
         "contents": "No PulseIR project open.\n\n[New Project](command:pulseir.newProject)"
+      },
+      {
+        "view": "pulseir.driversView",
+        "contents": "No driver plugins installed.\n\n[Install Plugin](command:pulseir.pluginInstall)"
       }
     ],
     "languages": [
@@ -118,6 +126,25 @@
       {
         "command": "pulseir.toggleGenerateOnSave",
         "title": "PulseIR: Toggle Generate on Save"
+      },
+      {
+        "command": "pulseir.pluginInstall",
+        "title": "PulseIR: Install Driver Plugin",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "pulseir.pluginRemove",
+        "title": "PulseIR: Remove Driver Plugin",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "pulseir.pluginList",
+        "title": "PulseIR: List Driver Plugins"
+      },
+      {
+        "command": "pulseir.refreshDrivers",
+        "title": "PulseIR: Refresh Driver Plugins",
+        "icon": "$(refresh)"
       }
     ],
     "menus": {
@@ -143,6 +170,16 @@
           "command": "pulseir.refreshModels",
           "when": "view == pulseir.modelsView",
           "group": "navigation"
+        },
+        {
+          "command": "pulseir.pluginInstall",
+          "when": "view == pulseir.driversView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "pulseir.refreshDrivers",
+          "when": "view == pulseir.driversView",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -155,6 +192,11 @@
           "command": "pulseir.showDiagramForModel",
           "when": "view == pulseir.modelsView && viewItem == pulseirModel",
           "group": "inline@2"
+        },
+        {
+          "command": "pulseir.pluginRemove",
+          "when": "view == pulseir.driversView && viewItem == pulseirDriver",
+          "group": "inline"
         }
       ]
     },
