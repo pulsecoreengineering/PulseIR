@@ -3179,8 +3179,8 @@ ${lines.join("\n")}${hint}`;
         if (!name) {
           throw new TemplateError(`Empty "{}" in ${JSON.stringify(template)}`);
         }
-        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-          throw new TemplateError(`"{${name}}" is not a name. A hole prints one declared parameter or sensor; anything else belongs in an action you write.`);
+        if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(name)) {
+          throw new TemplateError(`"{${name}}" is not a valid reference. Use {name} for a parameter or sensor, or {device.channel} for a named sensor channel.`);
         }
         flush();
         segments.push({ kind: "ref", name });
@@ -4723,8 +4723,10 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
         if (device.class !== "sensor")
           continue;
         if (device.channels?.length) {
-          for (const ch of device.channels)
+          for (const ch of device.channels) {
             known.set(ch.name, `sensor channel (${device.name})`);
+            known.set(`${device.name}.${ch.name}`, `sensor channel (${device.name})`);
+          }
         } else {
           known.set(device.name, "sensor");
         }
@@ -4896,6 +4898,23 @@ Built-in types: ${Object.keys(BUILTIN_DEVICE_TYPES).join(", ")}.`);
       parts.push(segment);
     }
     return (absolute ? "/" : "") + parts.join("/");
+  }
+
+  // dist/src/codegen/driver-plugin.js
+  function resolvePluginBody(plugin, params, backendName) {
+    const template = plugin.platforms[backendName] ?? plugin.platforms["default"];
+    if (!template) {
+      return `  // ${plugin.driver} \u2014 no template for backend "${backendName}"
+  (void)ctx;`;
+    }
+    let result = template.replace("{driver}", plugin.driver);
+    for (const [key, value] of Object.entries(params)) {
+      const strVal = String(value ?? "");
+      const pinMacro = strVal.toUpperCase().replace(/[^A-Z0-9]/g, "_") + "_PIN";
+      result = result.split(`{${key}_pin}`).join(pinMacro);
+      result = result.split(`{${key}}`).join(strVal);
+    }
+    return result.trimEnd().split("\n").map((line) => line.trim() === "" ? "" : `  ${line}`).join("\n");
   }
 
   // dist/src/codegen/interfaces.js
@@ -5452,7 +5471,7 @@ ${body}
     get hasMachine() {
       return this.states.length > 0;
     }
-    constructor(backend = new ArduinoBackend()) {
+    constructor(backend = new ArduinoBackend(), plugins = []) {
       this.states = [];
       this.byPath = /* @__PURE__ */ new Map();
       this.byLeafName = /* @__PURE__ */ new Map();
@@ -5468,6 +5487,7 @@ ${body}
       this.nativeTimerBases = /* @__PURE__ */ new Set();
       this.nativeTimerSetupLines = [];
       this.backend = backend;
+      this.driverPlugins = new Map(plugins.map((p) => [p.driver, p]));
     }
     /**
      * Generate C++ code from a validated PulseModel
@@ -6940,6 +6960,13 @@ static void pollCommands() {
           }
           break;
         }
+        case "dht_read": {
+          const deviceName = String(params.device ?? "");
+          const component = (this.project.system.components || []).find((c) => c.name === deviceName);
+          if (!component)
+            break;
+          return this.actionBody({ ...action, driver: component.type });
+        }
         case "dht22":
         case "dht11": {
           const deviceName = String(params.device ?? "");
@@ -7016,7 +7043,6 @@ static void pollCommands() {
           if (!device)
             break;
           const objVar = this.sanitize(deviceName);
-          const bufSize = (typeof device.config?.cols === "number" ? device.config.cols : 16) + 1;
           const lines = [];
           if (params.clear)
             lines.push(`  ${objVar}.clear();`);
@@ -7026,12 +7052,12 @@ static void pollCommands() {
               const row = (typeof item2 === "object" && item2 && !Array.isArray(item2) ? item2.row : void 0) ?? idx;
               const col = (typeof item2 === "object" && item2 && !Array.isArray(item2) ? item2.col : void 0) ?? 0;
               const fmt = typeof item2 === "string" ? item2 : typeof item2.format === "string" ? item2.format : void 0;
-              lines.push(...this.renderLcdLine(String(fmt ?? ""), Number(row), Number(col), objVar, bufSize));
+              lines.push(...this.renderLcdLine(String(fmt ?? ""), Number(row), Number(col), objVar, 0));
             });
           } else if (typeof params.format === "string") {
             const row = params.row ?? 0;
             const col = params.col ?? 0;
-            lines.push(...this.renderLcdLine(params.format, Number(row), Number(col), objVar, bufSize));
+            lines.push(...this.renderLcdLine(params.format, Number(row), Number(col), objVar, 0));
           } else {
             const col = params.col ?? 0;
             const row = params.row ?? 0;
@@ -7171,6 +7197,10 @@ static void pollCommands() {
           const board = (this.project.target?.board ?? "").toLowerCase();
           return this.backend.httpPostLines(url, body, contentType, board);
         }
+      }
+      if (driver && this.driverPlugins.has(driver)) {
+        const plugin = this.driverPlugins.get(driver);
+        return resolvePluginBody(plugin, params, this.backend.name);
       }
       return "  // TODO: Implement the hardware calls for this action.\n  (void)ctx;";
     }
@@ -7513,10 +7543,11 @@ static char _mqttPrefix[96];`,
     }
     /** Where a logged name lives in C. Validated by the parser, so it resolves. */
     logValue(name) {
-      const parameter = (this.project.system.parameters || []).find((p) => p.name === name);
+      const fieldName = name.includes(".") ? name.slice(name.indexOf(".") + 1) : name;
+      const parameter = (this.project.system.parameters || []).find((p) => p.name === fieldName);
       if (parameter)
-        return `systemParameters.${this.sanitize(name)}`;
-      return `systemSensors.${this.sanitize(name)}`;
+        return `systemParameters.${this.sanitize(fieldName)}`;
+      return `systemSensors.${this.sanitize(fieldName)}`;
     }
     /** Anything in the model that wants to print needs somewhere to print to. */
     assertConsoleForLogs() {
@@ -8189,7 +8220,8 @@ ${implementations.join("\n\n")}`;
       return this.sanitize(name).toUpperCase();
     }
     /** True when channelName comes from an RTC device (values are integers, not floats). */
-    isRtcChannel(channelName) {
+    isRtcChannel(nameOrRef) {
+      const channelName = nameOrRef.includes(".") ? nameOrRef.slice(nameOrRef.indexOf(".") + 1) : nameOrRef;
       for (const c of this.project.system.components ?? []) {
         if (c.driver !== "rtc_read")
           continue;
@@ -8199,35 +8231,45 @@ ${implementations.join("\n\n")}`;
       return false;
     }
     /**
-     * Convert an lcd format template (e.g. "{hour}:{minute}:{second}") into the
+     * Convert an lcd format template (e.g. "{clock.hour}:{clock.minute}:{clock.second}") into the
      * lines of code that write it to the display.
      *
      * RTC channels use %02d + (int) cast; other sensors use %.1f.
      * A literal % in the template is doubled for snprintf.
      * If the template has no {name} refs, print() is used directly.
      */
-    renderLcdLine(fmt, row, col, objVar, bufSize) {
-      const refs = [];
-      const refPattern = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+    renderLcdLine(fmt, row, col, objVar, _bufSize) {
+      const segments = [];
+      const re = /\{([A-Za-z_][A-Za-z0-9_.]*)\}/g;
+      let last = 0;
       let m;
-      while ((m = refPattern.exec(fmt)) !== null)
-        refs.push(m[1]);
-      const setCursor = `  ${objVar}.setCursor(${col}, ${row});`;
-      if (refs.length === 0) {
-        const escaped2 = fmt.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-        return [setCursor, `  ${objVar}.print("${escaped2}");`];
+      while ((m = re.exec(fmt)) !== null) {
+        if (m.index > last)
+          segments.push({ kind: "text", value: fmt.slice(last, m.index) });
+        segments.push({ kind: "ref", name: m[1] });
+        last = m.index + m[0].length;
       }
-      const snprintfFmt = fmt.replace(/%/g, "%%").replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => {
-        return this.isRtcChannel(name) ? "%02d" : "%.1f";
-      });
-      const args = refs.map((name) => this.isRtcChannel(name) ? `(int)systemSensors.${this.sanitize(name)}` : `systemSensors.${this.sanitize(name)}`);
-      const escaped = snprintfFmt.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-      return [
-        `  char _lcd_buf[${bufSize}];`,
-        `  snprintf(_lcd_buf, sizeof(_lcd_buf), "${escaped}", ${args.join(", ")});`,
-        setCursor,
-        `  ${objVar}.print(_lcd_buf);`
-      ];
+      if (last < fmt.length)
+        segments.push({ kind: "text", value: fmt.slice(last) });
+      const fieldOf = (name) => name.includes(".") ? name.slice(name.indexOf(".") + 1) : name;
+      const lines = [`  ${objVar}.setCursor(${col}, ${row});`];
+      for (const seg of segments) {
+        if (seg.kind === "text") {
+          if (!seg.value)
+            continue;
+          const esc = seg.value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+          lines.push(`  ${objVar}.print("${esc}");`);
+        } else {
+          const field = `systemSensors.${this.sanitize(fieldOf(seg.name))}`;
+          if (this.isRtcChannel(seg.name)) {
+            lines.push(`  if ((int)${field} < 10) ${objVar}.print('0');`);
+            lines.push(`  ${objVar}.print((int)${field});`);
+          } else {
+            lines.push(`  ${objVar}.print(${field}, 1);`);
+          }
+        }
+      }
+      return lines;
     }
   };
 
@@ -10303,7 +10345,7 @@ int PulseHSM::_findLCA(int a, int b) const {
     "RTC clock \u2014 DS3231 time on an I2C LCD, no C required": {
       entry: "rtc_clock.yaml",
       files: {
-        "rtc_clock.yaml": '# Real-time clock on an I2C LCD \u2014 no manual C required.\n#\n# Both the DS3231 RTC and the LCD share the same I2C bus. The model:\n#   1. Declares the shared bus once, with SDA/SCL pins.\n#   2. Gives the RTC `type: ds3231`, which auto-populates hour, minute, second\n#      as sensor channels. No explicit `channels:` block needed.\n#   3. Uses `driver: lcd_display` with a format string \u2014 {hour}:{minute}:{second}\n#      becomes real snprintf code with %02d zero-padding for time values.\n#\n# A single task fires every second: read the clock, then update the display.\n# No guards, no state machine, no C to write.\n\npulseir: "1"\n\nproject:\n  name: rtc_clock\n  version: "1.0"\n  description: DS3231 RTC time displayed on a 16\xD72 I2C LCD\n\ntarget: esp32\n\nhardware:\n  buses:\n    # Bus settings are flat \u2014 no `binding:` wrapper.\n    i2c_bus:\n      interface: i2c\n      sda: GPIO21\n      scl: GPIO22\n      frequency: 400000\n\n  devices:\n    # DS3231 RTC: auto-populates hour, minute, second as sensor channels.\n    clock:\n      type: ds3231\n      bus: i2c_bus\n\n    # 16\xD72 I2C character LCD (PCF8574 backpack at 0x27).\n    # Device config fields sit flat on the device \u2014 no `config:` wrapper.\n    display:\n      type: lcd_i2c\n      bus: i2c_bus\n      address: 0x27\n      cols: 16\n      rows: 2\n\nactions:\n  read_time:\n    driver: rtc_read\n    params:\n      device: clock\n\n  show_time:\n    driver: lcd_display\n    params:\n      device: display\n      # {hour}, {minute}, {second} are RTC channels \u2014 formatted as %02d (zero-padded).\n      # No snprintf to write; the codegen produces it from this format string.\n      lines:\n        - format: "Time: {hour}:{minute}:{second}"\n          row: 0\n          col: 0\n\n# Tasks are a map keyed by name, not a list.\ntasks:\n  clock_tick:\n    every: 1000\n    do: [read_time, show_time]\n    description: Read the RTC and refresh the display every second\n'
+        "rtc_clock.yaml": '# Real-time clock on an I2C LCD \u2014 no manual C required.\n#\n# Both the DS3231 RTC and the LCD share the same I2C bus. The model:\n#   1. Declares the shared bus once, with SDA/SCL pins.\n#   2. Declares the DS3231 as a sensor with explicit channels: [hour, minute, second].\n#      These channel names are what you reference in format strings below.\n#   3. Uses `driver: lcd_display` with {device.channel} refs \u2014\n#      {clock.hour} means "the hour channel of the clock device".\n#      The codegen produces %02d / snprintf automatically.\n#\n# A single task fires every second: read the clock, then update the display.\n# No guards, no state machine, no C to write.\n\npulseir: "1"\n\nproject:\n  name: rtc_clock\n  version: "1.0"\n  description: DS3231 RTC time displayed on a 16\xD72 I2C LCD\n\ntarget: esp32\n\nhardware:\n  buses:\n    i2c_bus:\n      interface: i2c\n      sda: GPIO21\n      scl: GPIO22\n      frequency: 400000\n\n  devices:\n    # DS3231 real-time clock.\n    # channels: lists the values this device exposes. These names are\n    # what you use in {device.channel} format refs \u2014 {clock.hour} etc.\n    clock:\n      type: ds3231\n      bus: i2c_bus\n      channels: [hour, minute, second]\n\n    # 16\xD72 I2C character LCD (PCF8574 backpack at 0x27).\n    display:\n      type: lcd_i2c\n      bus: i2c_bus\n      address: 0x27\n      cols: 16\n      rows: 2\n\nactions:\n  read_time:\n    driver: rtc_read\n    params:\n      device: clock\n\n  show_time:\n    driver: lcd_display\n    params:\n      device: display\n      # {clock.hour} = the `hour` channel of the `clock` device declared above.\n      # RTC channels are zero-padded integers (%02d) \u2014 codegen handles that.\n      lines:\n        - format: "Time: {clock.hour}:{clock.minute}:{clock.second}"\n          row: 0\n          col: 0\n\ntasks:\n  clock_tick:\n    every: 1000\n    do: [read_time, show_time]\n    description: Read the RTC and refresh the display every second\n'
       }
     }
   };
@@ -10972,8 +11014,9 @@ target:
     let libraries;
     try {
       const backend = currentFramework === "espidf" ? new EspIdfBackend() : new ArduinoBackend();
-      sketch = new Codegen(backend).generate(project);
-      generatedProject = new Codegen(backend).generateFiles(project);
+      const plugins = getDriverPlugins();
+      sketch = new Codegen(backend, plugins).generate(project);
+      generatedProject = new Codegen(backend, plugins).generateFiles(project);
       topics = new TopicEmitter().toJSON(project, namespaceInput.value.trim() || void 0);
       libraries = new LibraryEmitter().toJSON(project);
     } catch (error) {
@@ -11074,6 +11117,98 @@ target:
     localStorage.setItem(KEYWORD_STORAGE_KEY, JSON.stringify([...activeKeywords].sort()));
   }
   var activeKeywords = loadKeywords();
+  var PLUGIN_STORAGE_KEY = "pulseir.webPlugins";
+  function loadWebPlugins() {
+    try {
+      const raw = localStorage.getItem(PLUGIN_STORAGE_KEY);
+      if (!raw)
+        return [];
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed))
+        return parsed;
+    } catch {
+    }
+    return [];
+  }
+  function saveWebPlugins(plugins) {
+    localStorage.setItem(PLUGIN_STORAGE_KEY, JSON.stringify(plugins));
+  }
+  var webPlugins = loadWebPlugins();
+  function parsePluginYaml(text) {
+    try {
+      const doc = load(text);
+      if (!doc?.driver || typeof doc.driver !== "string")
+        return 'Missing "driver:" field.';
+      if (!doc.platforms || typeof doc.platforms !== "object")
+        return 'Missing "platforms:" map.';
+      return {
+        driver: doc.driver,
+        description: typeof doc.description === "string" ? doc.description : void 0,
+        platforms: doc.platforms,
+        raw: text
+      };
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+  function getDriverPlugins() {
+    return webPlugins.map((p) => ({ driver: p.driver, description: p.description, platforms: p.platforms }));
+  }
+  var pluginList = $("plugin-list");
+  var pluginFileInput = $("plugin-file-input");
+  var pluginPasteArea = $("plugin-paste-area");
+  var pluginPasteBtn = $("plugin-paste-install-btn");
+  function renderPluginList() {
+    pluginList.replaceChildren();
+    if (webPlugins.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "plugin-empty";
+      empty.textContent = "No plugins installed. Install one below.";
+      pluginList.append(empty);
+      return;
+    }
+    for (const p of webPlugins) {
+      const row = document.createElement("div");
+      row.className = "plugin-row";
+      const info = document.createElement("div");
+      info.className = "plugin-info";
+      const name = document.createElement("code");
+      name.className = "plugin-name";
+      name.textContent = p.driver;
+      const desc = document.createElement("span");
+      desc.className = "plugin-desc";
+      desc.textContent = p.description ? ` \u2014 ${p.description}` : "";
+      const plats = document.createElement("span");
+      plats.className = "plugin-plats";
+      plats.textContent = `platforms: ${Object.keys(p.platforms).join(", ")}`;
+      info.append(name, desc, document.createElement("br"), plats);
+      const removeBtn = document.createElement("button");
+      removeBtn.className = "plugin-remove-btn";
+      removeBtn.textContent = "Remove";
+      removeBtn.title = `Remove ${p.driver}`;
+      removeBtn.addEventListener("click", () => {
+        webPlugins = webPlugins.filter((x) => x.driver !== p.driver);
+        saveWebPlugins(webPlugins);
+        renderPluginList();
+        render();
+      });
+      row.append(info, removeBtn);
+      pluginList.append(row);
+    }
+  }
+  function installPluginFromText(text) {
+    const result = parsePluginYaml(text);
+    if (typeof result === "string") {
+      alert(`Plugin parse error: ${result}`);
+      return false;
+    }
+    webPlugins = webPlugins.filter((p) => p.driver !== result.driver);
+    webPlugins.push(result);
+    saveWebPlugins(webPlugins);
+    renderPluginList();
+    render();
+    return true;
+  }
   function renderKeywordChips() {
     keywordChips.replaceChildren();
     for (const word of [...activeKeywords].sort()) {
@@ -11109,6 +11244,8 @@ target:
   }
   function openSettings() {
     renderKeywordChips();
+    renderPluginList();
+    pluginPasteArea.value = "";
     settingsModal.hidden = false;
     keywordInput.value = "";
     keywordInput.focus();
@@ -12051,6 +12188,25 @@ machine:
     keywordInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter")
         addKeyword();
+    });
+    pluginFileInput.addEventListener("change", () => {
+      const file = pluginFileInput.files?.[0];
+      if (!file)
+        return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = reader.result;
+        if (installPluginFromText(text))
+          pluginFileInput.value = "";
+      };
+      reader.readAsText(file);
+    });
+    pluginPasteBtn.addEventListener("click", () => {
+      const text = pluginPasteArea.value.trim();
+      if (!text)
+        return;
+      if (installPluginFromText(text))
+        pluginPasteArea.value = "";
     });
     $("keyword-reset-btn").addEventListener("click", () => {
       activeKeywords = new Set(DEFAULT_KEYWORDS);

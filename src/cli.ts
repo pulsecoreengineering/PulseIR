@@ -74,6 +74,9 @@ const USAGE = `Usage: pulse-ir <command> [args] [options]
 Commands:
   init [name]          Scaffold a new project YAML (name defaults to "my_project")
   validate <file>      Parse and validate; print diagnostics; no codegen
+  plugin install <f>   Install a driver plugin globally (~/.pulseir/drivers/)
+  plugin list          List all globally installed driver plugins
+  plugin remove <name> Uninstall a driver plugin by driver name
   <file>               Generate C++ from a model (default command)
 
 Generate options:
@@ -98,39 +101,165 @@ A model may "include" other files; paths are resolved relative to the file
 that lists them. With --watch, all included files are watched.`;
 
 // ---------------------------------------------------------------------------
-// Plugin loader — reads driver plugin YAML files listed under plugins:
+// Global driver library — ~/.pulseir/drivers/
+// ---------------------------------------------------------------------------
+
+function globalDriversDir(): string {
+  const home = process.env['HOME'] ?? process.env['USERPROFILE'] ?? '';
+  return path.join(home, '.pulseir', 'drivers');
+}
+
+function readPluginFile(fullPath: string, label: string): DriverPlugin | null {
+  try {
+    const content = fs.readFileSync(fullPath, 'utf8');
+    const plugin = yaml.load(content) as DriverPlugin;
+    if (!plugin?.driver) {
+      console.warn(`⚠️  Plugin "${label}" has no "driver:" field — skipped`);
+      return null;
+    }
+    return plugin;
+  } catch (err) {
+    console.error(`❌ Could not load plugin "${label}": ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
+/** Load all .yaml files from the global drivers directory. */
+function loadGlobalPlugins(): DriverPlugin[] {
+  const dir = globalDriversDir();
+  if (!fs.existsSync(dir)) return [];
+
+  const plugins: DriverPlugin[] = [];
+  for (const file of fs.readdirSync(dir).filter(f => /\.ya?ml$/i.test(f))) {
+    const p = readPluginFile(path.join(dir, file), file);
+    if (p) plugins.push(p);
+  }
+  return plugins;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin loader — global store first, then model-local plugins: (model wins)
 // ---------------------------------------------------------------------------
 
 function loadPlugins(modelFile: string): DriverPlugin[] {
+  // Start with globally installed plugins (lowest priority).
+  const globalPlugins = loadGlobalPlugins();
+  const byName = new Map<string, DriverPlugin>(globalPlugins.map(p => [p.driver, p]));
+
+  // Read model-local plugins: list and override globals with the same name.
   try {
     const raw = fs.readFileSync(path.resolve(modelFile), 'utf8');
     const doc = (yaml.load(raw) ?? {}) as Record<string, unknown>;
     const pluginPaths = Array.isArray(doc.plugins) ? (doc.plugins as string[]) : [];
-    if (pluginPaths.length === 0) return [];
 
     const baseDir = path.dirname(path.resolve(modelFile));
-    const plugins: DriverPlugin[] = [];
-
     for (const rel of pluginPaths) {
-      const fullPath = path.resolve(baseDir, rel);
-      try {
-        const content = fs.readFileSync(fullPath, 'utf8');
-        const plugin = yaml.load(content) as DriverPlugin;
-        if (!plugin?.driver) {
-          console.warn(`⚠️  Plugin "${rel}" has no "driver:" field — skipped`);
-          continue;
-        }
-        plugins.push(plugin);
-        console.log(`🔌 Loaded plugin: ${plugin.driver} (from ${rel})`);
-      } catch (err) {
-        console.error(`❌ Could not load plugin "${rel}": ${err instanceof Error ? err.message : err}`);
+      const p = readPluginFile(path.resolve(baseDir, rel), rel);
+      if (p) byName.set(p.driver, p);  // model-local overrides global
+    }
+  } catch { /* no plugins: key or file unreadable — fine */ }
+
+  const globalNames = new Set(globalPlugins.map(p => p.driver));
+  const plugins = [...byName.values()];
+  for (const p of plugins) {
+    const src = globalNames.has(p.driver) ? '~/.pulseir/drivers' : 'model plugins:';
+    console.log(`🔌 Loaded plugin: ${p.driver} (${src})`);
+  }
+  return plugins;
+}
+
+// ---------------------------------------------------------------------------
+// pulse-ir plugin install | list | remove
+// ---------------------------------------------------------------------------
+
+function cmdPlugin(args: string[]): void {
+  const sub = args[0];
+
+  if (!sub || sub === '--help' || sub === '-h') {
+    console.log(
+      'Usage:\n' +
+      '  pulse-ir plugin install <path.yaml>   Install a driver plugin globally\n' +
+      '  pulse-ir plugin list                  List installed plugins\n' +
+      '  pulse-ir plugin remove <driver>       Uninstall a plugin by driver name\n' +
+      '\n' +
+      `Global store: ${globalDriversDir()}`
+    );
+    return;
+  }
+
+  const dir = globalDriversDir();
+
+  if (sub === 'install') {
+    const src = args[1];
+    if (!src) {
+      console.error('❌ Usage: pulse-ir plugin install <path.yaml>');
+      process.exit(1);
+    }
+    const fullSrc = path.resolve(src);
+    if (!fs.existsSync(fullSrc)) {
+      console.error(`❌ File not found: ${fullSrc}`);
+      process.exit(1);
+    }
+    const plugin = readPluginFile(fullSrc, src);
+    if (!plugin) process.exit(1);
+
+    fs.mkdirSync(dir, { recursive: true });
+    const dest = path.join(dir, `${plugin.driver}.yaml`);
+    fs.copyFileSync(fullSrc, dest);
+    console.log(`✓ Installed "${plugin.driver}" → ${dest}`);
+    if (plugin.description) console.log(`  ${plugin.description}`);
+    return;
+  }
+
+  if (sub === 'list') {
+    if (!fs.existsSync(dir)) {
+      console.log('No plugins installed yet.');
+      console.log(`  Run: pulse-ir plugin install <path.yaml>`);
+      return;
+    }
+    const files = fs.readdirSync(dir).filter(f => /\.ya?ml$/i.test(f));
+    if (files.length === 0) {
+      console.log('No plugins installed yet.');
+      return;
+    }
+    console.log(`Installed plugins (${dir}):\n`);
+    for (const file of files) {
+      const p = readPluginFile(path.join(dir, file), file);
+      if (!p) continue;
+      const platforms = Object.keys(p.platforms).join(', ');
+      console.log(`  ${p.driver.padEnd(24)} ${p.description ?? ''}`);
+      console.log(`  ${''.padEnd(24)} platforms: ${platforms}\n`);
+    }
+    return;
+  }
+
+  if (sub === 'remove') {
+    const name = args[1];
+    if (!name) {
+      console.error('❌ Usage: pulse-ir plugin remove <driver-name>');
+      process.exit(1);
+    }
+    const candidates = [`${name}.yaml`, `${name}.yml`];
+    let removed = false;
+    for (const c of candidates) {
+      const p = path.join(dir, c);
+      if (fs.existsSync(p)) {
+        fs.unlinkSync(p);
+        console.log(`✓ Removed plugin "${name}"`);
+        removed = true;
+        break;
       }
     }
-
-    return plugins;
-  } catch {
-    return [];
+    if (!removed) {
+      console.error(`❌ No installed plugin named "${name}"`);
+      process.exit(1);
+    }
+    return;
   }
+
+  console.error(`❌ Unknown plugin subcommand: ${sub}`);
+  console.error('  Use: install | list | remove');
+  process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +283,11 @@ async function main() {
 
   if (sub === 'validate') {
     cmdValidate(args.slice(1));
+    return;
+  }
+
+  if (sub === 'plugin') {
+    cmdPlugin(args.slice(1));
     return;
   }
 

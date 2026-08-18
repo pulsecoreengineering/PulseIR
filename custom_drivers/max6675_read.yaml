@@ -1,0 +1,42 @@
+driver: max6675_read
+description: MAX6675 K-type thermocouple — reads temperature in °C over software SPI
+
+# Action params:
+#   cs:   <device>   digital_output — chip select, {cs_pin}
+#   sck:  <device>   digital_output — clock,       {sck_pin}
+#   miso: <device>   digital_input  — data in,     {miso_pin}
+#   temp: <device>   analog_input or digital_input — systemSensors.{temp} receives °C
+#
+# Required manual additions:
+#   Add to sketch globals:
+#     #include <max6675.h>
+#     MAX6675 _tc({sck_pin}, {cs_pin}, {miso_pin});
+#   (No setup() call needed — the library constructor does it.)
+#
+# Example model:
+#   hardware:
+#     devices:
+#       tc_cs:   { type: digital_output, pin: GPIO5 }
+#       tc_sck:  { type: digital_output, pin: GPIO18 }
+#       tc_miso: { type: digital_input,  pin: GPIO19 }
+#       temp:    { type: analog_input,   pin: GPIO4 }   # pin unused, gives us systemSensors.temp
+#   actions:
+#     read_temp:
+#       driver: max6675_read
+#       params:
+#         cs:   tc_cs
+#         sck:  tc_sck
+#         miso: tc_miso
+#         temp: temp
+
+platforms:
+  arduino: |
+    extern MAX6675 _tc;
+    float _raw = (float)_tc.readCelsius();
+    systemSensors.{temp} = (_raw == 0.0f) ? -999.0f : _raw;
+
+  default: |
+    // TODO: implement max6675_read for this platform
+    // Read thermocouple via SPI (cs={cs_pin}, sck={sck_pin}, miso={miso_pin})
+    // Write result in °C to systemSensors.{temp}
+    (void)ctx;

@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as path   from 'path';
+import * as fs     from 'fs';
+import * as os     from 'os';
 
 // ---------------------------------------------------------------------------
 // Models tree — lists every *.pulse.yaml in the workspace
@@ -80,5 +82,62 @@ class ProjectItem extends vscode.TreeItem {
     this.description = value;
     this.iconPath    = new vscode.ThemeIcon(icon);
     if (cmd) this.command = { command: cmd, title: label };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Drivers tree — lists plugins installed in ~/.pulseir/drivers/
+// ---------------------------------------------------------------------------
+
+function globalDriversDir(): string {
+  return path.join(os.homedir(), '.pulseir', 'drivers');
+}
+
+export class PulseIRDriversProvider implements vscode.TreeDataProvider<DriverItem | NoDriversItem> {
+  private _onChange = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this._onChange.event;
+
+  refresh(): void { this._onChange.fire(); }
+
+  getTreeItem(el: DriverItem | NoDriversItem): vscode.TreeItem { return el; }
+
+  getChildren(): (DriverItem | NoDriversItem)[] {
+    const dir = globalDriversDir();
+    if (!fs.existsSync(dir)) return [new NoDriversItem()];
+    const files = fs.readdirSync(dir).filter(f => /\.ya?ml$/i.test(f));
+    if (files.length === 0) return [new NoDriversItem()];
+    return files.map(f => new DriverItem(path.join(dir, f)));
+  }
+}
+
+export class DriverItem extends vscode.TreeItem {
+  readonly filePath: string;
+  readonly driverName: string;
+
+  constructor(filePath: string) {
+    const base = path.basename(filePath).replace(/\.ya?ml$/i, '');
+    super(base, vscode.TreeItemCollapsibleState.None);
+    this.filePath   = filePath;
+    this.driverName = base;
+    this.iconPath   = new vscode.ThemeIcon('plug');
+    this.contextValue = 'pulseirDriver';
+    this.tooltip    = filePath;
+
+    // Try to add platform list as description
+    try {
+      const text = fs.readFileSync(filePath, 'utf8');
+      const platforms = [...text.matchAll(/^  (\w+):/gm)].map(m => m[1]).filter(p => p !== 'description' && p !== 'driver');
+      if (platforms.length) this.description = platforms.join(', ');
+    } catch { /* ignore */ }
+
+    this.command = { command: 'vscode.open', title: 'Open', arguments: [vscode.Uri.file(filePath)] };
+  }
+}
+
+class NoDriversItem extends vscode.TreeItem {
+  constructor() {
+    super('No plugins installed', vscode.TreeItemCollapsibleState.None);
+    this.description = 'Use "Install Plugin" to add one';
+    this.iconPath    = new vscode.ThemeIcon('info');
   }
 }

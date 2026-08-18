@@ -1,0 +1,50 @@
+driver: buzzer_tone
+description: Passive buzzer — play a tone at a frequency for a duration, both from parameters
+
+# Action params:
+#   pin:      <device>   digital_output — {pin_pin} is the buzzer pin
+#   freq:     <param>    int parameter (Hz), e.g. 440 = A4
+#   duration: <param>    int parameter (ms) — blocking on Arduino; non-blocking with LEDC on ESP-IDF
+#
+# Example model:
+#   hardware:
+#     devices:
+#       buzzer: { type: digital_output, pin: GPIO25 }
+#   parameters:
+#     tone_hz:  { type: int, default: 1000, range: [20, 20000], unit: Hz }
+#     tone_ms:  { type: int, default: 200,  range: [10, 5000],  unit: ms }
+#   actions:
+#     beep:
+#       driver: buzzer_tone
+#       params:
+#         pin:      buzzer
+#         freq:     tone_hz
+#         duration: tone_ms
+
+platforms:
+  arduino: |
+    tone({pin_pin}, (unsigned int)systemParameters.{freq}, (unsigned long)systemParameters.{duration});
+
+  espidf: |
+    // ESP-IDF: LEDC-based tone. Uses LEDC_TIMER_0 / LEDC_CHANNEL_2 — adjust if needed.
+    ledc_timer_config_t _tmr = {};
+    _tmr.speed_mode       = LEDC_LOW_SPEED_MODE;
+    _tmr.duty_resolution  = LEDC_TIMER_8_BIT;
+    _tmr.timer_num        = LEDC_TIMER_0;
+    _tmr.freq_hz          = (uint32_t)systemParameters.{freq};
+    _tmr.clk_cfg          = LEDC_AUTO_CLK;
+    ledc_timer_config(&_tmr);
+    ledc_channel_config_t _ch = {};
+    _ch.gpio_num    = {pin_pin};
+    _ch.speed_mode  = LEDC_LOW_SPEED_MODE;
+    _ch.channel     = LEDC_CHANNEL_2;
+    _ch.timer_sel   = LEDC_TIMER_0;
+    _ch.duty        = 128;
+    ledc_channel_config(&_ch);
+    vTaskDelay(pdMS_TO_TICKS(systemParameters.{duration}));
+    ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2, 0);
+
+  default: |
+    // TODO: implement buzzer_tone for this platform
+    // Play {freq} Hz tone for {duration} ms on pin {pin_pin}
+    (void)ctx;
