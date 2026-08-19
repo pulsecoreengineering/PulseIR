@@ -360,6 +360,15 @@
     <a href="#imports">Multi-file models</a>
   </div>
   <div class="nav-group">
+    <div class="nav-group-label">Targets</div>
+    <a href="#targets">All backends</a>
+    <a class="sub" href="#target-arduino">Arduino</a>
+    <a class="sub" href="#target-espidf">ESP-IDF</a>
+    <a class="sub" href="#target-micropython">MicroPython</a>
+    <a class="sub" href="#target-zephyr">Zephyr RTOS ⚠</a>
+    <a class="sub" href="#target-interfaces">Interface matrix</a>
+  </div>
+  <div class="nav-group">
     <div class="nav-group-label">Hardware</div>
     <a href="#hardware">hardware:</a>
     <a class="sub" href="#boards">Supported boards</a>
@@ -455,6 +464,218 @@
   <div class="callout info">
     <span class="callout-icon">ℹ</span>
     <span><strong>Key shape rules:</strong> <code>actions:</code>, <code>parameters:</code>, <code>events:</code>, <code>tasks:</code>, and <code>machine.states:</code> are all <em>mappings</em> keyed by name (not lists). <code>machine.transitions:</code> is the one true list. The parser reports a clear error if you use the wrong shape.</span>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="targets">
+  <h2>Targets &amp; Backends</h2>
+  <p>PulseIR generates complete, buildable firmware for four targets. Pass <code class="inline">--target &lt;name&gt;</code> on the CLI to choose one; the default is <code class="inline">arduino</code>.</p>
+
+  <div class="table-wrap">
+    <table>
+      <tr><th>Flag</th><th>Entry point</th><th>Output</th><th>Status</th></tr>
+      <tr>
+        <td><code>--target arduino</code> <em>(default)</em></td>
+        <td><code>setup()</code> + <code>loop()</code></td>
+        <td><code>.ino</code> + <code>_generated.h</code></td>
+        <td>✅ Production-ready</td>
+      </tr>
+      <tr>
+        <td><code>--target espidf</code></td>
+        <td><code>app_main()</code> (FreeRTOS)</td>
+        <td><code>.cpp</code> + <code>CMakeLists.txt</code></td>
+        <td>✅ Production-ready</td>
+      </tr>
+      <tr>
+        <td><code>--target micropython</code></td>
+        <td><code>main()</code> (asyncio)</td>
+        <td><code>main.py</code></td>
+        <td>✅ Production-ready</td>
+      </tr>
+      <tr>
+        <td><code>--target zephyr</code></td>
+        <td><code>int main()</code> (Zephyr kernel)</td>
+        <td><code>.cpp</code> + <code>CMakeLists.txt</code> + <code>prj.conf</code></td>
+        <td>🔄 In progress — skeleton only</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <span class="callout-icon">⚠</span>
+    <span><strong>Zephyr support is in active development.</strong> The skeleton compiles for <code>native_sim</code> but GPIO, UART, I2C, networking, and tasks are not yet wired to real Zephyr APIs. See the <a href="#target-zephyr">Zephyr section</a> for the full status and roadmap.</span>
+  </div>
+
+  <!-- ── Arduino ── -->
+  <h3 id="target-arduino">Arduino</h3>
+  <p><strong>Status: fully supported.</strong> The default backend — tested against the Arduino IDE, PlatformIO, and the <code class="inline">arduino-cli</code>. Models with a <code class="inline">machine:</code> block get PulseHSM vendored alongside the sketch; models without it get plain Arduino with no extra include.</p>
+
+  <h4>Generated files (<code>--outdir</code>)</h4>
+  <pre>build/
+├── project_name.ino          ← regenerated every run — do not edit
+├── project_name_generated.h  ← regenerated every run — do not edit
+├── PulseHSM_config.h         ← runtime table sizes, from the model
+├── PulseHSM.h / .cpp         ← runtime, vendored
+└── src/
+    ├── actions.cpp            ← YOURS — written once, never overwritten
+    └── guards.cpp             ← YOURS — written once, never overwritten</pre>
+
+  <h4>Build</h4>
+  <pre><span class="yc"># Generate</span>
+node dist/src/cli.js model.yaml --target arduino --outdir build/
+
+<span class="yc"># Or quick single-file output</span>
+node dist/src/cli.js model.yaml --target arduino --output sketch.ino
+
+<span class="yc"># PlatformIO</span>
+pio run -e uno</pre>
+
+  <h4>Notes</h4>
+  <ul>
+    <li>The task scheduler uses <code class="inline">millis()</code> with deadline-advance (not restart) — the average rate is exact even if one loop pass runs long.</li>
+    <li><code class="inline">PulseHSM_config.h</code> is generated from the model's state/event counts. Keep it beside <code class="inline">PulseHSM.h</code> or a separate compilation of <code class="inline">PulseHSM.cpp</code> will use wrong table sizes silently.</li>
+    <li>ESP32/ESP8266 Arduino core is treated as Arduino — use <code class="inline">--target arduino</code>, not <code class="inline">espidf</code>. The ESP-IDF target generates native FreeRTOS code without the Arduino layer.</li>
+  </ul>
+
+  <!-- ── ESP-IDF ── -->
+  <h3 id="target-espidf">ESP-IDF</h3>
+  <p><strong>Status: fully supported.</strong> Targets the native ESP-IDF / FreeRTOS API — no Arduino layer. Use this for production ESP32 firmware where you need FreeRTOS queues, tasks, low-level peripheral control, or memory guarantees that the Arduino core abstracts away.</p>
+
+  <h4>Generated files (<code>--outdir</code>)</h4>
+  <pre>build/
+├── main/
+│   ├── project_name.cpp      ← regenerated — app_main() + _setup() + while(1)
+│   ├── project_name.h        ← regenerated types header
+│   ├── PulseHSM.h / .cpp     ← runtime, vendored
+│   └── PulseHSM_config.h     ← runtime table sizes
+└── CMakeLists.txt            ← ESP-IDF project file</pre>
+
+  <h4>Build</h4>
+  <pre><span class="yc"># Generate</span>
+node dist/src/cli.js model.yaml --target espidf --outdir build/
+
+<span class="yc"># Build and flash (ESP-IDF toolchain required)</span>
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor</pre>
+
+  <h4>Notes</h4>
+  <ul>
+    <li>Tasks map to <code class="inline">esp_timer</code> one-shot callbacks rescheduled on expiry — not FreeRTOS tasks. This preserves the same semantics as the Arduino backend.</li>
+    <li>GPIO uses <code class="inline">gpio_set_level()</code> / <code class="inline">gpio_get_level()</code>; I2C uses <code class="inline">i2c_master_*</code>; ADC uses <code class="inline">adc1_get_raw()</code> (ADC2 is reserved when Wi-Fi is active — see HAL checks).</li>
+    <li>PWM uses the LEDC peripheral. The generated code handles the ESP-IDF core 2.x vs 3.x API split automatically.</li>
+    <li>HTTP client uses <code class="inline">esp_http_client</code>; MQTT uses PubSubClient (stub — full native MQTT is planned).</li>
+    <li>Also emits a <code class="inline">CMakeLists.txt</code> with <code class="inline">cmake_minimum_required(VERSION 3.16)</code> and the correct <code class="inline">idf_component_register()</code> call.</li>
+  </ul>
+
+  <!-- ── MicroPython ── -->
+  <h3 id="target-micropython">MicroPython</h3>
+  <p><strong>Status: fully supported.</strong> Generates a single <code class="inline">main.py</code> that runs on any MicroPython-compatible board (RP2040, ESP32, STM32, and others). The scheduler uses <code class="inline">asyncio</code> cooperative multitasking — no RTOS needed.</p>
+
+  <h4>Generated file</h4>
+  <pre>main.py   ← single self-contained file; copy to the board's filesystem</pre>
+
+  <h4>Build</h4>
+  <pre><span class="yc"># Generate</span>
+node dist/src/cli.js model.yaml --target micropython --output main.py
+
+<span class="yc"># Deploy (mpremote or rshell)</span>
+mpremote cp main.py :main.py
+mpremote reset</pre>
+
+  <h4>Notes</h4>
+  <ul>
+    <li>Tasks become <code class="inline">asyncio.create_task()</code> coroutines with <code class="inline">asyncio.sleep_ms(N)</code> loops.</li>
+    <li>GPIO uses <code class="inline">machine.Pin</code>; PWM uses <code class="inline">machine.PWM</code>; ADC uses <code class="inline">machine.ADC</code>; I2C uses <code class="inline">machine.I2C</code>; SPI uses <code class="inline">machine.SPI</code>; UART uses <code class="inline">machine.UART</code>.</li>
+    <li>The state machine is implemented as a pure-Python HSM with the same semantics as PulseHSM — no C extension required.</li>
+    <li>A model with no <code class="inline">machine:</code> block generates a plain asyncio loop with no HSM class in it at all.</li>
+    <li>Libraries that are platform-specific (ArduinoOTA, HTTPClient) are replaced with MicroPython equivalents or TODO stubs. Declare third-party libraries in <code class="inline">libraries:</code> as normal — the generated file includes a comment listing what to install with <code class="inline">mip</code>.</li>
+  </ul>
+
+  <!-- ── Zephyr ── -->
+  <h3 id="target-zephyr">Zephyr RTOS</h3>
+  <div class="callout warn">
+    <span class="callout-icon">⚠</span>
+    <span><strong>Zephyr support is in active development.</strong> The backend exists and generates compilable output for <code>native_sim</code>, but most hardware interfaces are not yet wired to real Zephyr APIs. Do not use this target for production firmware yet. The roadmap below shows what is planned and when.</span>
+  </div>
+
+  <h4>What works today (Phase 1 — skeleton)</h4>
+  <ul>
+    <li>Generates <code class="inline">main.cpp</code>, <code class="inline">CMakeLists.txt</code>, and <code class="inline">prj.conf</code></li>
+    <li>Compiles and links for <code class="inline">native_sim</code> (no hardware needed)</li>
+    <li>State machine skeleton (PulseHSM vendored alongside)</li>
+    <li>Basic task loop using <code class="inline">k_uptime_get()</code></li>
+  </ul>
+
+  <h4>What does not work yet</h4>
+  <ul>
+    <li>GPIO — <code class="inline">gpio_dt_spec</code> / <code class="inline">gpio_pin_set_dt()</code> stubs exist but devicetree is not generated (Phase 2)</li>
+    <li>UART, I2C, SPI — stubs only, no working init (Phase 2–3)</li>
+    <li>PWM, ADC — not yet started (Phase 3)</li>
+    <li>Wi-Fi, MQTT, HTTP, BLE, OTA — not started (Phase 4)</li>
+    <li><code class="inline">app.overlay</code> (devicetree aliases) — not generated (Phase 2)</li>
+  </ul>
+
+  <h4>Planned roadmap</h4>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Phase</th><th>Goal</th><th>Interfaces</th></tr>
+      <tr><td>Phase 1 (current)</td><td>Skeleton compiles for <code>native_sim</code></td><td>—</td></tr>
+      <tr><td>Phase 2</td><td>Real GPIO, UART, I2C on ESP32 / nRF52840 / STM32</td><td><code>gpio</code>, <code>uart</code>, <code>i2c</code></td></tr>
+      <tr><td>Phase 3</td><td>Tasks → <code>k_timer</code> + system workqueue; PWM, SPI, ADC</td><td><code>pwm</code>, <code>spi</code>, <code>adc</code></td></tr>
+      <tr><td>Phase 4</td><td>Networking, MQTT, HTTP, OTA scaffolds</td><td><code>wifi</code>, <code>mqtt</code>, <code>ble</code>, <code>ota</code></td></tr>
+    </table>
+  </div>
+
+  <h4>Build (skeleton)</h4>
+  <pre><span class="yc"># Generate</span>
+node dist/src/cli.js model.yaml --target zephyr --outdir build/
+
+<span class="yc"># Compile (Zephyr SDK + west required)</span>
+west build -b native_sim        <span class="yc"># simulation — no hardware needed</span>
+west build -b esp32_devkitc_wroom  <span class="yc"># real board (Phase 2+)</span>
+./build/zephyr/zephyr.exe       <span class="yc"># run the native_sim binary</span></pre>
+
+  <!-- ── Interface matrix ── -->
+  <h3 id="target-interfaces">Interface support matrix</h3>
+  <p>What each interface generates per backend. <strong>✅</strong> = full; <strong>stub</strong> = compiles but leaves a TODO in the body; <strong>—</strong> = not applicable to this platform; <strong>🔄</strong> = planned (phase shown).</p>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Interface</th><th>Arduino</th><th>ESP-IDF</th><th>MicroPython</th><th>Zephyr</th></tr>
+      <tr><td><code>gpio</code></td><td>✅</td><td>✅</td><td>✅</td><td>🔄 Phase 2</td></tr>
+      <tr><td><code>pwm</code></td><td>✅</td><td>✅</td><td>✅</td><td>🔄 Phase 3</td></tr>
+      <tr><td><code>adc</code></td><td>✅</td><td>✅</td><td>✅</td><td>🔄 Phase 3</td></tr>
+      <tr><td><code>uart</code></td><td>✅</td><td>✅</td><td>✅</td><td>🔄 Phase 2</td></tr>
+      <tr><td><code>i2c</code></td><td>✅</td><td>✅</td><td>✅</td><td>🔄 Phase 2</td></tr>
+      <tr><td><code>spi</code></td><td>✅</td><td>✅</td><td>✅</td><td>🔄 Phase 3</td></tr>
+      <tr><td><code>onewire</code></td><td>✅</td><td>—</td><td>✅</td><td>🔄 Phase 4</td></tr>
+      <tr><td><code>can</code></td><td>stub</td><td>stub</td><td>—</td><td>🔄 Phase 4</td></tr>
+      <tr><td><code>wifi</code></td><td>✅</td><td>stub</td><td>✅</td><td>🔄 Phase 4</td></tr>
+      <tr><td><code>ethernet</code></td><td>stub</td><td>—</td><td>—</td><td>🔄 Phase 4</td></tr>
+      <tr><td><code>ble</code></td><td>stub</td><td>—</td><td>—</td><td>🔄 Phase 4</td></tr>
+      <tr><td><code>mqtt</code></td><td>stub</td><td>stub</td><td>stub</td><td>🔄 Phase 4</td></tr>
+      <tr><td><code>eeprom</code></td><td>✅</td><td>—</td><td>—</td><td>🔄 Phase 4</td></tr>
+      <tr><td><code>littlefs</code></td><td>✅</td><td>—</td><td>—</td><td>🔄 Phase 4</td></tr>
+      <tr><td><code>ota</code></td><td>✅ ArduinoOTA</td><td>—</td><td>—</td><td>🔄 Phase 4 (MCUboot)</td></tr>
+      <tr><td><code>custom</code></td><td>TODO stub</td><td>TODO stub</td><td>TODO stub</td><td>🔄 Phase 4</td></tr>
+    </table>
+  </div>
+
+  <p><strong>stub</strong> means the interface entry is accepted by the parser and the binding fields are emitted as <code class="inline">#define</code> / variable declarations, but the init body contains a TODO comment rather than a working API call. The generated code will compile cleanly; the TODO is the marker for what you still need to implement.</p>
+
+  <h4>Built-in action drivers</h4>
+  <p>These <code class="inline">driver:</code> names produce a fully generated action body (no TODO required). Everything else generates a typed stub you fill in.</p>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Driver</th><th>Arduino</th><th>ESP-IDF</th><th>MicroPython</th><th>Zephyr</th></tr>
+      <tr><td><code>gpio_control</code></td><td>✅ <code>digitalWrite()</code></td><td>✅ <code>gpio_set_level()</code></td><td>✅ <code>Pin.value()</code></td><td>🔄 Phase 2</td></tr>
+      <tr><td><code>pwm_control</code></td><td>✅ <code>ledcWrite()</code></td><td>✅ <code>ledc_set_duty()</code></td><td>✅ <code>PWM.duty_u16()</code></td><td>🔄 Phase 3</td></tr>
+      <tr><td><code>adc_read</code></td><td>✅ <code>analogRead()</code></td><td>✅ <code>adc1_get_raw()</code></td><td>✅ <code>ADC.read_u16()</code></td><td>🔄 Phase 3</td></tr>
+      <tr><td><code>uart_write</code></td><td>✅ <code>Serial.println()</code></td><td>✅ <code>printf()</code></td><td>✅ <code>print()</code></td><td>🔄 Phase 2</td></tr>
+      <tr><td><code>sleep_control</code></td><td>— (ESP32 Arduino only)</td><td>✅ <code>esp_deep_sleep_start()</code></td><td>— (<code>machine.lightsleep()</code> stub)</td><td>🔄 Phase 4</td></tr>
+      <tr><td><code>http_get</code></td><td>✅ <code>HTTPClient::GET()</code></td><td>✅ <code>esp_http_client</code></td><td>stub (<code>urequests</code>)</td><td>🔄 Phase 4</td></tr>
+      <tr><td><code>http_post</code></td><td>✅ <code>HTTPClient::POST()</code></td><td>✅ <code>esp_http_client</code></td><td>stub (<code>urequests</code>)</td><td>🔄 Phase 4</td></tr>
+    </table>
   </div>
 </section>
 
