@@ -25,6 +25,7 @@ YAML (PulseProject)
   ↓ (parse + board resolver)
 PulseModel (IR types)          ← runtime-neutral, platform-neutral
   ↓ (validate)
+  ↓ (optimize)                 ← DCE + task merging; skip with --no-optimize
   ↓ (Codegen + PlatformBackend)
 C++ sketch  ── with a machine ──→ + PulseHSM
             ── without one ─────→ plain Arduino/ESP-IDF/Zephyr, no runtime
@@ -36,10 +37,13 @@ C++ sketch  ── with a machine ──→ + PulseHSM
 pulse-ir/
 ├── src/
 │   ├── model/           # IR types (what a system looks like)
-│   ├── parser/          # YAML → IR
-│   ├── codegen/         # IR → Arduino C++ (one backend, not the IR)
+│   ├── parser/          # YAML → IR + board resolver
+│   ├── analysis/        # semantic validator (post-parse checks)
+│   ├── optimizer/       # middle-end: DCE + task merging
+│   ├── codegen/         # IR → C++/Python (one backend, not the IR)
 │   └── cli.ts           # CLI entry point
 ├── test/
+├── boards/              # board profiles (logical → physical pin maps)
 └── examples/
 ```
 
@@ -616,8 +620,9 @@ than running a machine that is quietly missing states.
 
 ## What the Compiler Catches
 
-Beyond generating code, the model is checked before anything is written:
+Beyond generating code, the model is checked before anything is written.
 
+**Parser (hard errors — stop compilation):**
 - a pin claimed by two different devices or buses, whatever the spelling
   (`GPIO25`, `gpio_25` and `25` are the same pin)
 - a transition to a state that does not exist, or an ambiguous bare name
@@ -628,7 +633,46 @@ Beyond generating code, the model is checked before anything is written:
 - a name declared in two different files
 - an import cycle
 
-Devices sharing a bus are not a conflict - that is what a bus is for.
+**Semantic validator (warnings — emit but continue):**
+- `[UNREACHABLE_STATE]` — a leaf state no transition can ever reach
+- `[UNUSED_EVENT]` — an event declared but never referenced in any transition or command
+- `[UNUSED_ACTION]` — an action declared in the catalogue but never invoked anywhere; produces a dead stub
+- `[DUPLICATE_TRANSITION]` — two unguarded transitions from the same state on the same event; the second can never fire
+- `[PARTIAL_BINDING]` — a bus binding that declares some but not all required pins (e.g. `sda` without `scl`)
+
+**HAL / Board resolver (errors — stop compilation when a board is declared):**
+- `[HAL]` — a pin that does not exist on the target board (e.g. GPIO70 on an Uno with only GPIO0–GPIO19)
+- output assigned to an input-only pin (e.g. GPIO34 on ESP32)
+- a pin reserved for internal flash or PSRAM
+- ADC2 used while Wi-Fi is declared (ESP32 family — ADC2 is unavailable when the radio is active)
+- strapping pin driven at reset (warning — may prevent boot)
+- board framework incompatible with `--target`
+
+Devices sharing a bus are not a conflict — that is what a bus is for.
+
+## Middle-end Optimizer
+
+After validation, the compiler runs two optimization passes on the IR before
+handing it to the code generator:
+
+**Dead Code Elimination (DCE)** — removes hardware that the model declares but
+never uses: devices whose pin is never referenced by any action, parameters that
+appear in no expression or action param, and events that appear in no
+transition. Removing dead declarations keeps the generated sketch lean and
+avoids confusing `#define` and `pinMode` calls for hardware that is never
+touched.
+
+**Task Merging** — fuses tasks that share the same `every:` interval into a
+single `_merged_<N>ms` timer, eliminating redundant `millis()` comparisons and
+reducing the scheduler's per-loop work.
+
+To inspect the IR before either pass runs:
+
+```bash
+node dist/src/cli.js examples/boiler/pulse.yaml --no-optimize --output boiler_raw.ino
+```
+
+Diff the two outputs to see exactly what the optimizer removes.
 
 ## Development
 
@@ -649,6 +693,9 @@ npm run cli -- examples/boiler/pulse.yaml --target micropython --output main.py
 # Zephyr (in progress)
 npm run cli -- examples/boiler/pulse.yaml --target zephyr --outdir out/
 # west build -b native_sim
+
+# Skip the optimizer (before/after comparison)
+npm run cli -- examples/boiler/pulse.yaml --no-optimize --output boiler.ino
 
 # Other outputs
 npm run cli -- examples/boiler/pulse.yaml --topics topics.json
