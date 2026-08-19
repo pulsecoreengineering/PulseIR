@@ -489,6 +489,7 @@ async function cmdGenerate(args: string[]): Promise<void> {
   const diagramFile   = flag('--diagram');
   const namespace     = flag('--namespace');
   const emitCmake     = hasFlag('--cmake');
+  const noOptimize    = hasFlag('--no-optimize');
   const watch         = hasFlag('--watch');
 
   const build = (): Set<string> => {
@@ -544,10 +545,12 @@ async function cmdGenerate(args: string[]): Promise<void> {
       }
 
       // Middle-end optimizer: DCE and future passes.
-      const optResult = optimize(project);
-      project = optResult.project;
-      for (const w of optResult.warnings) {
-        console.warn(`⚠️  ${w}`);
+      if (!noOptimize) {
+        const optResult = optimize(project);
+        project = optResult.project;
+        for (const w of optResult.warnings) {
+          console.warn(`⚠️  ${w}`);
+        }
       }
 
       // MicroPython target — Python codegen, no C++ artifacts.

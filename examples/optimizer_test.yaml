@@ -1,0 +1,86 @@
+pulseir: "1"
+
+project:
+  name: optimizer_test
+  version: "1.0"
+  description: Verifies DCE removes dead symbols and task merging fuses same-interval tasks
+
+target:
+  board: esp32
+
+hardware:
+  devices:
+    # LIVE — referenced by actions
+    led:
+      type: digital_output
+      pin: GPIO13
+
+    temperature:
+      type: analog_input
+      pin: GPIO34
+
+    # DEAD — never referenced in any action, log, telemetry, or comms
+    buzzer:
+      type: digital_output
+      pin: GPIO23
+
+    pressure:
+      type: analog_input
+      pin: GPIO35
+
+  buses:
+    console:
+      interface: uart
+      port: 0
+      baud: 115200
+
+parameters:
+  # LIVE — used in a log placeholder
+  TEMP_OFFSET: { type: float, default: 2.5 }
+
+  # DEAD — never referenced anywhere
+  UNUSED_GAIN:    { type: int, default: 10 }
+  OLD_THRESHOLD:  { type: int, default: 75 }
+
+events:
+  # LIVE — transition reacts to it
+  BUTTON_PRESSED: { source: external }
+
+  # DEAD — nothing reacts to these
+  LEGACY_EVENT:   { source: external }
+  OBSOLETE_RESET: { source: external }
+
+actions:
+  read_temp:  { driver: analog_read,  params: { device: temperature } }
+  blink_led:  { driver: gpio_write,   params: { device: led, value: toggle } }
+  alive_log:  { driver: log,          params: { message: "alive" } }
+
+machine:
+  states:
+    Idle:
+    Active:
+
+  transitions:
+    - from: Idle
+      on: BUTTON_PRESSED
+      to: Active
+
+    - from: Active
+      after: 5000
+      to: Idle
+
+tasks:
+  # GROUP A — both fire every 200ms → should be MERGED into one timer
+  readTemperature:
+    every: 200
+    do: read_temp
+    log: "temp_offset={TEMP_OFFSET}"
+
+  blinkLed:
+    every: 200
+    do: blink_led
+
+  # GROUP B — fires every 1000ms, singleton → no merge
+  heartbeat:
+    every: 1000
+    do: alive_log
