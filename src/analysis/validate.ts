@@ -14,7 +14,7 @@
  * lifted into the same Diagnostic list so the caller has one thing to show.
  */
 
-import type { PulseProject } from '../model/index.js';
+import type { PulseProject, Action, State } from '../model/index.js';
 import { flattenStates, resolveEntryLeaf, resolvePath } from './states.js';
 
 export interface Diagnostic {
@@ -64,6 +64,12 @@ export class Validator {
     }
     if ((system.resources ?? []).length > 0) {
       this.checkPartialBindings(project, diagnostics);
+    }
+    if ((system.declaredActionNames ?? []).length > 0) {
+      this.checkDeadActions(project, diagnostics);
+    }
+    if (system.transitions.length > 1) {
+      this.checkDuplicateTransitions(project, diagnostics);
     }
 
     return {
@@ -137,6 +143,73 @@ export class Validator {
         });
       }
     }
+  }
+
+  /**
+   * Warn about actions declared in the top-level `actions:` catalogue that are
+   * never invoked from any transition, state entry/exit, task, or command.
+   * A declared action that nothing calls is almost always a leftover after a
+   * rename, or a dead branch that was removed from the machine.
+   */
+  private checkDeadActions(project: PulseProject, out: Diagnostic[]): void {
+    const { system } = project;
+    const declared = new Set(system.declaredActionNames ?? []);
+    const used = new Set<string>();
+
+    const collect = (actions: Action[] | undefined) => {
+      for (const a of actions ?? []) if (a.name) used.add(a.name);
+    };
+
+    for (const t of system.transitions) collect(t.actions);
+
+    const walkState = (state: State) => {
+      collect(state.entry);
+      collect(state.exit);
+      for (const region of state.regions ?? []) region.states.forEach(walkState);
+    };
+    system.states.forEach(walkState);
+
+    for (const task of system.tasks ?? []) collect(task.actions);
+    for (const cmd of system.commands?.commands ?? []) collect(cmd.actions);
+
+    for (const name of declared) {
+      if (!used.has(name)) {
+        out.push({
+          severity: 'warning',
+          code: 'UNUSED_ACTION',
+          message: `Action "${name}" is declared but never invoked — it will produce a stub function that is never called`,
+        });
+      }
+    }
+  }
+
+  /**
+   * Warn when two transitions share the same source state and event with no
+   * guard. The second transition can never fire because the first always wins.
+   * A wildcard source ("*") is excluded — multiple wildcard handlers are
+   * intentional fan-out.
+   */
+  private checkDuplicateTransitions(project: PulseProject, out: Diagnostic[]): void {
+    const { system } = project;
+    // Key: "<source>|<event>" — only for event-triggered, non-wildcard, unguarded transitions.
+    const seen = new Map<string, number>(); // key → first transition index (1-based)
+
+    system.transitions.forEach((t, i) => {
+      if (!t.event || t.source === '*' || t.guard) return;
+      const key = `${t.source}|${t.event}`;
+      const first = seen.get(key);
+      if (first !== undefined) {
+        out.push({
+          severity: 'warning',
+          code: 'DUPLICATE_TRANSITION',
+          message:
+            `Transition ${i + 1} (from "${t.source}" on "${t.event}") duplicates transition ${first} — ` +
+            `both have no guard, so the second will never fire`,
+        });
+      } else {
+        seen.set(key, i + 1);
+      }
+    });
   }
 
   /**

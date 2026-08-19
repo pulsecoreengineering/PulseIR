@@ -32,8 +32,9 @@ YAML model (one file or a directory linked by imports:)
     ↓ Merge           (keyed sections merged; transitions concatenated)
     ↓ Parser (src/parser/index.ts)
 PulseProject IR                ← runtime-neutral, platform-neutral
-    ↓ Board Resolver            logical pin names → physical GPIO
-    ↓ Validator                 semantic rules, pin conflicts
+    ↓ Board Resolver            logical pin names → physical GPIO; HAL boundary + capability checks
+    ↓ Validator                 semantic rules: unreachable states, unused events/actions, duplicate transitions
+    ↓ Optimizer                 DCE (dead components/params/events) + Task Merging (same-interval fusion)
     ↓ Codegen (src/codegen/)
         ↓ PlatformBackend ─────→ Arduino (.ino)
                          ─────→ ESP-IDF (.cpp + FreeRTOS)
@@ -155,11 +156,23 @@ capabilities:
   reserved: [GPIO6, GPIO7, GPIO8, GPIO9, GPIO10, GPIO11]
 ```
 
-The resolver catches:
-- output assigned to an input-only pin
-- pin wired to integrated SPI flash
-- PWM on a pin the board cannot drive
-- ADC2 used while WiFi is declared
+The resolver runs three checks in order:
+
+1. **HAL boundary check** (`checkPinBoundaries`) — derives the set of valid physical GPIOs
+   from the union of `pins:` values and `pin_caps:` keys in the board YAML, then verifies
+   every device and bus pin against that set. A pin outside this set (e.g. `GPIO70` on an
+   Uno that tops out at `GPIO19`) is a hard error tagged `[HAL]`. Bare numeric pins (`"25"`)
+   are normalised to `"GPIO25"` before the lookup.
+
+2. **Capability check** (`checkPinCapabilities`) — validates declared pins against
+   capability tags in the board YAML:
+   - `reserved` — pin wired to integrated SPI flash or PSRAM; any use is an error
+   - `input_only` — pin cannot drive output; routing an output here is an error
+   - `strapping` — boot-mode sensitive; driving it LOW at reset may block startup (warning)
+   - ADC2 vs Wi-Fi conflict — ADC2 pins are unavailable while Wi-Fi is active (ESP32 family, warning)
+
+3. **Framework compatibility check** (`checkFrameworkCompatibility`) — warns when
+   `--target` requests a framework the board's `frameworks:` list does not include.
 
 **Adding a new board**: copy any `boards/*.yaml`, fill in real vendor data
 (not from memory — cite the datasheet), add a test in `test/compile.test.ts`.
@@ -179,6 +192,86 @@ The resolver catches:
 
 **Planned (Zephyr Phase 2+)**: `nrf52840_dk`, `stm32f4_disco`, `mimxrt1060_evk`,
 `nucleo_f767zi`, `bl5340_dvk`.
+
+---
+
+## 4a. Middle-end Optimizer (`src/optimizer/`)
+
+The optimizer runs between the validator and codegen. It operates on the
+`PulseProject` IR and returns a new, leaner IR — the original is never mutated.
+Skip it entirely with `--no-optimize` to compare raw vs. optimized output.
+
+```
+PulseProject IR (validated)
+    ↓ DCE pass            removes dead components, parameters, events
+    ↓ Task-merge pass     fuses same-interval tasks into one timer
+PulseProject IR (optimized)
+    ↓ Codegen
+```
+
+### DCE pass (`dce.ts`)
+
+Dead Code Elimination removes three categories of unused declarations:
+
+| Category | What is removed |
+|---|---|
+| Dead components | Devices whose `pin` identifier appears in no action `params` |
+| Dead parameters | Parameters referenced in no action param, log template, or `after:` interval |
+| Dead events | Events that appear in no transition `on:` field |
+
+"Referenced" is determined by scanning all action `params` values and log
+format strings for string matches and `{placeholder}` tokens. A component or
+parameter that survives this scan is live; everything else is pruned.
+
+The removed items vanish from the IR, so codegen never emits `#define`,
+`pinMode`, `enum` values, or struct fields for them.
+
+### Task-merge pass (`merge-tasks.ts`)
+
+Tasks that share the same `every:` interval (in milliseconds) are fused into a
+single synthetic task named `_merged_<N>ms`. The scheduler then maintains one
+deadline per interval rather than N separate comparisons, reducing per-loop
+overhead proportionally.
+
+Tasks with different intervals, or tasks whose interval is a named parameter
+(not a literal), are left unchanged.
+
+### CLI flag
+
+`--no-optimize` bypasses both passes. Use it to diff the raw and optimized
+outputs and verify what the optimizer removes:
+
+```bash
+node dist/src/cli.js model.yaml --no-optimize --output raw.ino
+node dist/src/cli.js model.yaml              --output opt.ino
+diff raw.ino opt.ino
+```
+
+---
+
+## 4b. Semantic Validator (`src/analysis/validate.ts`)
+
+The validator runs after the parser and board resolver but before the optimizer.
+It collects non-fatal warnings that do not block code generation — the parser
+already stops on hard errors. Each check has a machine-readable code:
+
+| Code | What it catches |
+|---|---|
+| `UNREACHABLE_STATE` | A leaf state that no transition ever targets and is not the initial state |
+| `UNUSED_EVENT` | An event declared in `events:` but never used in any transition or command |
+| `UNUSED_ACTION` | An action in the `actions:` catalogue that is never invoked from any transition, state entry/exit, task, or command |
+| `DUPLICATE_TRANSITION` | Two unguarded non-wildcard transitions from the same state on the same event; the second can never fire |
+| `PARTIAL_BINDING` | A bus binding that declares some but not all pins in a required group (e.g. `sda` without `scl`) |
+| `PARSER` | Soft notices lifted from `parser.warnings` (deprecated shapes, possible oversights) |
+
+`UNUSED_ACTION` requires the parser to preserve the declared action names in
+`PulseSystem.declaredActionNames`. This field is populated from the
+`actions:` catalogue during parsing and is absent when the project has no
+`actions:` block.
+
+`DUPLICATE_TRANSITION` excludes wildcard sources (`from: '*'`) and guarded
+transitions — multiple unguarded wildcard handlers are intentional fan-out, and
+guards differentiate otherwise identical transitions by design.
 
 ---
 
@@ -424,12 +517,18 @@ test/harness/
 pulse-ir/
 ├── src/
 │   ├── model/
-│   │   └── index.ts          IR type definitions
+│   │   └── index.ts          IR type definitions (PulseProject, PulseSystem, …)
 │   ├── parser/
-│   │   ├── index.ts           YAML → IR + validation
-│   │   ├── board-resolver.ts  logical pin → physical GPIO
+│   │   ├── index.ts           YAML → IR + hard-error validation
+│   │   ├── board-resolver.ts  logical pin → physical GPIO; HAL boundary + capability checks
 │   │   ├── fs-resolver.ts     filesystem imports
 │   │   └── resolver.ts        SourceResolver interface
+│   ├── analysis/
+│   │   └── validate.ts        semantic validator (post-parse warnings)
+│   ├── optimizer/
+│   │   ├── index.ts           optimizer entry point; chains DCE + Task Merge
+│   │   ├── dce.ts             Dead Code Elimination pass
+│   │   └── merge-tasks.ts     Task Merging pass (same-interval fusion)
 │   ├── codegen/
 │   │   ├── backend.ts         PlatformBackend interface
 │   │   ├── index.ts           Codegen class (platform-agnostic traversal)
@@ -446,8 +545,6 @@ pulse-ir/
 │   │   ├── diagram.ts         Mermaid diagram
 │   │   ├── cmake.ts           ESP-IDF CMakeLists.txt
 │   │   └── zephyr_project.ts  Zephyr project files   ← in progress
-│   ├── analysis/
-│   │   └── validate.ts        semantic validation (post-parse)
 │   └── cli.ts                 CLI entry point
 ├── test/
 │   ├── backends.test.ts       fixture tests

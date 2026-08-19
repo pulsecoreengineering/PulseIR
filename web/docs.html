@@ -394,6 +394,13 @@
     <a href="#diagnostics">diagnostics:</a>
     <a href="#libraries">libraries:</a>
     <a href="#imports">imports:</a>
+  </div>
+  <div class="nav-group">
+    <div class="nav-group-label">Compiler</div>
+    <a href="#compiler-pipeline">Pipeline</a>
+    <a class="sub" href="#optimizer">Optimizer</a>
+    <a class="sub" href="#validator">Validator warnings</a>
+    <a class="sub" href="#hal-checks">HAL / board checks</a>
     <a href="#errors">Common Errors</a>
   </div>
 </nav>
@@ -520,23 +527,20 @@
 
   <!-- Boards -->
   <h3 id="boards">Supported boards</h3>
-  <p>Set the <code class="inline">target:</code> key to one of these board identifiers.</p>
+  <p>Pass the board identifier to <code class="inline">--board</code> on the CLI or set <code class="inline">target.board:</code> in the model. These identifiers match the filenames in <code class="inline">boards/*.yaml</code> exactly — a typo produces a clear error listing what is available.</p>
   <div class="table-wrap">
     <table>
-      <tr><th>Identifier</th><th>Board</th><th>Platform</th></tr>
-      <tr><td><code>esp32</code></td><td>ESP32 (generic)</td><td>Arduino / ESP-IDF</td></tr>
-      <tr><td><code>esp32s3</code></td><td>ESP32-S3</td><td>Arduino / ESP-IDF</td></tr>
-      <tr><td><code>esp32s2</code></td><td>ESP32-S2</td><td>Arduino / ESP-IDF</td></tr>
-      <tr><td><code>esp32c3</code></td><td>ESP32-C3</td><td>Arduino / ESP-IDF</td></tr>
-      <tr><td><code>esp32h2</code></td><td>ESP32-H2</td><td>Arduino / ESP-IDF</td></tr>
-      <tr><td><code>uno</code></td><td>Arduino Uno</td><td>Arduino (AVR)</td></tr>
-      <tr><td><code>mega</code></td><td>Arduino Mega 2560</td><td>Arduino (AVR)</td></tr>
-      <tr><td><code>nano</code></td><td>Arduino Nano</td><td>Arduino (AVR)</td></tr>
-      <tr><td><code>rp2040</code></td><td>Raspberry Pi Pico / RP2040</td><td>Arduino (RP2040)</td></tr>
-      <tr><td><code>esp8266</code></td><td>ESP8266 (NodeMCU, Wemos D1)</td><td>Arduino</td></tr>
-      <tr><td><code>nano33ble</code></td><td>Arduino Nano 33 BLE</td><td>Arduino (nRF52840)</td></tr>
-      <tr><td><code>teensy41</code></td><td>Teensy 4.1</td><td>Teensyduino</td></tr>
+      <tr><th>Identifier</th><th>Board</th><th>Platform</th><th>GPIO range</th></tr>
+      <tr><td><code>arduino_uno</code></td><td>Arduino Uno (ATmega328P)</td><td>Arduino (AVR)</td><td>GPIO0–GPIO19</td></tr>
+      <tr><td><code>arduino_mega</code></td><td>Arduino Mega 2560 (ATmega2560)</td><td>Arduino (AVR)</td><td>GPIO0–GPIO69</td></tr>
+      <tr><td><code>esp32_devkit_v4</code></td><td>ESP32 DevKit V4</td><td>Arduino / ESP-IDF</td><td>non-contiguous, see board profile</td></tr>
+      <tr><td><code>esp32_s3_devkit</code></td><td>ESP32-S3 DevKitC</td><td>Arduino / ESP-IDF</td><td>GPIO0–GPIO21, GPIO35–GPIO48</td></tr>
+      <tr><td><code>rp2040_pico</code></td><td>Raspberry Pi Pico (RP2040)</td><td>Arduino (RP2040)</td><td>GPIO0–GPIO28 (gaps at 23, 24)</td></tr>
     </table>
+  </div>
+  <div class="callout info">
+    <span class="callout-icon">ℹ</span>
+    <span>The HAL boundary checker derives valid GPIO identifiers directly from the board profile — there is no separate chip database. Adding a new board YAML automatically extends pin validation with no code changes needed.</span>
   </div>
 
   <!-- Bus types -->
@@ -1357,6 +1361,83 @@
 </section>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
+<section id="compiler-pipeline">
+  <h2>Compiler Pipeline</h2>
+  <p>Every model passes through the same stages before code is written. The pipeline is fail-fast: a hard error in any stage stops compilation and reports an actionable message.</p>
+  <pre><span class="yc">YAML model (one file or a directory linked by imports:)</span>
+  ↓ SourceResolver + Merge
+  ↓ Parser                  hard errors (unknown refs, malformed schema, pin conflicts)
+  ↓ Board Resolver          logical pin → physical GPIO; HAL boundary + capability checks
+  ↓ Validator               semantic warnings (unreachable states, unused actions, …)
+  ↓ Optimizer               DCE + Task Merging   ← skip with <span class="yc">--no-optimize</span>
+  ↓ Codegen
+<span class="yc">C++ / Python firmware</span></pre>
+
+  <h3 id="optimizer">Optimizer</h3>
+  <p>The optimizer runs two passes on the IR before codegen. It returns a new, leaner IR — the original is never mutated. Both passes are enabled by default; use <code class="inline">--no-optimize</code> to bypass them and compare raw vs. optimized output.</p>
+
+  <h4>Dead Code Elimination (DCE)</h4>
+  <p>Removes hardware that is declared but never used:</p>
+  <ul>
+    <li><strong>Dead components</strong> — devices whose <code class="inline">pin</code> identifier appears in no action <code class="inline">params</code></li>
+    <li><strong>Dead parameters</strong> — parameters referenced in no action param, <code class="inline">log:</code> template, or <code class="inline">after:</code> interval</li>
+    <li><strong>Dead events</strong> — events that appear in no transition <code class="inline">on:</code> field</li>
+  </ul>
+  <p>Removed items produce no <code class="inline">#define</code>, <code class="inline">pinMode</code>, enum value, or struct field in the generated sketch.</p>
+
+  <h4>Task Merging</h4>
+  <p>Tasks that share the same <code class="inline">every:</code> interval (in milliseconds) are fused into a single synthetic task named <code class="inline">_merged_&lt;N&gt;ms</code>. The scheduler then maintains one deadline per interval rather than N separate comparisons. Tasks with different intervals, or whose interval is a named parameter, are left unchanged.</p>
+
+  <pre><span class="yc"># Before merging: two separate 200 ms timers in loop()</span>
+<span class="yk">tasks</span>:
+  <span class="yk">read_temp</span>:  { <span class="yk">every</span>: <span class="yn">200</span>, <span class="yk">do</span>: <span class="ys">read_temperature</span> }
+  <span class="yk">blink_led</span>:  { <span class="yk">every</span>: <span class="yn">200</span>, <span class="yk">do</span>: <span class="ys">toggle_led</span> }
+
+<span class="yc"># After merging: one _merged_200ms task calling both actions</span></pre>
+
+  <div class="callout info">
+    <span class="callout-icon">ℹ</span>
+    <span>Pass <code class="inline">--no-optimize</code> to bypass the entire optimizer and inspect the raw, unoptimized IR. Diff the two outputs to verify exactly what gets removed.</span>
+  </div>
+
+  <h3 id="validator">Validator warnings</h3>
+  <p>The semantic validator runs after the parser and collects non-fatal warnings. Each has a machine-readable code printed alongside the message.</p>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Code</th><th>What it catches</th></tr>
+      <tr><td><code>UNREACHABLE_STATE</code></td><td>A leaf state that no transition ever targets and is not the initial state — it will never be entered.</td></tr>
+      <tr><td><code>UNUSED_EVENT</code></td><td>An event declared in <code>events:</code> but never referenced in any transition or command — almost always a typo in an <code>on:</code> field.</td></tr>
+      <tr><td><code>UNUSED_ACTION</code></td><td>An action in the <code>actions:</code> catalogue that is never invoked from any transition, state entry/exit, task, or command. It will produce a dead stub function that is never called.</td></tr>
+      <tr><td><code>DUPLICATE_TRANSITION</code></td><td>Two unguarded transitions from the same state on the same event. The second can never fire because the first always wins. (Guarded and wildcard-source transitions are excluded.)</td></tr>
+      <tr><td><code>PARTIAL_BINDING</code></td><td>A bus binding that declares some but not all pins in a required group — for example <code>sda</code> without <code>scl</code>. Declaring none is intentional (use board defaults); declaring half is almost always a copy-paste mistake.</td></tr>
+    </table>
+  </div>
+
+  <h3 id="hal-checks">HAL / board checks</h3>
+  <p>When a <code class="inline">--board</code> is declared, the board resolver runs three checks after resolving logical pin names to physical GPIOs:</p>
+
+  <h4>HAL boundary check</h4>
+  <p>Derives the set of valid physical GPIOs from the board profile (<code class="inline">pins:</code> values ∪ <code class="inline">pin_caps:</code> keys) and verifies every device and bus pin against that set. A pin outside this set is a hard error:</p>
+  <div class="callout err" style="background:var(--err-bg);color:var(--err-fg);border:1px solid color-mix(in srgb,var(--err-fg) 18%,transparent)">
+    <span class="callout-icon">✗</span>
+    <span><code>[HAL] Device "motor" is assigned to GPIO70, which does not exist on Arduino Uno. Check your target board — valid GPIO identifiers are derived from the board profile at boards/arduino_uno.yaml.</code></span>
+  </div>
+  <p>Bare numeric pins (<code class="inline">"25"</code>) are normalised to <code class="inline">"GPIO25"</code> before the lookup, so both notations are accepted.</p>
+
+  <h4>Capability check</h4>
+  <p>Validates declared pins against capability tags in the board YAML:</p>
+  <ul>
+    <li><code class="inline">reserved</code> — pin wired to internal SPI flash or PSRAM; any use is a hard error</li>
+    <li><code class="inline">input_only</code> — pin cannot drive output; assigning an output here is a hard error</li>
+    <li><code class="inline">strapping</code> — boot-mode sensitive; driving it LOW at reset may prevent booting (warning)</li>
+    <li>ADC2 + Wi-Fi — ADC2 pins are unavailable while Wi-Fi is active on the ESP32 family (warning)</li>
+  </ul>
+
+  <h4>Framework compatibility</h4>
+  <p>Warns when <code class="inline">--target</code> requests a framework the board's <code class="inline">frameworks:</code> list does not include.</p>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════════ -->
 <section id="errors">
   <h2>Common Errors</h2>
   <p>The parser produces specific, actionable error messages. Here are the most frequent mistakes and what they mean.</p>
@@ -1413,6 +1494,27 @@
     <span><code>commands: declares no "map", so no command would ever be recognised</code></span>
   </div>
   <p>The <a href="#commands">commands:</a> block uses a <code>map:</code> key (not <code>commands:</code>) to list the dispatch table. See the commands section for the correct shape.</p>
+
+  <h3>Unused action warning</h3>
+  <div class="callout warn" style="background:var(--warn-bg);color:var(--warn-fg);border:1px solid color-mix(in srgb,var(--warn-fg) 18%,transparent)">
+    <span class="callout-icon">⚠</span>
+    <span><code>[UNUSED_ACTION] Action "old_handler" is declared but never invoked — it will produce a stub function that is never called</code></span>
+  </div>
+  <p>An action in the top-level <code>actions:</code> catalogue is not referenced anywhere — no transition <code>do:</code>, no state <code>entry:</code>/<code>exit:</code>, no task, no command. This is almost always a leftover after a rename or a removed transition. Either delete the action declaration or add a reference to it.</p>
+
+  <h3>Duplicate transition warning</h3>
+  <div class="callout warn" style="background:var(--warn-bg);color:var(--warn-fg);border:1px solid color-mix(in srgb,var(--warn-fg) 18%,transparent)">
+    <span class="callout-icon">⚠</span>
+    <span><code>[DUPLICATE_TRANSITION] Transition 3 (from "idle" on "START") duplicates transition 1 — both have no guard, so the second will never fire</code></span>
+  </div>
+  <p>Two unguarded transitions share the same source state and event. The state machine always picks the first matching transition, so the second is dead code. Add a <code>guard:</code> to differentiate them, or remove the duplicate.</p>
+
+  <h3>HAL pin does not exist on board</h3>
+  <div class="callout err" style="background:var(--err-bg);color:var(--err-fg);border:1px solid color-mix(in srgb,var(--err-fg) 18%,transparent)">
+    <span class="callout-icon">✗</span>
+    <span><code>[HAL] Device "motor" is assigned to GPIO70, which does not exist on Arduino Uno. Check your target board — valid GPIO identifiers are derived from the board profile at boards/arduino_uno.yaml.</code></span>
+  </div>
+  <p>A device or bus pin references a GPIO that the target board does not have. This usually happens when switching boards without updating pin assignments — for example, a model written for the Arduino Mega (GPIO0–GPIO69) will fail on the Uno (GPIO0–GPIO19) if it uses GPIO20 or above. Update the pin to one that exists on the target board, or switch to a board with a larger GPIO set.</p>
 </section>
 
 <hr>

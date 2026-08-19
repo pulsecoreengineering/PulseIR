@@ -553,6 +553,13 @@ export interface PulseSystem {
   /** Pre-dispatch safety rules checked at the top of every loop() iteration. */
   safety?: Safety;
 
+  /**
+   * Names of every action declared in the top-level `actions:` catalogue,
+   * preserved here so the validator can detect unused entries.
+   * Absent when the project had no `actions:` block.
+   */
+  declaredActionNames?: string[];
+
   metadata?: Metadata;
 }
 
