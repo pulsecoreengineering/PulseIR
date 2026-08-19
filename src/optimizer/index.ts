@@ -8,17 +8,29 @@
  * Each pass is a pure function (PulseProject → PulseProject) that never mutates
  * its input. Passes are chained in order; warnings from every pass accumulate.
  *
- * Currently active passes (in order):
- *   1. Dead Code Elimination — removes unused components and parameters
+ * Pass order:
+ *   1. Dead Code Elimination — removes unused components, parameters, and events
+ *   2. Task Merging          — fuses same-interval tasks into one timer loop
+ *
+ * DCE runs first so task merging never has to reason about actions that
+ * reference already-eliminated symbols.
  */
 
 import type { PulseProject } from '../model/types.js';
 import { eliminateDeadCode } from './dce.js';
+import { mergeTasks } from './merge-tasks.js';
 
 export interface OptimizeResult {
   project: PulseProject;
   /** All warnings emitted across every pass, in order. */
   warnings: string[];
+}
+
+export interface OptimizeOptions {
+  /** Dead Code Elimination: remove unused components, parameters, and events. Default: true. */
+  dce?: boolean;
+  /** Task Merging: fuse tasks that share the same interval into one timer loop. Default: true. */
+  mergeTasks?: boolean;
 }
 
 /**
@@ -29,15 +41,21 @@ export interface OptimizeResult {
  */
 export function optimize(
   project: PulseProject,
-  opts: { dce?: boolean } = {},
+  opts: OptimizeOptions = {},
 ): OptimizeResult {
-  const { dce = true } = opts;
+  const { dce = true, mergeTasks: doMergeTasks = true } = opts;
   const warnings: string[] = [];
 
   let current = project;
 
   if (dce) {
     const result = eliminateDeadCode(current);
+    current = result.project;
+    warnings.push(...result.warnings);
+  }
+
+  if (doMergeTasks) {
+    const result = mergeTasks(current);
     current = result.project;
     warnings.push(...result.warnings);
   }

@@ -13,6 +13,7 @@ import type {
   PulseSystem,
   Component,
   Parameter,
+  Event,
   Action,
   State,
 } from '../model/types.js';
@@ -137,10 +138,38 @@ export function eliminateDeadCode(project: PulseProject): DceResult {
     }
   }
 
+  // ── Events ─────────────────────────────────────────────────────────────────
+  // An event is "live" when it appears in:
+  //   • a transition's event: field (something reacts to it)
+  //   • a command's event: field (a serial command triggers it)
+  //   • a component's config.raises field (an ISR fires it)
+  // An event declared but unreachable in any of those ways will never cause
+  // a state transition and is safe to remove.
+
+  const referencedEvents = new Set<string>();
+
+  for (const t of sys.transitions) {
+    if (t.event) referencedEvents.add(t.event);
+  }
+  for (const cmd of sys.commands?.commands ?? []) {
+    if (cmd.event) referencedEvents.add(cmd.event);
+  }
+  // ISR-raises config: the component fires this event on interrupt.
+  for (const c of sys.components ?? []) {
+    const raises = c.config?.raises as string | undefined;
+    if (raises) referencedEvents.add(raises);
+  }
+
+  // The validator already emits [UNUSED_EVENT] warnings before the optimizer
+  // runs, so we don't duplicate them here — we just quietly remove dead events
+  // from the IR so the codegen never sees their enum values or dispatch cases.
+  const prunedEvents: Event[] = sys.events.filter(e => referencedEvents.has(e.name));
+
   // ── Rebuild ────────────────────────────────────────────────────────────────
 
   const prunedSystem: PulseSystem = {
     ...sys,
+    events:     prunedEvents,
     components: prunedComponents.length > 0 ? prunedComponents : undefined,
     parameters: prunedParameters.length > 0 ? prunedParameters : undefined,
   };
