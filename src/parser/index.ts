@@ -567,6 +567,7 @@ export class Parser {
       telemetry,
       communication,
       safety,
+      declaredActionNames: actionCatalogue.size > 0 ? [...actionCatalogue.keys()] : undefined,
     };
   }
 
