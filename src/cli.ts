@@ -26,6 +26,7 @@ import { fileURLToPath } from 'url';
 import { Parser } from './parser/index.js';
 import { FileResolver } from './parser/fs-resolver.js';
 import type { SourceResolver } from './parser/resolver.js';
+import { optimize } from './optimizer/index.js';
 import { Codegen } from './codegen/index.js';
 import type { GeneratedProject } from './codegen/index.js';
 import type { DriverPlugin } from './codegen/driver-plugin.js';
@@ -540,6 +541,13 @@ async function cmdGenerate(args: string[]): Promise<void> {
       }
       for (const d of validationResult.diagnostics.filter(d => d.severity === 'warning')) {
         console.warn(`⚠️  [${d.code}] ${d.message}`);
+      }
+
+      // Middle-end optimizer: DCE and future passes.
+      const optResult = optimize(project);
+      project = optResult.project;
+      for (const w of optResult.warnings) {
+        console.warn(`⚠️  ${w}`);
       }
 
       // MicroPython target — Python codegen, no C++ artifacts.
