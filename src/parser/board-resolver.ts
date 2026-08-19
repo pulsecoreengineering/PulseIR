@@ -307,6 +307,101 @@ export function checkPinCapabilities(
 }
 
 /**
+ * Derive the set of physical GPIO identifiers that are known to exist on a
+ * board from the data already present in the board file:
+ *
+ *   • Every value in `pins:` is a resolved physical identifier (e.g. "GPIO13").
+ *   • Every key in `pin_caps:` names a physical pin with a special attribute
+ *     (reserved, input-only, strapping) — these exist on the silicon even if
+ *     they are not user-reachable.
+ *
+ * The union of both sets is the "known physical GPIO" set.  Any pin that falls
+ * outside this set is either a typo or a GPIO number from a different, larger
+ * chip.
+ *
+ * Returns null when the board file contains no pin data (custom boards without
+ * a full pins map), so the caller can skip the check rather than false-alarm.
+ */
+function deriveBoardValidPins(board: BoardDefinition): Set<string> | null {
+  const physicalFromMap = Object.values(board.pins);
+  const physicalFromCaps = Object.keys(board.pinCaps ?? {});
+  const all = [...physicalFromMap, ...physicalFromCaps];
+  if (all.length === 0) return null;
+  return new Set(all);
+}
+
+/**
+ * Normalise a raw pin value to the "GPIO<N>" format used throughout board
+ * files.  A bare integer string like "13" is treated as GPIO13; a value that
+ * already begins with "GPIO" is returned unchanged; anything else (a logical
+ * name that survived board resolution, or an interface-specific label) passes
+ * through so it can be silently skipped rather than false-alarming.
+ */
+function normalizePhysicalPin(raw: string): string {
+  return /^\d+$/.test(raw) ? `GPIO${raw}` : raw;
+}
+
+/**
+ * Check that every physical pin used in the project exists on the target board.
+ *
+ * Called after resolveBoard() so all logical names (D13, A0, LED_BUILTIN) have
+ * already been rewritten to their physical GPIO identifiers.  A pin that was
+ * not rewritten — because it was already a physical name, or because no board
+ * was declared for a logical name — is checked directly.
+ *
+ * A bare numeric pin ("13") is normalised to "GPIO13" before the lookup, since
+ * both notations refer to the same physical line and many Arduino sketches use
+ * the numeric form.
+ *
+ * Skips the check silently when the board file does not contain enough data to
+ * derive a reliable valid-pin set (e.g. a custom board with an empty pins map).
+ *
+ * Returns an array of violations; the caller decides how to report them.
+ */
+export function checkPinBoundaries(
+  project: PulseProject,
+  board: BoardDefinition,
+): PinViolation[] {
+  const validPins = deriveBoardValidPins(board);
+  if (!validPins) return [];   // board file too sparse to be authoritative
+
+  const violations: PinViolation[] = [];
+
+  const check = (pin: string, label: string) => {
+    if (!pin) return;
+    const normalized = normalizePhysicalPin(pin);
+    // Skip anything that doesn't look like a GPIO identifier — a logical name
+    // that survived resolution (shouldn't happen after resolveBoard) or a
+    // non-GPIO bus label would produce a noisy false positive.
+    if (!normalized.startsWith('GPIO')) return;
+    if (!validPins.has(normalized)) {
+      violations.push({
+        severity: 'error',
+        message:
+          `[HAL] ${label} is assigned to ${pin}, which does not exist on ${board.name}. ` +
+          `Check your target board — valid GPIO identifiers are derived from the board ` +
+          `profile at boards/${board.name.toLowerCase().replace(/\s+/g, '_')}.yaml.`,
+      });
+    }
+  };
+
+  for (const device of project.system.components ?? []) {
+    const pin = String(device.config?.pin ?? '');
+    check(pin, `Device "${device.name}"`);
+  }
+
+  for (const resource of project.system.resources ?? []) {
+    if (!resource.binding) continue;
+    for (const field of BUS_PIN_FIELDS_LIST) {
+      const pin = String((resource.binding as Record<string, unknown>)[field] ?? '');
+      check(pin, `Bus "${resource.name}" (field: ${field})`);
+    }
+  }
+
+  return violations;
+}
+
+/**
  * Validate that the chosen --target is compatible with the board's declared
  * frameworks.  Emits a warning string rather than throwing so the CLI can
  * decide whether to abort or continue.

@@ -43,7 +43,7 @@ import { CmakeEmitter } from './emit/cmake.js';
 import * as yaml from 'js-yaml';
 import { ZephyrProjectEmitter } from './emit/zephyr_project.js';
 import { Validator } from './analysis/validate.js';
-import { loadBoard, resolveBoard, checkFrameworkCompatibility, checkPinCapabilities } from './parser/board-resolver.js';
+import { loadBoard, resolveBoard, checkFrameworkCompatibility, checkPinCapabilities, checkPinBoundaries } from './parser/board-resolver.js';
 
 // ---------------------------------------------------------------------------
 // TrackingFileResolver — records every file path that the parser reads so
@@ -517,7 +517,10 @@ async function cmdGenerate(args: string[]): Promise<void> {
           // Pin capability check — runs after resolution so physical GPIO
           // identifiers are already in place (logical names like LED_BUILTIN
           // have been rewritten to GPIO2 etc.).
-          const pinViolations = checkPinCapabilities(project, board);
+          const pinViolations = [
+            ...checkPinBoundaries(project, board),
+            ...checkPinCapabilities(project, board),
+          ];
           for (const v of pinViolations) {
             if (v.severity === 'error') {
               console.error(`❌ [board] ${v.message}`);
