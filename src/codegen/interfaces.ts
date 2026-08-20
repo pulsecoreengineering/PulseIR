@@ -79,7 +79,7 @@ const CONSUMED_KEYS: Record<string, string[]> = {
   littlefs: ['format_on_fail'],
   adc: ['unit', 'conversion'],
   ota: ['hostname', 'port'],
-  wifi: ['provision'],
+  wifi: ['provision', 'ap_name'],
 };
 
 /** Binding keys each interface understands; anything else is documented only. */
@@ -95,7 +95,7 @@ const KNOWN_KEYS: Record<string, string[]> = {
   onewire: ['pin'],
   eeprom: ['size'],
   littlefs: ['format_on_fail'],
-  wifi: ['ssid', 'password', 'hostname', 'provision'],
+  wifi: ['ssid', 'password', 'hostname', 'provision', 'ap_name'],
   ethernet: ['cs', 'mac'],
   ble: ['name', 'service'],
   mqtt: ['host', 'port', 'prefix', 'tls', 'username', 'password', 'client_id'],
@@ -266,7 +266,7 @@ export class InterfaceBackend {
           // ── Provisioning variant ────────────────────────────────────────────
           // Credentials are read from ESP32 NVS on boot (falling back to build
           // flags on first run). If WiFi fails 3 times in a row, the device
-          // opens an AP called "PulseIR-Setup" and serves a captive-portal form
+          // opens a provisioning AP and serves a captive-portal form
           // at 192.168.4.1. Saving new credentials writes them to NVS and
           // reboots — no rebuild needed.
           const portalFn  = `startProvisioning_${lower(symbol)}`;
@@ -276,6 +276,9 @@ export class InterfaceBackend {
           const passVar   = `_${lower(symbol)}Pass`;
           const attempVar = `_${lower(symbol)}Attempts`;
           const nvsNs     = `pw_${lower(symbol).slice(0, NVS_NS_MAX_SUFFIX)}`;
+          // ap_name is injected by the caller with the project name as the
+          // default so each project gets a distinct AP without any user config.
+          const apName    = String(binding.ap_name ?? `${lower(symbol)}-setup`);
 
           out.globals.push(
             '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
@@ -293,11 +296,11 @@ export class InterfaceBackend {
             '',
             `static void ${portalFn}() {`,
             '  WiFi.mode(WIFI_AP);',
-            '  WiFi.softAP("PulseIR-Setup");',
+            `  WiFi.softAP(${JSON.stringify(apName)});`,
             `  ${serverVar}.on("/", HTTP_GET, []() {`,
             `    ${serverVar}.send(200, "text/html",`,
-            `      "<!doctype html><title>WiFi Setup</title>"`,
-            `      "<h2>PulseIR WiFi Setup</h2>"`,
+            `      "<!doctype html><title>${apName}</title>"`,
+            `      "<h2>${apName}</h2>"`,
             `      "<form method='POST' action='/save'>"`,
             `      "SSID: <input name='ssid' required><br><br>"`,
             `      "Password: <input type='password' name='pass'><br><br>"`,

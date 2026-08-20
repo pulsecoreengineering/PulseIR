@@ -495,7 +495,16 @@ ${this.generateActionImplementations()}
    */
   private indexInterfaces(): void {
     for (const resource of this.project.system.resources || []) {
-      this.addEmission(resource.name, this.backend.emitInterface(resource, this.sanitizeUpper(resource.name)));
+      // For wifi buses with provisioning enabled, seed ap_name with the project
+      // name so each project gets a distinct AP without any user configuration.
+      // An explicit ap_name in the model takes priority.
+      const emitResource =
+        String(resource.interface) === 'wifi' &&
+        resource.binding?.provision === true &&
+        resource.binding.ap_name === undefined
+          ? { ...resource, binding: { ap_name: `${this.project.name}-setup`, ...resource.binding } }
+          : resource;
+      this.addEmission(resource.name, this.backend.emitInterface(emitResource, this.sanitizeUpper(resource.name)));
     }
 
     // A device that owns its pin initialises itself, so `pump: {type:
