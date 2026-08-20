@@ -241,6 +241,272 @@ tasks:
   if (!msg.includes('scl')) throw new Error(`message should mention missing key "scl": ${msg}`);
 });
 
+// ── Unused actions ────────────────────────────────────────────────────────────
+
+const ACTION_BASE = `
+project: {name: test, version: "1.0"}
+events:
+  BOOT: {source: external}
+machine:
+  states:
+    idle:
+    running:
+  transitions:
+    - {from: idle, on: BOOT, to: running, do: start}
+`;
+
+test('no warning when every declared action is invoked', () => {
+  const yaml = `${ACTION_BASE}
+actions:
+  start: {driver: gpio_control, params: {device: led, value: HIGH}}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO2}
+`;
+  const result = validate(yaml);
+  if (hasCode(result.diagnostics, 'UNUSED_ACTION')) {
+    throw new Error('false positive: start is invoked by the BOOT transition');
+  }
+});
+
+test('warns when a declared action is never invoked', () => {
+  const yaml = `${ACTION_BASE}
+actions:
+  start:      {driver: gpio_control, params: {device: led, value: HIGH}}
+  old_handler: {driver: gpio_control, params: {device: led, value: LOW}}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO2}
+`;
+  const result = validate(yaml);
+  if (!hasCode(result.diagnostics, 'UNUSED_ACTION')) {
+    throw new Error('expected UNUSED_ACTION for old_handler');
+  }
+  const msg = result.diagnostics.find(d => d.code === 'UNUSED_ACTION')!.message;
+  if (!msg.includes('old_handler')) throw new Error(`message should mention "old_handler": ${msg}`);
+  if (hasCode(result.diagnostics.filter(d => d.message.includes('start')), 'UNUSED_ACTION')) {
+    throw new Error('"start" is invoked and should not be flagged');
+  }
+});
+
+test('action invoked in state entry is not flagged', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+actions:
+  init_led: {driver: gpio_control, params: {device: led, value: HIGH}}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO2}
+machine:
+  states:
+    idle:
+      entry: init_led
+  transitions: []
+`;
+  const result = validate(yaml);
+  if (hasCode(result.diagnostics, 'UNUSED_ACTION')) {
+    throw new Error('action used in state entry should not be flagged');
+  }
+});
+
+test('action invoked in state exit is not flagged', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+events:
+  GO: {source: external}
+actions:
+  cleanup: {driver: gpio_control, params: {device: led, value: LOW}}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO2}
+machine:
+  states:
+    idle:
+      exit: cleanup
+    running:
+  transitions:
+    - {from: idle, on: GO, to: running}
+`;
+  const result = validate(yaml);
+  if (hasCode(result.diagnostics, 'UNUSED_ACTION')) {
+    throw new Error('action used in state exit should not be flagged');
+  }
+});
+
+test('action invoked in a task is not flagged', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+actions:
+  read_sensor: {driver: adc_read, params: {device: temp}}
+hardware:
+  devices:
+    temp: {type: analog_input, pin: GPIO34}
+tasks:
+  poll: {every: 500, do: read_sensor}
+`;
+  const result = validate(yaml);
+  if (hasCode(result.diagnostics, 'UNUSED_ACTION')) {
+    throw new Error('action used in a task should not be flagged');
+  }
+});
+
+test('action invoked in a command is not flagged', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+actions:
+  do_reset: {driver: gpio_control, params: {device: led, value: LOW}}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO2}
+  buses:
+    console: {interface: uart, port: 0, baud: 115200}
+commands:
+  source: console
+  map:
+    reset: do_reset
+`;
+  const result = validate(yaml);
+  if (hasCode(result.diagnostics, 'UNUSED_ACTION')) {
+    throw new Error('action used in a command should not be flagged');
+  }
+});
+
+test('no UNUSED_ACTION check when actions block is absent', () => {
+  // Models with no actions: at all should never trigger the check.
+  const result = validate(MACHINE);
+  if (hasCode(result.diagnostics, 'UNUSED_ACTION')) {
+    throw new Error('UNUSED_ACTION fired with no actions block');
+  }
+});
+
+// ── Duplicate transitions ─────────────────────────────────────────────────────
+
+test('no warning when transitions are on different events', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+events:
+  A: {source: external}
+  B: {source: external}
+machine:
+  states:
+    idle:
+    running:
+    stopped:
+  transitions:
+    - {from: idle, on: A, to: running}
+    - {from: idle, on: B, to: stopped}
+`;
+  const result = validate(yaml);
+  if (hasCode(result.diagnostics, 'DUPLICATE_TRANSITION')) {
+    throw new Error('different events should not be flagged');
+  }
+});
+
+test('no warning when transitions are on different source states', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+events:
+  A: {source: external}
+machine:
+  states:
+    idle:
+    running:
+    done:
+  transitions:
+    - {from: idle,    on: A, to: running}
+    - {from: running, on: A, to: done}
+`;
+  const result = validate(yaml);
+  if (hasCode(result.diagnostics, 'DUPLICATE_TRANSITION')) {
+    throw new Error('different sources should not be flagged');
+  }
+});
+
+test('warns when two unguarded transitions share source and event', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+events:
+  GO: {source: external}
+machine:
+  states:
+    idle:
+    a:
+    b:
+  transitions:
+    - {from: idle, on: GO, to: a}
+    - {from: idle, on: GO, to: b}
+`;
+  const result = validate(yaml);
+  if (!hasCode(result.diagnostics, 'DUPLICATE_TRANSITION')) {
+    throw new Error('expected DUPLICATE_TRANSITION for second idle→GO');
+  }
+  const msg = result.diagnostics.find(d => d.code === 'DUPLICATE_TRANSITION')!.message;
+  if (!msg.includes('idle')) throw new Error(`message should mention "idle": ${msg}`);
+  if (!msg.includes('GO'))   throw new Error(`message should mention "GO": ${msg}`);
+});
+
+test('guarded duplicate does not warn (guard differentiates them)', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+events:
+  GO: {source: external}
+machine:
+  states:
+    idle:
+    a:
+    b:
+  transitions:
+    - {from: idle, on: GO, to: a, guard: cond_a}
+    - {from: idle, on: GO, to: b, guard: cond_b}
+`;
+  const result = validate(yaml);
+  if (hasCode(result.diagnostics, 'DUPLICATE_TRANSITION')) {
+    throw new Error('guarded transitions should not be flagged as duplicates');
+  }
+});
+
+test('wildcard source does not warn even with the same event', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+events:
+  RESET: {source: external}
+machine:
+  states:
+    idle:
+    fault:
+  transitions:
+    - {from: "*", on: RESET, to: idle}
+    - {from: "*", on: RESET, to: fault}
+`;
+  const result = validate(yaml);
+  if (hasCode(result.diagnostics, 'DUPLICATE_TRANSITION')) {
+    throw new Error('wildcard sources should not be flagged');
+  }
+});
+
+test('only the second (and later) duplicate is reported, not the first', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+events:
+  GO: {source: external}
+machine:
+  states:
+    idle:
+    a:
+    b:
+  transitions:
+    - {from: idle, on: GO, to: a}
+    - {from: idle, on: GO, to: b}
+`;
+  const result = validate(yaml);
+  const dups = result.diagnostics.filter(d => d.code === 'DUPLICATE_TRANSITION');
+  // The second transition (index 1, number 2) is reported; the first is not.
+  if (dups.length !== 1) throw new Error(`expected 1 DUPLICATE_TRANSITION, got ${dups.length}`);
+  if (!dups[0].message.includes('Transition 2')) {
+    throw new Error(`expected "Transition 2" in message: ${dups[0].message}`);
+  }
+});
+
 // ── Error / warning counts ────────────────────────────────────────────────────
 
 test('errorCount and warningCount return correct values', () => {
