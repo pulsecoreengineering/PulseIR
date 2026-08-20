@@ -502,7 +502,7 @@ ${this.generateActionImplementations()}
         String(resource.interface) === 'wifi' &&
         resource.binding?.provision === true &&
         resource.binding.ap_name === undefined
-          ? { ...resource, binding: { ap_name: `${this.project.name}-setup`, ...resource.binding } }
+          ? { ...resource, binding: { ap_name: `${this.project.name}-${resource.name}`, ...resource.binding } }
           : resource;
       this.addEmission(resource.name, this.backend.emitInterface(emitResource, this.sanitizeUpper(resource.name)));
     }
