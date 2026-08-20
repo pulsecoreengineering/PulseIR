@@ -46,6 +46,9 @@ export interface InterfaceEmission {
  */
 const SECRET_KEY = /(pass|password|secret|token|psk|credential|apikey|api_key)/i;
 
+/** Max chars in an ESP32 NVS namespace (15), minus a short prefix. */
+const NVS_NS_MAX_SUFFIX = 12;
+
 /**
  * An environment-variable reference: `${WIFI_SSID}`.
  *
@@ -76,6 +79,7 @@ const CONSUMED_KEYS: Record<string, string[]> = {
   littlefs: ['format_on_fail'],
   adc: ['unit', 'conversion'],
   ota: ['hostname', 'port'],
+  wifi: ['provision'],
 };
 
 /** Binding keys each interface understands; anything else is documented only. */
@@ -91,7 +95,7 @@ const KNOWN_KEYS: Record<string, string[]> = {
   onewire: ['pin'],
   eeprom: ['size'],
   littlefs: ['format_on_fail'],
-  wifi: ['ssid', 'password', 'hostname'],
+  wifi: ['ssid', 'password', 'hostname', 'provision'],
   ethernet: ['cs', 'mac'],
   ble: ['name', 'service'],
   mqtt: ['host', 'port', 'prefix', 'tls', 'username', 'password', 'client_id'],
@@ -248,17 +252,141 @@ export class InterfaceBackend {
         }
         break;
 
-      case 'wifi':
+      case 'wifi': {
+        // The join always needs a password symbol whether or not the model
+        // mentioned one — it must never carry a real value.
         out.libraries.push(BUILTIN('WiFi', 'WiFi.h', 'Wi-Fi'));
-        // The join always needs a password symbol, whether or not the model
-        // mentioned one - and it must never carry a real value.
         out.defines.push(...this.secretPlaceholder(binding, symbol, 'password'));
-        out.init.push(
-          has('hostname') ? `WiFi.setHostname(${ref('hostname')});` : '',
-          `WiFi.begin(${has('ssid') ? ref('ssid') : '""'}, ${symbol}_PASSWORD);`,
-          '// Blocking here would stall fsm.update(); poll WiFi.status() instead.'
-        );
+
+        const provision  = binding.provision === true;
+        const fn         = `maintain_${lower(symbol)}`;
+        const retryVar   = `_${lower(symbol)}RetryAt`;
+
+        if (provision) {
+          // ── Provisioning variant ────────────────────────────────────────────
+          // Credentials are read from ESP32 NVS on boot (falling back to build
+          // flags on first run). If WiFi fails 3 times in a row, the device
+          // opens an AP called "PulseIR-Setup" and serves a captive-portal form
+          // at 192.168.4.1. Saving new credentials writes them to NVS and
+          // reboots — no rebuild needed.
+          const portalFn  = `startProvisioning_${lower(symbol)}`;
+          const serverVar = `_${lower(symbol)}Server`;
+          const activeVar = `_${lower(symbol)}ProvisioningActive`;
+          const ssidVar   = `_${lower(symbol)}Ssid`;
+          const passVar   = `_${lower(symbol)}Pass`;
+          const attempVar = `_${lower(symbol)}Attempts`;
+          const nvsNs     = `pw_${lower(symbol).slice(0, NVS_NS_MAX_SUFFIX)}`;
+
+          out.globals.push(
+            '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+            '#ifdef ARDUINO_ARCH_ESP32',
+            '#include <Preferences.h>',
+            '#include <WebServer.h>',
+            '#else',
+            '#include <ESP8266WebServer.h>',
+            'using WebServer = ESP8266WebServer;',
+            '#endif',
+            `static char     ${ssidVar}[33];`,
+            `static char     ${passVar}[64];`,
+            `static bool     ${activeVar} = false;`,
+            `static WebServer ${serverVar}(80);`,
+            '',
+            `static void ${portalFn}() {`,
+            '  WiFi.mode(WIFI_AP);',
+            '  WiFi.softAP("PulseIR-Setup");',
+            `  ${serverVar}.on("/", HTTP_GET, []() {`,
+            `    ${serverVar}.send(200, "text/html",`,
+            `      "<!doctype html><title>WiFi Setup</title>"`,
+            `      "<h2>PulseIR WiFi Setup</h2>"`,
+            `      "<form method='POST' action='/save'>"`,
+            `      "SSID: <input name='ssid' required><br><br>"`,
+            `      "Password: <input type='password' name='pass'><br><br>"`,
+            `      "<button type='submit'>Save &amp; Reboot</button></form>");`,
+            '  });',
+            `  ${serverVar}.on("/save", HTTP_POST, []() {`,
+            `    String _s = ${serverVar}.arg("ssid");`,
+            `    String _p = ${serverVar}.arg("pass");`,
+            '    #ifdef ARDUINO_ARCH_ESP32',
+            '    Preferences _prefs;',
+            `    _prefs.begin("${nvsNs}", false);`,
+            '    _prefs.putString("ssid", _s);',
+            '    _prefs.putString("pass", _p);',
+            '    _prefs.end();',
+            '    #endif',
+            `    ${serverVar}.send(200, "text/html", "<h2>Saved - rebooting...</h2>");`,
+            '    delay(1000);',
+            '    ESP.restart();',
+            '  });',
+            `  ${serverVar}.begin();`,
+            `  ${activeVar} = true;`,
+            '}',
+            '',
+            `static void ${fn}() {`,
+            `  if (${activeVar}) { ${serverVar}.handleClient(); return; }`,
+            '  if (WiFi.status() == WL_CONNECTED) return;',
+            `  static unsigned long ${retryVar}  = 0;`,
+            `  static uint8_t       ${attempVar} = 0;`,
+            '  const unsigned long _now = millis();',
+            `  if (_now - ${retryVar} < 5000UL) return;`,
+            `  ${retryVar} = _now;`,
+            `  if (${attempVar} >= 3) { ${portalFn}(); return; }`,
+            `  ${attempVar}++;`,
+            '  WiFi.disconnect();',
+            `  WiFi.begin(${ssidVar}, ${passVar});`,
+            '}',
+            '#endif  // ARDUINO_ARCH_ESP32 || ARDUINO_ARCH_ESP8266',
+          );
+
+          out.init.push(
+            has('hostname') ? `WiFi.setHostname(${ref('hostname')});` : '',
+            '#ifdef ARDUINO_ARCH_ESP32',
+            '{',
+            '  Preferences _p;',
+            `  _p.begin("${nvsNs}", true);`,
+            '  String _s = _p.getString("ssid", "");',
+            '  String _w = _p.getString("pass", "");',
+            '  _p.end();',
+            `  strlcpy(${ssidVar}, _s.length() ? _s.c_str() : ${symbol}_SSID,     sizeof(${ssidVar}));`,
+            `  strlcpy(${passVar}, _w.length() ? _w.c_str() : ${symbol}_PASSWORD, sizeof(${passVar}));`,
+            '}',
+            '#else',
+            `strlcpy(${ssidVar}, ${symbol}_SSID,     sizeof(${ssidVar}));`,
+            `strlcpy(${passVar}, ${symbol}_PASSWORD, sizeof(${passVar}));`,
+            '#endif',
+            `WiFi.begin(${ssidVar}, ${passVar});`,
+          );
+        } else {
+          // ── Simple reconnect variant ────────────────────────────────────────
+          // If the connection drops, maintain_*() retries every 5 seconds.
+          // Credentials always come from build flags.
+          out.globals.push(
+            '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+            `static void ${fn}() {`,
+            '  if (WiFi.status() == WL_CONNECTED) return;',
+            `  static unsigned long ${retryVar} = 0;`,
+            '  const unsigned long _now = millis();',
+            `  if (_now - ${retryVar} < 5000UL) return;`,
+            `  ${retryVar} = _now;`,
+            '  WiFi.disconnect();',
+            `  WiFi.begin(${has('ssid') ? ref('ssid') : '""'}, ${symbol}_PASSWORD);`,
+            '}',
+            '#endif',
+          );
+
+          out.init.push(
+            has('hostname') ? `WiFi.setHostname(${ref('hostname')});` : '',
+            `WiFi.begin(${has('ssid') ? ref('ssid') : '""'}, ${symbol}_PASSWORD);`,
+          );
+        }
+
+        // Both variants run the maintain function every loop() tick.
+        out.loop = [
+          '#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)',
+          `  ${fn}();`,
+          '#endif',
+        ];
         break;
+      }
 
       case 'ethernet':
         out.libraries.push(REGISTRY('Ethernet', 'Ethernet.h', 'Ethernet'));
