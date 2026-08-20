@@ -14,7 +14,7 @@ import { fileURLToPath } from 'url';
 import { Parser, ParseError } from '../src/parser/index.js';
 import { FileResolver } from '../src/parser/fs-resolver.js';
 import { normalizePin, collectPinClaims, findPinConflicts } from '../src/analysis/pins.js';
-import { loadBoard, resolveBoard, checkPinCapabilities } from '../src/parser/board-resolver.js';
+import { loadBoard, resolveBoard, checkPinCapabilities, checkPinBoundaries } from '../src/parser/board-resolver.js';
 
 let failures = 0;
 
@@ -491,6 +491,157 @@ hardware:
   const board      = loadBoard('esp32_devkit_v4');
   const violations = checkPinCapabilities(project, board);
   equal(violations.length, 0, `expected clean, got ${JSON.stringify(violations)}`);
+});
+
+// ============================================================================
+// Board resolver — checkPinBoundaries (HAL boundary check)
+// ============================================================================
+
+console.log('\n🔲 Testing board-resolver (checkPinBoundaries)...\n');
+
+test('checkPinBoundaries: a valid GPIO on the Uno produces no violation', () => {
+  // Arduino Uno has GPIO0–GPIO19 (14 digital + 6 analog).
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO13}
+`);
+  const board = loadBoard('arduino_uno');
+  const violations = checkPinBoundaries(resolveBoard(project, board), board);
+  equal(violations.length, 0, `expected no violations, got ${JSON.stringify(violations)}`);
+});
+
+test('checkPinBoundaries: a GPIO beyond Uno range is a hard error', () => {
+  // GPIO20 does not exist on the ATmega328P — only GPIO0–GPIO19.
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    motor: {type: digital_output, pin: GPIO20}
+`);
+  const board = loadBoard('arduino_uno');
+  const violations = checkPinBoundaries(resolveBoard(project, board), board);
+  assert(
+    violations.some(v => v.severity === 'error' && v.message.includes('[HAL]')),
+    `expected [HAL] error for GPIO20, got ${JSON.stringify(violations)}`,
+  );
+  const msg = violations.find(v => v.severity === 'error')!.message;
+  assert(msg.includes('GPIO20'), `message should mention GPIO20: ${msg}`);
+  assert(msg.includes('Arduino Uno'), `message should name the board: ${msg}`);
+});
+
+test('checkPinBoundaries: Mega GPIO60 is valid (Mega has GPIO0–GPIO69)', () => {
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    relay: {type: digital_output, pin: GPIO60}
+`);
+  const board = loadBoard('arduino_mega');
+  const violations = checkPinBoundaries(resolveBoard(project, board), board);
+  equal(violations.length, 0, 'GPIO60 is valid on Mega');
+});
+
+test('checkPinBoundaries: a Mega pin (GPIO60) is an error on Uno', () => {
+  // Same model, different board — catches cross-board copy-paste mistakes.
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    relay: {type: digital_output, pin: GPIO60}
+`);
+  const board = loadBoard('arduino_uno');
+  const violations = checkPinBoundaries(resolveBoard(project, board), board);
+  assert(
+    violations.some(v => v.severity === 'error'),
+    `GPIO60 should be an error on Uno, got ${JSON.stringify(violations)}`,
+  );
+});
+
+test('checkPinBoundaries: bare numeric pin is normalised to GPIOnn before lookup', () => {
+  // "13" and "GPIO13" refer to the same physical pin; both should pass on Uno.
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    led: {type: digital_output, pin: "13"}
+`);
+  const board = loadBoard('arduino_uno');
+  const violations = checkPinBoundaries(resolveBoard(project, board), board);
+  equal(violations.length, 0, '"13" normalised to GPIO13 and accepted on Uno');
+});
+
+test('checkPinBoundaries: bare numeric out of range is also flagged', () => {
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    motor: {type: digital_output, pin: "70"}
+`);
+  const board = loadBoard('arduino_uno');
+  const violations = checkPinBoundaries(resolveBoard(project, board), board);
+  assert(
+    violations.some(v => v.severity === 'error'),
+    '"70" → GPIO70 should be an error on Uno',
+  );
+});
+
+test('checkPinBoundaries: bus pins are also checked', () => {
+  // I2C pins on an Uno: SDA=GPIO18 (A4), SCL=GPIO19 (A5) — both valid.
+  const project = parse(`${BASE_YAML}
+hardware:
+  buses:
+    sensor_bus: {interface: i2c, sda: GPIO18, scl: GPIO19}
+`);
+  const board = loadBoard('arduino_uno');
+  const violations = checkPinBoundaries(resolveBoard(project, board), board);
+  equal(violations.length, 0, 'standard Uno I2C pins are valid');
+});
+
+test('checkPinBoundaries: bus pin outside board range is flagged', () => {
+  const project = parse(`${BASE_YAML}
+hardware:
+  buses:
+    spi_bus: {interface: spi, sck: GPIO52, miso: GPIO50, mosi: GPIO51}
+`);
+  const board = loadBoard('arduino_uno');
+  const violations = checkPinBoundaries(resolveBoard(project, board), board);
+  assert(
+    violations.some(v => v.severity === 'error' && v.message.includes('[HAL]')),
+    `expected [HAL] errors for GPIO50/51/52 on Uno, got ${JSON.stringify(violations)}`,
+  );
+});
+
+test('checkPinBoundaries: returns empty array when board has no pin data', () => {
+  // A board YAML with an empty pins: {} and no pin_caps should skip the check
+  // silently rather than false-alarming on every pin in the model.
+  // Simulate this with a board whose pins map maps nothing to nothing.
+  // We test indirectly: the function accepts such a board and returns [].
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    led: {type: digital_output, pin: GPIO2}
+`);
+  const sparseBoard = {
+    name: 'custom',
+    mcu: 'unknown',
+    frameworks: ['arduino'],
+    pins: {},       // empty — no data to derive valid set from
+    pinCaps: {},
+  };
+  const violations = checkPinBoundaries(project, sparseBoard);
+  equal(violations.length, 0, 'sparse board skips the check rather than false-alarming');
+});
+
+test('checkPinBoundaries: non-GPIO labels (A0, D4) are silently skipped', () => {
+  // Logical names that survived resolution (or Arduino-style A0/D4 labels)
+  // don't start with "GPIO" after normalisation and should not produce false positives.
+  const project = parse(`${BASE_YAML}
+hardware:
+  devices:
+    analog_in: {type: analog_input, pin: A0}
+`);
+  const board = loadBoard('arduino_uno');
+  // A0 is a logical label; resolveBoard leaves it unchanged if not in the pin map.
+  // checkPinBoundaries should skip non-GPIO labels silently.
+  const violations = checkPinBoundaries(resolveBoard(project, board), board);
+  const halErrors = violations.filter(v => v.message.includes('[HAL]'));
+  equal(halErrors.length, 0, 'non-GPIO labels should not produce [HAL] errors');
 });
 
 // ============================================================================
