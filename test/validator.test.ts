@@ -507,6 +507,74 @@ machine:
   }
 });
 
+// ── Internal transitions (in:) ───────────────────────────────────────────────
+
+test('in: transition on same source+event as on: transition is a duplicate', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+events:
+  TICK: {source: external}
+actions:
+  log_tick: {driver: log, params: {level: INFO, message: tick}}
+machine:
+  states:
+    idle:
+    done:
+  transitions:
+    - {from: idle, on: TICK, to: done}
+    - {from: idle, in: TICK, do: [log_tick]}
+`;
+  const result = validate(yaml);
+  if (!hasCode(result.diagnostics, 'DUPLICATE_TRANSITION')) {
+    throw new Error('in: + on: on same source/event should warn DUPLICATE_TRANSITION');
+  }
+});
+
+test('in: transition on a different event from on: is not a duplicate', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+events:
+  TICK:  {source: external}
+  RESET: {source: external}
+actions:
+  log_tick: {driver: log, params: {level: INFO, message: tick}}
+machine:
+  states:
+    idle:
+    done:
+  transitions:
+    - {from: idle, on: RESET, to: done}
+    - {from: idle, in: TICK, do: [log_tick]}
+`;
+  const result = validate(yaml);
+  if (hasCode(result.diagnostics, 'DUPLICATE_TRANSITION')) {
+    throw new Error('in: on different event than on: should not be flagged');
+  }
+});
+
+test('in: transition parses with internal: true and no target', () => {
+  const yaml = `
+project: {name: test, version: "1.0"}
+events:
+  TICK: {source: external}
+actions:
+  log_tick: {driver: log, params: {level: INFO, message: tick}}
+machine:
+  states:
+    idle:
+    done:
+  transitions:
+    - {from: idle, on: TICK, to: done}
+    - {from: idle, in: TICK, do: [log_tick]}
+`;
+  const project = parse(yaml);
+  const internal = project.system.transitions.find(t => t.internal);
+  if (!internal) throw new Error('expected a transition with internal: true');
+  if (internal.event !== 'TICK') throw new Error(`expected event TICK, got ${internal.event}`);
+  if (internal.target !== undefined) throw new Error('internal transition must have no target');
+  if (internal.source !== 'idle') throw new Error(`expected source idle, got ${internal.source}`);
+});
+
 // ── Error / warning counts ────────────────────────────────────────────────────
 
 test('errorCount and warningCount return correct values', () => {

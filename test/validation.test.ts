@@ -283,7 +283,7 @@ test('rejects a transition with both "on" and "after"', () => {
 test('rejects a transition with neither "on" nor "after"', () => {
   expectReject(
     timed('    - {from: idle, to: busy}'),
-    'neither "on", "after", nor "every"',
+    'neither "on", "after", "every", nor "in"',
     'no trigger'
   );
 });

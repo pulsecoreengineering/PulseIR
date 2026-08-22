@@ -1356,25 +1356,33 @@ ${handlers.join('\n\n')}`;
       for (const idx of indices) {
         if (shadowed) {
           const t = transitions[idx];
+          const dest = t.internal ? '(internal)' : t.target;
           body.push(
             `      // Unreachable: an earlier unguarded transition on this event\n` +
-            `      // always fires first (-> ${t.target}).`
+            `      // always fires first (-> ${dest}).`
           );
           break;
         }
 
         const t = transitions[idx];
         const guard = this.guards.get(idx);
-        const target = this.states[this.resolveEntry(this.resolveRef(t.target!, 'target'))];
         const calls = (t.actions || [])
           .map(a => `        action_${this.sanitize(a.name)}(&systemContext);`)
           .join('\n');
 
-        const fire = [
-          calls,
-          `        fsm.transitionTo(${target.symbol});`,
-          '        return true;',
-        ].filter(Boolean).join('\n');
+        let fire: string;
+        if (t.internal) {
+          // Internal transition: consume the event and run actions, but never
+          // exit/re-enter the state and never call transitionTo().
+          fire = [calls, '        return true;'].filter(Boolean).join('\n');
+        } else {
+          const target = this.states[this.resolveEntry(this.resolveRef(t.target!, 'target'))];
+          fire = [
+            calls,
+            `        fsm.transitionTo(${target.symbol});`,
+            '        return true;',
+          ].filter(Boolean).join('\n');
+        }
 
         if (guard) {
           // A blocked guard must not consume the event - fall through so the
@@ -3635,15 +3643,17 @@ ${implementations.join('\n\n')}`;
         sourceIdx = this.resolveRef(t.source, 'source');
       }
 
-      // Periodic ("every") transitions have no target — they stay in place.
-      // Validate the target only for transitions that actually leave the state.
-      if (t.every === undefined) {
+      // Periodic ("every") and internal transitions have no target — they stay
+      // in place. Validate the target only for transitions that leave the state.
+      if (t.every === undefined && !t.internal) {
         this.resolveEntry(this.resolveRef(t.target!, 'target'));
       }
 
       // Timed transitions never reach an onEvent handler - no event arrives -
       // so they are collected separately and become the state's update tick.
       // Periodic transitions similarly land in the update tick.
+      // Internal transitions fold into transitionsBySource — same handler,
+      // but generateHandler() will omit fsm.transitionTo() for them.
       const bucket = t.after !== undefined ? this.timedBySource
                    : t.every !== undefined ? this.periodicBySource
                    : this.transitionsBySource;

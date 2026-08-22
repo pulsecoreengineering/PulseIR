@@ -757,22 +757,24 @@ export class Parser {
     return list.map((entry, index) => {
       const from = entry.from as StateRef;
       const on = entry.on as string | undefined;
+      const inKey = entry.in as string | undefined;
       const to = entry.to as StateRef;
       const after = this.parseAfter(entry.after, index);
       const every = entry.every !== undefined ? this.parseEvery(entry.every, index) : undefined;
 
-      // Exactly one trigger: on, after, or every.
-      const triggerCount = (on !== undefined ? 1 : 0) + (after !== undefined ? 1 : 0) + (every !== undefined ? 1 : 0);
+      // Exactly one trigger: on, after, every, or in.
+      const triggerCount = (on !== undefined ? 1 : 0) + (after !== undefined ? 1 : 0)
+                         + (every !== undefined ? 1 : 0) + (inKey !== undefined ? 1 : 0);
       if (triggerCount > 1) {
         throw new ParseError(
-          `Transition ${index + 1} has more than one trigger ("on", "after", "every"). ` +
-          'A transition fires on exactly one: an event, a one-shot duration, or a repeating interval.'
+          `Transition ${index + 1} has more than one trigger ("on", "after", "every", "in"). ` +
+          'A transition fires on exactly one: an event, a one-shot duration, a repeating interval, or an internal event.'
         );
       }
       if (triggerCount === 0) {
         throw new ParseError(
-          `Transition ${index + 1} has neither "on", "after", nor "every", so nothing would ` +
-          'ever make it fire. Use "on: SOME_EVENT", "after: 5000", or "every: 1000".'
+          `Transition ${index + 1} has neither "on", "after", "every", nor "in", so nothing would ` +
+          'ever make it fire. Use "on: SOME_EVENT", "after: 5000", "every: 1000", or "in: SOME_EVENT".'
         );
       }
 
@@ -810,6 +812,50 @@ export class Parser {
             ? this.parseGuard(entry.guard)
             : undefined,
           actions,
+          description: entry.description as string | undefined,
+        };
+      }
+
+      // `in:` internal transitions: event-driven, no state change.
+      if (inKey !== undefined) {
+        if (to !== undefined) {
+          throw new ParseError(
+            `Transition ${index + 1} has both "in" and "to". An internal transition ` +
+            'handles the event without leaving the state, so "to" has no meaning here.'
+          );
+        }
+        if (on !== undefined) {
+          throw new ParseError(
+            `Transition ${index + 1} has both "in" and "on". Use "in" alone to name ` +
+            'the event for an internal (non-exiting) transition.'
+          );
+        }
+        if (typeof from !== 'string' || !from.trim()) {
+          throw new ParseError(`Transition ${index + 1} is missing "from"`);
+        }
+        if (from === '*') {
+          throw new ParseError(
+            `Transition ${index + 1} uses "in" from "*". An internal transition is ` +
+            'measured per-state, so "from" must name a real state.'
+          );
+        }
+        if (!this.hasState(from)) {
+          throw new ParseError(`Transition "from" state "${from}" ${this.describeBadRef(from)}`);
+        }
+        if (typeof inKey !== 'string' || !inKey.trim()) {
+          throw new ParseError(`Transition ${index + 1} has an empty "in" value`);
+        }
+        if (!this.eventNames.has(inKey)) {
+          throw new ParseError(`Transition ${index + 1} reacts to unknown event "${inKey}"`);
+        }
+        return {
+          source: from,
+          event: inKey,
+          internal: true,
+          guard: entry.guard !== undefined && entry.guard !== null
+            ? this.parseGuard(entry.guard)
+            : undefined,
+          actions: this.resolveActions(entry.do, catalogue, index),
           description: entry.description as string | undefined,
         };
       }
