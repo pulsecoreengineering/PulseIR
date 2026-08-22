@@ -196,6 +196,7 @@ export class Validator {
 
     system.transitions.forEach((t, i) => {
       if (!t.event || t.source === '*' || t.guard) return;
+      const kind = t.internal ? 'in' : 'on';
       const key = `${t.source}|${t.event}`;
       const first = seen.get(key);
       if (first !== undefined) {
@@ -203,7 +204,7 @@ export class Validator {
           severity: 'warning',
           code: 'DUPLICATE_TRANSITION',
           message:
-            `Transition ${i + 1} (from "${t.source}" on "${t.event}") duplicates transition ${first} — ` +
+            `Transition ${i + 1} (from "${t.source}" ${kind}: "${t.event}") duplicates transition ${first} — ` +
             `both have no guard, so the second will never fire`,
         });
       } else {

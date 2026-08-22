@@ -2,9 +2,14 @@
 #
 # Single file: at this size, splitting would cost more than it saves.
 #
-# Every phase change here is driven by time, and `after:` says so directly:
+# Every phase change is driven by time, and `after:` says so directly:
 # the generated code owns the clock, so there is no TIMER_EXPIRED event to
 # raise and nothing to compare against millis() by hand.
+#
+# The WALK_REQUEST handler uses `in:` — an internal transition that latches the
+# request without exiting the `go` state, so the green-phase timer keeps running
+# undisturbed. A self-transition (`on:` + `to: operating/go`) would restart the
+# clock and could keep the light green indefinitely under button pressure.
 
 project:
   name: traffic_light
@@ -59,13 +64,11 @@ machine:
     night:
 
   transitions:
-    # GATE FINDING: this wants to be an *internal* transition - handle the
-    # event, run the action, stay put. The model has no way to say that, so it
-    # is written as a self-transition. Harmless today because states have no
-    # entry/exit actions, but wrong the moment they do.
+    # `in:` handles the event and runs latch_request without exiting the state,
+    # so entry/exit actions and timers are not disturbed — a true internal
+    # transition, not a self-transition that restarts the clock.
     - from: operating/go
-      on: WALK_REQUEST
-      to: operating/go
+      in: WALK_REQUEST
       do: latch_request
 
     - from: operating/go

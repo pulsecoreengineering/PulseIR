@@ -1,0 +1,116 @@
+# Vending machine — credit accumulation and dispensing.
+#
+# Illustrates `in:` internal transitions: each coin insertion is handled
+# without leaving the `selecting` state, so the display keeps updating and
+# the accumulated credit is never lost to a re-entry reset.
+#
+# Compare the three transition styles used here:
+#   `in:`    — consume an event, run actions, stay put (COIN_INSERT)
+#   `on:`    — consume an event, exit and enter a new state (SELECT, CANCEL)
+#   `after:` — fire a one-shot timer from state entry (idle timeout)
+#
+# GATE FINDING: the credit register itself (`g_credit`) lives in C — the model
+# only says *which phase* the machine is in. add_credit() increments it;
+# enough_credit() reads it. That is the escape hatch working as intended.
+
+project:
+  name: vending_machine
+  version: "1.0"
+  description: Coin-operated dispenser with credit accumulation
+
+target:
+  board: esp32
+
+hardware:
+  devices:
+    display:    { type: digital_output, pin: GPIO21 }
+    motor:      { type: pwm_output,     pin: GPIO22, channel: 0, frequency: 500, resolution: 8 }
+    coin_sense: { type: digital_input,  pin: GPIO34, mode: INPUT }
+    led_ready:  { type: digital_output, pin: GPIO25 }
+    led_busy:   { type: digital_output, pin: GPIO26 }
+
+  buses:
+    console: { interface: uart, port: 0, baud: 115200 }
+
+parameters:
+  idle_timeout_ms:  { type: int, default: 30000, range: [5000, 120000], unit: ms }
+  dispense_ms:      { type: int, default: 2000,  range: [500, 10000],   unit: ms }
+
+events:
+  COIN_INSERT: { source: external, description: A coin was detected by the optical sensor }
+  SELECT:      { source: external, description: The user pressed a product button }
+  CANCEL:      { source: external, description: The user pressed the return/cancel button }
+  DISPENSE_OK: { source: internal, description: Motor reached the end-stop switch }
+
+actions:
+  add_credit:      { driver: custom,        description: Increment g_credit by the coin value }
+  deduct_credit:   { driver: custom,        description: Subtract product price from g_credit }
+  show_credit:     { driver: log,           params: { level: INFO, message: "credit updated" } }
+  start_motor:     { driver: pwm_control,   params: { device: motor, duty: 200 } }
+  stop_motor:      { driver: pwm_control,   params: { device: motor, duty: 0 } }
+  return_coins:    { driver: custom,        description: Activate coin return solenoid }
+  reset_credit:    { driver: custom,        description: Zero g_credit }
+  led_ready_on:    { driver: gpio_control,  params: { device: led_ready, value: HIGH } }
+  led_ready_off:   { driver: gpio_control,  params: { device: led_ready, value: LOW  } }
+  led_busy_on:     { driver: gpio_control,  params: { device: led_busy,  value: HIGH } }
+  led_busy_off:    { driver: gpio_control,  params: { device: led_busy,  value: LOW  } }
+  show_idle_msg:   { driver: log,           params: { level: INFO, message: "insert coin" } }
+  show_thanks_msg: { driver: log,           params: { level: INFO, message: "thank you" } }
+
+machine:
+  initial: idle
+  states:
+    idle:
+    selecting:
+    dispensing:
+
+  transitions:
+
+    # ── idle → selecting ──────────────────────────────────────────────────────
+    - from: idle
+      on: COIN_INSERT
+      to: selecting
+      do: [add_credit, show_credit, led_ready_on]
+
+    # ── selecting: internal coin accumulation ─────────────────────────────────
+    # `in:` keeps the machine in `selecting` while the user feeds coins.
+    # A self-transition (`on:` + `to: selecting`) would re-enter the state and
+    # reset any per-entry state — wrong for a credit counter that must survive
+    # multiple insertions. With `in:` the event is consumed and the actions run,
+    # but the state is never exited.
+    - from: selecting
+      in: COIN_INSERT
+      do: [add_credit, show_credit]
+
+    # Product button pressed with enough credit → dispense.
+    - from: selecting
+      on: SELECT
+      guard:
+        name: enough_credit
+        description: g_credit >= product price
+      to: dispensing
+      do: [deduct_credit, led_ready_off, led_busy_on, start_motor]
+
+    # Cancel while selecting → refund and return to idle.
+    - from: selecting
+      on: CANCEL
+      to: idle
+      do: [return_coins, reset_credit, led_ready_off, show_idle_msg]
+
+    # Idle timeout — nobody pressed anything; return coins and sleep.
+    - from: selecting
+      after: idle_timeout_ms
+      to: idle
+      do: [return_coins, reset_credit, led_ready_off, show_idle_msg]
+
+    # ── dispensing ────────────────────────────────────────────────────────────
+    - from: dispensing
+      on: DISPENSE_OK
+      to: idle
+      do: [stop_motor, led_busy_off, reset_credit, show_thanks_msg]
+
+    # Safety fallback: if the end-stop never fires, stop after dispense_ms.
+    - from: dispensing
+      after: dispense_ms
+      to: idle
+      do: [stop_motor, led_busy_off, reset_credit, show_thanks_msg]

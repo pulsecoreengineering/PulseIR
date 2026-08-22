@@ -222,6 +222,13 @@ export interface Transition {
    * does not accumulate. One of `event`, `after`, or `every` must be set.
    */
   every?: number | string;
+  /**
+   * When true, this is an internal transition: the event is consumed and
+   * actions run, but `transitionTo()` is never called — the state is not
+   * exited, entry/exit hooks do not fire, and timers are not reset.
+   * Set by the parser when `in:` is used instead of `on:` + `to:`.
+   */
+  internal?: boolean;
   guard?: Guard;
   actions?: Action[];
   description?: string;
