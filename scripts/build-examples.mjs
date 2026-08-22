@@ -93,6 +93,10 @@ const SOURCES = [
     file: 'examples/traffic_light.yaml',
   },
   {
+    label: 'vending machine — internal transitions for credit accumulation',
+    file: 'examples/vending_machine.yaml',
+  },
+  {
     label: 'motor controller — speed phases and an overcurrent trip',
     file: 'examples/motor_controller.yaml',
   },
